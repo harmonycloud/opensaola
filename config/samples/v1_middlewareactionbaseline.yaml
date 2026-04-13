@@ -1,9 +1,53 @@
+# Sample MiddlewareActionBaseline (cluster-scoped)
+# A MiddlewareActionBaseline defines reusable action step templates for
+# MiddlewareAction instances. It specifies the ordered steps (CUE, CMD, or HTTP)
+# that are executed when the action runs.
+#
+# Key references:
+#   - spec.baselineType: "PreAction" (runs before reconciliation) or "NormalAction"
+#   - spec.actionType: identifier like "backup", "restore", "healthcheck"
+#   - spec.steps: ordered list of execution steps
 apiVersion: middleware.cn/v1
 kind: MiddlewareActionBaseline
 metadata:
+  name: my-middleware-backup-action
   labels:
-    app.kubernetes.io/name: opensaola
-    app.kubernetes.io/managed-by: kustomize
-  name: middlewareactionbaseline-sample
+    middleware.cn/component: MyMiddleware
+    middleware.cn/packagename: my-middleware-1.0.0
 spec:
-  # TODO(user): Add fields here
+  baselineType: NormalAction
+  actionType: backup
+  supportedBaselines:
+    - my-middleware-standard
+  necessary:
+    backupPath: "/data/backup"
+    compress: false
+  steps:
+    - name: pre-check
+      cue: |
+        import "encoding/json"
+        output: {
+          ready: true
+          message: "Pre-check passed"
+        }
+      output:
+        expose: true
+        type: json
+    - name: run-backup
+      cmd:
+        command:
+          - "/bin/sh"
+          - "-c"
+          - "backup --path=${backupPath} --compress=${compress}"
+      output:
+        expose: true
+        type: text
+    - name: verify-backup
+      http:
+        method: GET
+        url: "http://localhost:8080/api/v1/backup/status"
+        header:
+          Content-Type: "application/json"
+      output:
+        expose: true
+        type: json

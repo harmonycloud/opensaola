@@ -1,9 +1,40 @@
+# Sample MiddlewareConfiguration (cluster-scoped)
+# A MiddlewareConfiguration holds CUE or Go templates for generating Kubernetes
+# resources (ConfigMaps, Secrets, ServiceAccounts, etc.) from configuration values.
+# It is referenced by baselines and middleware instances via the configurations field.
+#
+# The template field contains a CUE expression that receives input parameters
+# and produces Kubernetes resource manifests.
 apiVersion: middleware.cn/v1
 kind: MiddlewareConfiguration
 metadata:
+  name: my-middleware-configmap
   labels:
-    app.kubernetes.io/name: opensaola
-    app.kubernetes.io/managed-by: kustomize
-  name: middlewareconfiguration-sample
+    middleware.cn/component: MyMiddleware
+    middleware.cn/packagename: my-middleware-1.0.0
 spec:
-  # TODO(user): Add fields here
+  template: |
+    import "encoding/yaml"
+
+    parameter: {
+      name:      string
+      namespace: string
+      port:      int | *6379
+      maxMemory: string | *"256mb"
+    }
+
+    output: {
+      apiVersion: "v1"
+      kind:       "ConfigMap"
+      metadata: {
+        name:      "\(parameter.name)-config"
+        namespace: parameter.namespace
+      }
+      data: {
+        "middleware.conf": """
+          port \(parameter.port)
+          maxmemory \(parameter.maxMemory)
+          maxmemory-policy allkeys-lru
+          """
+      }
+    }

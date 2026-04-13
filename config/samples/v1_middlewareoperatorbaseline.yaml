@@ -1,9 +1,50 @@
+# Sample MiddlewareOperatorBaseline (cluster-scoped)
+# A MiddlewareOperatorBaseline provides the default template for creating
+# MiddlewareOperator instances. It defines the GVKs managed by the operator,
+# default deployment spec, RBAC permissions, and global configuration.
+#
+# Key references:
+#   - spec.gvks: list of custom resource GVKs this operator manages
+#   - spec.deployment: default operator Deployment specification
+#   - spec.permissions: RBAC rules for the operator's service account
 apiVersion: middleware.cn/v1
 kind: MiddlewareOperatorBaseline
 metadata:
+  name: my-operator-baseline
   labels:
-    app.kubernetes.io/name: opensaola
-    app.kubernetes.io/managed-by: kustomize
-  name: middlewareoperatorbaseline-sample
+    middleware.cn/component: MyMiddleware
+    middleware.cn/packagename: my-middleware-1.0.0
 spec:
-  # TODO(user): Add fields here
+  gvks:
+    - name: v1
+      group: myoperator.example.com
+      version: v1
+      kind: MyCluster
+  permissionScope: Namespace
+  permissions:
+    - serviceAccountName: my-operator-sa
+      rules:
+        - apiGroups: [""]
+          resources: ["pods", "services", "configmaps", "secrets"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        - apiGroups: ["apps"]
+          resources: ["statefulsets", "deployments"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        - apiGroups: ["myoperator.example.com"]
+          resources: ["myclusters"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  deployment:
+    image: "docker.io/myorg/my-operator:1.0.0"
+    replicas: 1
+    resources:
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+  globe:
+    repository: "docker.io"
+    project: "myorg"
+  configurations:
+    - name: my-operator-configmap

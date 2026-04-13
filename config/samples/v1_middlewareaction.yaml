@@ -1,9 +1,23 @@
+# Sample MiddlewareAction
+# A MiddlewareAction represents a one-shot operational action (e.g., backup,
+# restore, healthcheck) executed against a specific Middleware instance.
+#
+# Key references:
+#   - spec.baseline: must match an existing MiddlewareActionBaseline name
+#   - spec.middlewareName: the target Middleware instance to act upon
+#   - spec.necessary: parameters passed to the action steps
 apiVersion: middleware.cn/v1
 kind: MiddlewareAction
 metadata:
+  name: my-middleware-backup
+  namespace: default
   labels:
-    app.kubernetes.io/name: opensaola
-    app.kubernetes.io/managed-by: kustomize
-  name: middlewareaction-sample
+    middleware.cn/component: MyMiddleware
+    middleware.cn/packagename: my-middleware-1.0.0
 spec:
-  # TODO(user): Add fields here
+  baseline: my-middleware-backup-action
+  middlewareName: my-middleware
+  necessary:
+    backupPath: "/data/backup"
+    compress: true
+    retentionDays: 7

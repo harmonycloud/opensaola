@@ -1,9 +1,22 @@
+# Sample MiddlewareOperator
+# A MiddlewareOperator manages the operator deployment for a middleware type.
+# It deploys and configures the actual operator (e.g., Redis Operator, MySQL Operator)
+# that will then manage Middleware instances.
+#
+# Key references:
+#   - spec.baseline: must match an existing MiddlewareOperatorBaseline name
+#   - spec.globe: global settings available to all middleware instances
 apiVersion: middleware.cn/v1
 kind: MiddlewareOperator
 metadata:
+  name: my-operator
+  namespace: default
   labels:
-    app.kubernetes.io/name: opensaola
-    app.kubernetes.io/managed-by: kustomize
-  name: middlewareoperator-sample
+    middleware.cn/component: MyMiddleware
+    middleware.cn/packagename: my-middleware-1.0.0
 spec:
-  # TODO(user): Add fields here
+  baseline: my-operator-baseline
+  permissionScope: Namespace
+  globe:
+    repository: "docker.io"
+    project: "myorg"

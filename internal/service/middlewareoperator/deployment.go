@@ -37,7 +37,6 @@ import (
 // buildDeployment builds the Deployment
 func buildDeployment(ctx context.Context, cli client.Client, action consts.HandleAction, m *v1.MiddlewareOperator) (err error) {
 	conditionApplyOperator := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeApplyOperator)
-	// if conditionApplyOperator.Status != metav1.ConditionTrue {
 	defer func() {
 		if action != consts.HandleActionDelete {
 			if err != nil {

@@ -1,9 +1,43 @@
+# Sample MiddlewareBaseline (cluster-scoped)
+# A MiddlewareBaseline provides the default template for creating Middleware instances.
+# It defines the GVK of the target custom resource, default parameters, and
+# configuration references that each Middleware instance inherits.
+#
+# Key references:
+#   - spec.operatorBaseline.name: the MiddlewareOperatorBaseline that manages this type
+#   - spec.gvk: the GroupVersionKind of the CR the operator watches
 apiVersion: middleware.cn/v1
 kind: MiddlewareBaseline
 metadata:
+  name: my-middleware-standard
   labels:
-    app.kubernetes.io/name: opensaola
-    app.kubernetes.io/managed-by: kustomize
-  name: middlewarebaseline-sample
+    middleware.cn/component: MyMiddleware
+    middleware.cn/packagename: my-middleware-1.0.0
 spec:
-  # TODO(user): Add fields here
+  operatorBaseline:
+    name: my-operator-baseline
+    gvkName: v1
+  gvk:
+    name: v1
+    group: myoperator.example.com
+    version: v1
+    kind: MyCluster
+  necessary:
+    repository: "docker.io/library"
+    version: "latest"
+    resource:
+      main:
+        limits:
+          cpu: "2"
+          memory: "2Gi"
+        requests:
+          cpu: "1"
+          memory: "1Gi"
+        volume:
+          size: 20
+          storageClass: "standard"
+  parameters:
+    replicas: 3
+    port: 6379
+  configurations:
+    - name: my-middleware-configmap

@@ -367,7 +367,6 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 				if err != nil {
 					return fmt.Errorf("json unmarshal error: %w", err)
 				}
-				// TODO: some resources have no spec, need to handle
 				// Skip creation if spec is empty or has no keys
 				specMap, ok := obj.Object["spec"].(map[string]interface{})
 				if !ok || len(specMap) == 0 {

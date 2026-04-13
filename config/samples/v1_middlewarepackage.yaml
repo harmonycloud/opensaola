@@ -1,9 +1,29 @@
+# Sample MiddlewarePackage (cluster-scoped)
+# A MiddlewarePackage represents an installable middleware distribution package.
+# It describes the metadata (owner, version, type) and catalogs all resources
+# bundled in the package: CRDs, baselines, configurations, and action baselines.
+#
+# Packages are typically created by the saola CLI during `saola install`.
 apiVersion: middleware.cn/v1
 kind: MiddlewarePackage
 metadata:
+  name: my-middleware-1.0.0
   labels:
-    app.kubernetes.io/name: opensaola
-    app.kubernetes.io/managed-by: kustomize
-  name: middlewarepackage-sample
+    middleware.cn/component: MyMiddleware
 spec:
-  # TODO(user): Add fields here
+  name: my-middleware
+  version: "1.0.0"
+  owner: myorg
+  type: my-middleware
+  description: "A sample middleware package for demonstration purposes"
+  catalog:
+    crds:
+      - myclusters.myoperator.example.com
+    definitions:
+      - my-operator-baseline
+      - my-middleware-standard
+    configurations:
+      - my-middleware-configmap
+      - my-operator-configmap
+    actions:
+      - my-middleware-backup-action

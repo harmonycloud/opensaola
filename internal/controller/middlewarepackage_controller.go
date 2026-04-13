@@ -123,10 +123,6 @@ func (r *MiddlewarePackageReconciler) HandlePackage(ctx context.Context, req ctr
 
 	r.Recorder.Eventf(mp, "Normal", "Validated", "Package %s validated successfully", mp.Name)
 
-	// if err = middlewarepackage.HandlePackage(ctx, r.Client, mp); err != nil {
-	//	return err
-	// }
-
 	return nil
 }
 

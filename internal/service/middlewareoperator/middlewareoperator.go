@@ -68,7 +68,6 @@ func IsNoOperatorResource(m *v1.MiddlewareOperator) bool {
 // Check validates MiddlewareOperator
 func Check(ctx context.Context, cli client.Client, m *v1.MiddlewareOperator) error {
 	conditionChecked := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeChecked)
-	// if conditionChecked.Status != metav1.ConditionTrue || conditionChecked.ObservedGeneration < m.Generation {
 	defer func() {
 		log.FromContext(ctx).Info("finished validating MiddlewareOperator", "name", m.Name, "namespace", m.Namespace)
 	}()
@@ -169,12 +168,6 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.MiddlewareOper
 		log.FromContext(ctx).Info("upgrading MiddlewareOperator", "name", m.Name, "namespace", m.Namespace)
 		if conditionChecked.Status == metav1.ConditionTrue {
 			targetVersion := m.Annotations[v1.LabelUpdate]
-			// // Delete already published resources
-			// err = HandleResource(ctx, cli, consts.HandleActionDelete, m)
-			// if err != nil {
-			// 	logger.Log.Errorf("failed to delete resources: %v", err)
-			// 	return err
-			// }
 
 			// Get the new package
 			var mp []v1.MiddlewarePackage

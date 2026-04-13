@@ -51,15 +51,15 @@ RUN sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.tuna.tsing
     && addgroup -g 65532 -S nonroot \
     && adduser -u 65532 -S -G nonroot nonroot
 
-WORKDIR /
+WORKDIR /app
 
 # Copy binaries from builder
 COPY --from=builder --chown=65532:65532 --chmod=0555 /workspace/manager .
 COPY --from=builder --chown=65532:65532 --chmod=0555 /workspace/kubectl /usr/bin/kubectl
 
 # Copy only the runtime config file (not dev config)
-COPY --chown=65532:65532 pkg/config/config.yaml /pkg/config/config.yaml
+COPY --chown=65532:65532 pkg/config/config.yaml /app/pkg/config/config.yaml
 
 USER 65532:65532
 
-ENTRYPOINT ["/manager"]
+ENTRYPOINT ["/app/manager"]

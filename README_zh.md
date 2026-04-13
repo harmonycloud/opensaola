@@ -23,23 +23,20 @@
 OpenSaola 是一个**框架** -- 它本身不包含任何中间件能力。通过安装**中间件包**来教会它如何管理特定的中间件类型。
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                 MiddlewarePackage                    │
-│           (存储为 Secret 的 TAR 归档包)                │
-│                                                     │
-│    包含：基线模板、CUE/Go 模板、操作脚本、配置模板      │
-└──────────────────────┬──────────────────────────────┘
-                       │ 安装
-          ┌────────────┼────────────┬──────────────┐
-          ▼            ▼            ▼              ▼
-   Middleware    Operator      Action        Configuration
-    Baseline     Baseline     Baseline        (配置模板)
-   (中间件基线)  (Operator基线) (操作基线)
-          │            │
-          │            │
-          ▼            ▼
-     Middleware   MiddlewareOperator ──► Deployment
-     (中间件实例)  (管理某类中间件)      (Operator Pod)
+                    MiddlewarePackage
+              (Secret with TAR archive)
+   baselines / templates / actions / configs
+                         |
+                       install
+          +--------------+--------------+---------------+
+          |              |              |               |
+          v              v              v               v
+     Middleware     Operator       Action         Configuration
+      Baseline      Baseline      Baseline         (templates)
+          |              |
+          v              v
+      Middleware   MiddlewareOperator ---> Deployment
+      (instance)    (manages a type)      (operator pod)
 ```
 
 **核心流程：**
@@ -171,8 +168,8 @@ make lint
 |------|------|
 | [技术文档](docs/opensaola-technical.md) | 架构设计、CRD 字段参考、Reconcile 流程、状态机 |
 | [包适配文档](docs/opensaola-packaging.md) | 包格式、基线体系、操作系统、CUE 模板、Redis 完整案例 |
-| [故障排查指南](docs/troubleshooting.md) | 常见问题、调试命令、日志配置 |
-| [升级指南](docs/upgrade-guide.md) | 版本升级流程与回滚 |
+| [故障排查指南](docs/troubleshooting_zh.md) | 常见问题、调试命令、日志配置 |
+| [升级指南](docs/upgrade-guide_zh.md) | 版本升级流程与回滚 |
 | [贡献指南](CONTRIBUTING.md) | 开发环境搭建、架构说明、编码规范 |
 
 ## 参与贡献

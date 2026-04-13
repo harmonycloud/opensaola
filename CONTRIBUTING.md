@@ -1,3 +1,5 @@
+**English** | [中文](CONTRIBUTING_zh.md)
+
 # Contributing to OpenSaola
 
 Thank you for your interest in contributing to OpenSaola! This document provides guidelines, development workflows, and architectural context to help you get started quickly.

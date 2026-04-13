@@ -24,7 +24,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/OpenSaola/opensaola/pkg/resource/logger"
+	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

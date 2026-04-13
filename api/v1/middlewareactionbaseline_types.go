@@ -21,58 +21,76 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // MiddlewareActionBaselineSpec defines the desired state of MiddlewareActionBaseline.
+// It serves as the cluster-scoped template that defines execution steps for MiddlewareAction instances.
 type MiddlewareActionBaselineSpec struct {
-	BaselineType       BaselineType         `json:"baselineType"`
-	ActionType         string               `json:"actionType"`
-	SupportedBaselines []string             `json:"supportedBaselines,omitempty"`
-	Necessary          runtime.RawExtension `json:"necessary,omitempty"`
-	Steps              []Step               `json:"steps"`
+	// BaselineType indicates whether this baseline is a pre-action or normal action.
+	// Valid values: PreAction, NormalAction.
+	BaselineType BaselineType `json:"baselineType"`
+	// ActionType is the type identifier for this action (e.g., "backup", "restore", "healthcheck").
+	ActionType string `json:"actionType"`
+	// SupportedBaselines is the optional list of MiddlewareBaseline names that this action supports.
+	SupportedBaselines []string `json:"supportedBaselines,omitempty"`
+	// Necessary holds required default parameters for this action type.
+	Necessary runtime.RawExtension `json:"necessary,omitempty"`
+	// Steps is the ordered list of execution steps that make up this action.
+	Steps []Step `json:"steps"`
 }
 
+// Step defines a single execution step within a MiddlewareActionBaseline.
 type Step struct {
-	Name   string `json:"name"`
-	Type   string `json:"type,omitempty"`
+	// Name is the unique name identifying this step within the action.
+	Name string `json:"name"`
+	// Type is the optional step type classifier for conditional logic.
+	Type string `json:"type,omitempty"`
+	// Output defines how the step's output is handled and exposed.
 	Output Output `json:"output,omitempty"`
-	CUE    string `json:"cue,omitempty"`
-	CMD    CMD    `json:"cmd,omitempty"`
-	HTTP   Http   `json:"http,omitempty"`
+	// CUE holds the CUE expression to evaluate for this step. Mutually exclusive with CMD and HTTP.
+	CUE string `json:"cue,omitempty"`
+	// CMD holds the command to execute for this step. Mutually exclusive with CUE and HTTP.
+	CMD CMD `json:"cmd,omitempty"`
+	// HTTP holds the HTTP request to execute for this step. Mutually exclusive with CUE and CMD.
+	HTTP Http `json:"http,omitempty"`
 }
 
+// Output defines how a step's execution output is handled.
 type Output struct {
-	Expose bool   `json:"expose,omitempty"`
-	Type   string `json:"type,omitempty"`
+	// Expose indicates whether the step output should be exposed to the parent MiddlewareAction status.
+	Expose bool `json:"expose,omitempty"`
+	// Type is the format type of the output (e.g., for serialization or display).
+	Type string `json:"type,omitempty"`
 }
 
+// CMD defines a command execution step.
 type CMD struct {
+	// Command is the command and arguments to execute as a subprocess.
 	Command []string `json:"command,omitempty"`
 }
 
+// Http defines an HTTP request execution step.
 type Http struct {
-	Method string            `json:"method"`
-	URL    string            `json:"url"`
+	// Method is the HTTP method to use (e.g., GET, POST, PUT, DELETE).
+	Method string `json:"method"`
+	// URL is the target URL for the HTTP request. Supports template variable substitution.
+	URL string `json:"url"`
+	// Header is the optional map of HTTP headers to include in the request.
 	Header map[string]string `json:"header,omitempty"`
-	Body   string            `json:"body,omitempty"`
+	// Body is the optional HTTP request body content. Supports template variable substitution.
+	Body string `json:"body,omitempty"`
 }
 
-// MiddlewareActionBaselineStatus defines the observed state of MiddlewareActionBaseline
+// MiddlewareActionBaselineStatus defines the observed state of MiddlewareActionBaseline.
 type MiddlewareActionBaselineStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
 	// The generation observed by the deployment controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty" protobuf:"varint,1,opt,name=observedGeneration"`
 
-	// Represents the latest available observations of a deployment's current state.
+	// Conditions represent the latest available observations of the baseline's current state.
 	// +patchMergeKey=type
 	// +patchStrategy=merge
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// The state of the middleware.
+	// State is the high-level state of the baseline. Valid values: Available, Unavailable, Updating.
 	// +optional
 	State State `json:"state,omitempty"`
 }
@@ -86,6 +104,7 @@ type MiddlewareActionBaselineStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // MiddlewareActionBaseline is the Schema for the middlewareactionbaselines API.
+// It is a cluster-scoped resource that defines reusable action step templates for MiddlewareAction instances.
 type MiddlewareActionBaseline struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

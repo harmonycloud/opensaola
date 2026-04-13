@@ -21,36 +21,32 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // MiddlewareActionSpec defines the desired state of MiddlewareAction.
 type MiddlewareActionSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	Baseline       string               `json:"baseline"`
-	Necessary      runtime.RawExtension `json:"necessary,omitempty"`
-	MiddlewareName string               `json:"middlewareName"`
+	// Baseline is the name of the MiddlewareActionBaseline that defines the steps for this action.
+	Baseline string `json:"baseline"`
+	// Necessary holds required parameters passed to the action steps.
+	Necessary runtime.RawExtension `json:"necessary,omitempty"`
+	// MiddlewareName is the name of the Middleware instance this action targets.
+	MiddlewareName string `json:"middlewareName"`
 }
 
-// MiddlewareActionStatus defines the observed state of MiddlewareAction
+// MiddlewareActionStatus defines the observed state of MiddlewareAction.
 type MiddlewareActionStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
 	// The generation observed by the deployment controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty" protobuf:"varint,1,opt,name=observedGeneration"`
 
-	// Represents the latest available observations of a deployment's current state.
+	// Conditions represent the latest available observations of the action's current state.
 	// +patchMergeKey=type
 	// +patchStrategy=merge
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// The state of the middleware.
+	// State is the high-level state of the action. Valid values: Available, Unavailable, Updating.
 	// +optional
 	State State `json:"state,omitempty"`
 
+	// Reason provides a machine-readable reason for the current state.
 	Reason metav1.StatusReason `json:"reason,omitempty"`
 }
 
@@ -62,6 +58,7 @@ type MiddlewareActionStatus struct {
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.reason`
 
 // MiddlewareAction is the Schema for the middlewareactions API.
+// It represents a one-shot operational action (e.g., backup, restore) executed against a Middleware instance.
 type MiddlewareAction struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

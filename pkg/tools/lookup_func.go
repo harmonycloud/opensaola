@@ -21,7 +21,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/OpenSaola/opensaola/pkg/k8s/kubeclient"
+	"github.com/OpenSaola/opensaola/internal/k8s/kubeclient"
 	"github.com/pkg/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

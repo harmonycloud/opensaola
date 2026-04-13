@@ -21,9 +21,9 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/OpenSaola/opensaola/pkg/concurrency"
-	"github.com/OpenSaola/opensaola/pkg/k8s"
-	"github.com/OpenSaola/opensaola/pkg/resource/logger"
+	"github.com/OpenSaola/opensaola/internal/concurrency"
+	"github.com/OpenSaola/opensaola/internal/k8s"
+	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	appsv1 "k8s.io/api/apps/v1"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"

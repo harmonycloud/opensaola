@@ -26,8 +26,8 @@ import (
 	"text/template"
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/pkg/k8s/kubeclient"
-	"github.com/OpenSaola/opensaola/pkg/resource/logger"
+	"github.com/OpenSaola/opensaola/internal/k8s/kubeclient"
+	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/pkg/tools/ctxkeys"
 	"github.com/Masterminds/sprig/v3"
 	"github.com/google/uuid"

@@ -20,41 +20,47 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // MiddlewarePackageSpec defines the desired state of MiddlewarePackage.
+// It describes the metadata and contents of a middleware distribution package.
 type MiddlewarePackageSpec struct {
-	Name        string  `json:"name,omitempty"`
-	Catalog     Catalog `json:"catalog,omitempty"`
-	Version     string  `json:"version,omitempty"`
-	Owner       string  `json:"owner,omitempty"`
-	Type        string  `json:"type,omitempty"`
-	Description string  `json:"description,omitempty"`
+	// Name is the display name of the middleware package.
+	Name string `json:"name,omitempty"`
+	// Catalog lists the resources included in this package (CRDs, baselines, configurations, actions).
+	Catalog Catalog `json:"catalog,omitempty"`
+	// Version is the semantic version of this package.
+	Version string `json:"version,omitempty"`
+	// Owner is the entity or team that maintains this package.
+	Owner string `json:"owner,omitempty"`
+	// Type is the middleware type identifier (e.g., "mysql", "redis", "kafka").
+	Type string `json:"type,omitempty"`
+	// Description is a human-readable description of this middleware package.
+	Description string `json:"description,omitempty"`
 }
 
+// Catalog lists the resources included in a MiddlewarePackage.
 type Catalog struct {
-	Crds           []string `json:"crds,omitempty"`
-	Baselines      []string `json:"definitions,omitempty"`
+	// Crds is the list of CustomResourceDefinition names bundled in this package.
+	Crds []string `json:"crds,omitempty"`
+	// Baselines is the list of baseline resource names (MiddlewareBaseline and MiddlewareOperatorBaseline) in this package.
+	Baselines []string `json:"definitions,omitempty"`
+	// Configurations is the list of MiddlewareConfiguration resource names in this package.
 	Configurations []string `json:"configurations,omitempty"`
-	Actions        []string `json:"actions,omitempty"`
+	// Actions is the list of MiddlewareActionBaseline resource names in this package.
+	Actions []string `json:"actions,omitempty"`
 }
 
 // MiddlewarePackageStatus defines the observed state of MiddlewarePackage.
 type MiddlewarePackageStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
 	// The generation observed by the deployment controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty" protobuf:"varint,1,opt,name=observedGeneration"`
 
-	// Represents the latest available observations of a deployment's current state.
+	// Conditions represent the latest available observations of the package's current state.
 	// +patchMergeKey=type
 	// +patchStrategy=merge
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// The state of the middleware.
+	// State is the high-level state of the package. Valid values: Available, Unavailable, Updating.
 	// +optional
 	State State `json:"state,omitempty"`
 }
@@ -66,6 +72,7 @@ type MiddlewarePackageStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // MiddlewarePackage is the Schema for the middlewarepackages API.
+// It is a cluster-scoped resource that represents an installable middleware distribution package.
 type MiddlewarePackage struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

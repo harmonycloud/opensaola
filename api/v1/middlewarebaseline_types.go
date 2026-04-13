@@ -21,38 +21,36 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // MiddlewareBaselineSpec defines the desired state of MiddlewareBaseline.
+// It serves as the cluster-scoped default template for creating Middleware instances.
 type MiddlewareBaselineSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	OperatorBaseline OperatorBaseline     `json:"operatorBaseline,omitempty"`
-	GVK              GVK                  `json:"gvk,omitempty"`
-	Necessary        runtime.RawExtension `json:"necessary,omitempty"`
-	PreActions       []PreAction          `json:"preActions,omitempty"`
+	// OperatorBaseline references the MiddlewareOperatorBaseline that manages the operator for this middleware type.
+	OperatorBaseline OperatorBaseline `json:"operatorBaseline,omitempty"`
+	// GVK defines the GroupVersionKind of the custom resource that this baseline produces.
+	GVK GVK `json:"gvk,omitempty"`
+	// Necessary holds required default parameters (e.g., image) for this middleware type.
+	Necessary runtime.RawExtension `json:"necessary,omitempty"`
+	// PreActions is the list of pre-actions to execute before the main reconciliation workflow.
+	PreActions []PreAction `json:"preActions,omitempty"`
 	// +kubebuilder:pruning:PreserveUnknownFields
-	Parameters     runtime.RawExtension `json:"parameters,omitempty"`
-	Configurations []Configuration      `json:"configurations,omitempty"`
+	// Parameters holds optional default parameters that Middleware instances inherit.
+	Parameters runtime.RawExtension `json:"parameters,omitempty"`
+	// Configurations is the list of default configuration resources included in this baseline.
+	Configurations []Configuration `json:"configurations,omitempty"`
 }
 
 // MiddlewareBaselineStatus defines the observed state of MiddlewareBaseline.
 type MiddlewareBaselineStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
 	// The generation observed by the deployment controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty" protobuf:"varint,1,opt,name=observedGeneration"`
 
-	// Represents the latest available observations of a deployment's current state.
+	// Conditions represent the latest available observations of the baseline's current state.
 	// +patchMergeKey=type
 	// +patchStrategy=merge
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// The state of the middleware.
+	// State is the high-level state of the baseline. Valid values: Available, Unavailable, Updating.
 	// +optional
 	State State `json:"state,omitempty"`
 }
@@ -66,6 +64,7 @@ type MiddlewareBaselineStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // MiddlewareBaseline is the Schema for the middlewarebaselines API.
+// It is a cluster-scoped resource that provides default templates for Middleware instances.
 type MiddlewareBaseline struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

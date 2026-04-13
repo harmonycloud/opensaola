@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/OpenSaola/opensaola/api/v1"
@@ -86,7 +85,7 @@ func GetMiddlewarePackage(ctx context.Context, cli client.Client, name string) (
 			Name: name,
 		}, m)
 		if err != nil {
-			return errors.Wrap(err, "get middleware package error")
+			return fmt.Errorf("get middleware package error: %w", err)
 		}
 		// Cache the MiddlewarePackage
 		MiddlewarePackageCache.Set(types.NamespacedName{Name: name}.String(), *m)

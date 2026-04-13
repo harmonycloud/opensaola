@@ -18,11 +18,11 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 
 	"github.com/OpenSaola/opensaola/internal/k8s/kubeclient"
-	"github.com/pkg/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -102,7 +102,7 @@ func getDynamicClientOnKind(apiversion string, kind string) (dynamic.Namespaceab
 	apiRes, err := getAPIResourceForGVK(gvk)
 	if err != nil {
 		log.Printf("[ERROR] unable to get apiresource from unstructured: %s , error %s", gvk.String(), err)
-		return nil, false, errors.Wrapf(err, "unable to get apiresource from unstructured: %s", gvk.String())
+		return nil, false, fmt.Errorf("unable to get apiresource from unstructured: %s: %w", gvk.String(), err)
 	}
 	gvr := schema.GroupVersionResource{
 		Group:    apiRes.Group,

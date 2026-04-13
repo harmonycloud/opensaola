@@ -22,7 +22,6 @@ import (
 
 	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/google/go-cmp/cmp"
-	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -52,7 +51,7 @@ func GetServiceAccount(ctx context.Context, cli client.Client, name, namespace s
 	sa := new(corev1.ServiceAccount)
 	err := cli.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, sa)
 	if err != nil {
-		return nil, errors.Wrapf(err, "get service account %s error", name)
+		return nil, fmt.Errorf("get service account %s error: %w", name, err)
 	}
 	return sa, nil
 }
@@ -191,7 +190,7 @@ func GetRole(ctx context.Context, cli client.Client, name, namespace string) (*r
 	// Get the Role
 	err := cli.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, role)
 	if err != nil {
-		return nil, errors.Wrapf(err, "get role %s error", name)
+		return nil, fmt.Errorf("get role %s error: %w", name, err)
 	}
 	return role, nil
 }
@@ -280,7 +279,7 @@ func GetClusterRole(ctx context.Context, cli client.Client, name string) (*rbacv
 	// Get the ClusterRole
 	err := cli.Get(ctx, client.ObjectKey{Name: name}, cr)
 	if err != nil {
-		return nil, errors.Wrapf(err, "get cluster role %s error", name)
+		return nil, fmt.Errorf("get cluster role %s error: %w", name, err)
 	}
 	return cr, nil
 }
@@ -375,7 +374,7 @@ func GetRoleBinding(ctx context.Context, cli client.Client, name, namespace stri
 	// Get the RoleBinding
 	err := cli.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, rb)
 	if err != nil {
-		return nil, errors.Wrapf(err, "get role binding %s error", name)
+		return nil, fmt.Errorf("get role binding %s error: %w", name, err)
 	}
 	return rb, nil
 }
@@ -465,7 +464,7 @@ func GetClusterRoleBinding(ctx context.Context, cli client.Client, name string) 
 	// Get the ClusterRoleBinding
 	err := cli.Get(ctx, client.ObjectKey{Name: name}, crb)
 	if err != nil {
-		return nil, errors.Wrapf(err, "get cluster role binding %s error", name)
+		return nil, fmt.Errorf("get cluster role binding %s error: %w", name, err)
 	}
 	return crb, nil
 }

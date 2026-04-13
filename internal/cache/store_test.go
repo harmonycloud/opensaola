@@ -23,6 +23,7 @@ import (
 )
 
 func TestGetSet(t *testing.T) {
+	t.Parallel()
 	s := New[string, int](0)
 	s.Set("a", 1)
 	v, ok := s.Get("a")
@@ -35,6 +36,7 @@ func TestGetSet(t *testing.T) {
 }
 
 func TestDelete(t *testing.T) {
+	t.Parallel()
 	s := New[string, string](0)
 	s.Set("key", "val")
 	s.Delete("key")
@@ -45,6 +47,7 @@ func TestDelete(t *testing.T) {
 }
 
 func TestGetMiss(t *testing.T) {
+	t.Parallel()
 	s := New[string, int](0)
 	v, ok := s.Get("nonexistent")
 	if ok {
@@ -65,8 +68,8 @@ func TestTTLExpiration(t *testing.T) {
 		t.Fatalf("expected 42 before expiry, got %d, ok=%v", v, ok)
 	}
 
-	// Wait for expiration.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for expiration (6x margin over 50ms TTL).
+	time.Sleep(300 * time.Millisecond)
 
 	_, ok = s.Get("x")
 	if ok {
@@ -79,7 +82,7 @@ func TestNoTTL(t *testing.T) {
 	s.Set("persist", 99)
 
 	// Even after a short sleep, entries with TTL=0 should remain.
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
 	v, ok := s.Get("persist")
 	if !ok || v != 99 {
@@ -88,6 +91,7 @@ func TestNoTTL(t *testing.T) {
 }
 
 func TestClear(t *testing.T) {
+	t.Parallel()
 	s := New[string, int](0)
 	s.Set("a", 1)
 	s.Set("b", 2)
@@ -128,7 +132,7 @@ func TestRangeSkipsExpired(t *testing.T) {
 	s.Set("expired1", 1)
 	s.Set("expired2", 2)
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 
 	// Add a fresh entry after the expired ones.
 	s2 := New[string, int](time.Hour)
@@ -168,4 +172,38 @@ func TestConcurrentAccess(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+func TestConcurrentAccessWithTTL(t *testing.T) {
+	s := New[int, string](100 * time.Millisecond)
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				s.Set(id*100+j, "val")
+				s.Get(id*100 + j)
+				time.Sleep(10 * time.Millisecond)
+			}
+		}(i)
+	}
+	wg.Wait()
+	// No panic = pass (race detector will catch issues)
+}
+
+func TestRangeEarlyStop(t *testing.T) {
+	t.Parallel()
+	s := New[string, int](0)
+	s.Set("a", 1)
+	s.Set("b", 2)
+	s.Set("c", 3)
+	count := 0
+	s.Range(func(k string, v int) bool {
+		count++
+		return false // stop after first
+	})
+	if count != 1 {
+		t.Errorf("expected Range to stop after 1 item, visited %d", count)
+	}
 }

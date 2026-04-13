@@ -74,6 +74,60 @@ func TestDebouncer_RapidNotify_Coalesced(t *testing.T) {
 	}
 }
 
+func TestDebouncer_MaxDelayForcesTrigger(t *testing.T) {
+	fired := make(chan struct{}, 5)
+	d := &Debouncer{
+		window:    100 * time.Millisecond,
+		maxDelay:  300 * time.Millisecond,
+		triggerFn: func() { fired <- struct{}{} },
+	}
+
+	// First Notify arms the timer; it fires after window (100ms) and sets lastFire.
+	d.Notify()
+	select {
+	case <-fired:
+		// Initial fire — expected around 100ms.
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("initial callback did not fire within timeout")
+	}
+
+	// Now continuously send Notify every 80ms so the debounce window never
+	// expires on its own. The maxDelay ceiling (300ms) should force a fire.
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(80 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				d.Notify()
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	start := time.Now()
+	select {
+	case <-fired:
+		elapsed := time.Since(start)
+		// The maxDelay ceiling (300ms from lastFire) may cause a fire before 300ms
+		// from our measurement start because lastFire was set slightly before start.
+		// Also, intermediate window-based fires may occur. The key assertion is that
+		// a fire happens well before the debounce window would naturally allow without
+		// maxDelay (i.e., the continuous notifications would otherwise keep resetting).
+		// Accept anything within a generous range.
+		if elapsed > 800*time.Millisecond {
+			t.Errorf("maxDelay fire elapsed = %v, expected within 800ms", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("maxDelay did not force a callback fire within timeout")
+	}
+
+	close(done)
+	d.Stop()
+}
+
 func TestDebouncer_Stop(t *testing.T) {
 	fired := make(chan struct{}, 1)
 	d := &Debouncer{

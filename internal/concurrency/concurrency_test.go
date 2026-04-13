@@ -17,7 +17,6 @@ limitations under the License.
 package concurrency
 
 import (
-	"os"
 	"testing"
 )
 
@@ -32,8 +31,7 @@ func TestControllerOptions_Default(t *testing.T) {
 }
 
 func TestControllerOptions_EnvOverride(t *testing.T) {
-	os.Setenv("MYCTRL_MAX_CONCURRENT", "10")
-	defer os.Unsetenv("MYCTRL_MAX_CONCURRENT")
+	t.Setenv("MYCTRL_MAX_CONCURRENT", "10")
 
 	opts := ControllerOptions("MYCTRL", 3)
 	if opts.MaxConcurrentReconciles != 10 {
@@ -42,8 +40,7 @@ func TestControllerOptions_EnvOverride(t *testing.T) {
 }
 
 func TestControllerOptions_InvalidEnv(t *testing.T) {
-	os.Setenv("BAD_MAX_CONCURRENT", "notanumber")
-	defer os.Unsetenv("BAD_MAX_CONCURRENT")
+	t.Setenv("BAD_MAX_CONCURRENT", "notanumber")
 
 	opts := ControllerOptions("BAD", 5)
 	if opts.MaxConcurrentReconciles != 5 {
@@ -52,8 +49,7 @@ func TestControllerOptions_InvalidEnv(t *testing.T) {
 }
 
 func TestControllerOptions_ZeroEnv(t *testing.T) {
-	os.Setenv("ZERO_MAX_CONCURRENT", "0")
-	defer os.Unsetenv("ZERO_MAX_CONCURRENT")
+	t.Setenv("ZERO_MAX_CONCURRENT", "0")
 
 	opts := ControllerOptions("ZERO", 5)
 	if opts.MaxConcurrentReconciles != 5 {

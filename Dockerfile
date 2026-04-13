@@ -36,16 +36,28 @@ RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${TARGETOS}/${TAR
     && chmod 0555 kubectl \
     && rm kubectl.sha256
 
-# Runtime image - minimal Alpine with only necessary tools
+# Runtime image - minimal Alpine with necessary tools (kubectl, curl, jq, sh)
 FROM alpine:3.20
+
+# Re-declare build args for OCI labels in runtime stage
+ARG VERSION=dev
+ARG GIT_COMMIT=unknown
+ARG BUILD_DATE=unknown
 
 LABEL org.opencontainers.image.source="https://github.com/opensaola/opensaola" \
       org.opencontainers.image.title="opensaola" \
       org.opencontainers.image.description="OpenSaola - Kubernetes Middleware Lifecycle Operator" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
 
 # Install runtime dependencies and create non-root user in a single layer
-RUN sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.tuna.tsinghua.edu.cn/alpine#g' /etc/apk/repositories \
+# Use --build-arg APK_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/alpine for China acceleration
+ARG APK_MIRROR=""
+RUN if [ -n "${APK_MIRROR}" ]; then \
+      sed -i "s#https\?://dl-cdn.alpinelinux.org/alpine#${APK_MIRROR}#g" /etc/apk/repositories; \
+    fi \
     && apk add --no-cache tzdata curl jq \
     && rm -rf /var/cache/apk/* \
     && addgroup -g 65532 -S nonroot \

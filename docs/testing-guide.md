@@ -120,6 +120,26 @@ make bench > /tmp/new.txt
 make benchstat BENCH_OLD=/tmp/old.txt BENCH_NEW=/tmp/new.txt
 ```
 
+## Using saola-cli for E2E Validation
+
+The [saola-cli](https://gitee.com/opensaola/saola-cli) project provides a CLI tool that can be used to validate operator behavior end-to-end.
+
+### Prerequisites
+- saola-cli binary built: `cd ../saola-cli && make build`
+- A middleware package directory (e.g., `../dataservice-baseline/clickhouse`)
+
+### Running saola-cli E2E
+After deploying the operator (see "Build and Deploy for Testing" above), use the saola-cli E2E script:
+
+```bash
+cd ../saola-cli
+PKG_DIR=../dataservice-baseline/clickhouse ./scripts/e2e-test.sh
+```
+
+This script covers: package install → baseline queries → operator deployment → middleware deployment → output format verification.
+
+Sample YAML files for ClickHouse are available at `saola-cli/docs/e2e-samples/`.
+
 ## CI Checks (run locally before pushing)
 
 ```bash

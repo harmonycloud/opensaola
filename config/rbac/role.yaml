@@ -57,8 +57,10 @@ rules:
   - deployments/status
   verbs:
   - get
+  - list
   - patch
   - update
+  - watch
 - apiGroups:
   - middleware.cn
   resources:

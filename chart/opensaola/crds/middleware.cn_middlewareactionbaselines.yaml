@@ -32,8 +32,9 @@ spec:
     name: v1
     schema:
       openAPIV3Schema:
-        description: MiddlewareActionBaseline is the Schema for the middlewareactionbaselines
-          API.
+        description: |-
+          MiddlewareActionBaseline is the Schema for the middlewareactionbaselines API.
+          It is a cluster-scoped resource that defines reusable action step templates for MiddlewareAction instances.
         properties:
           apiVersion:
             description: |-
@@ -53,60 +54,99 @@ spec:
           metadata:
             type: object
           spec:
-            description: MiddlewareActionBaselineSpec defines the desired state of
-              MiddlewareActionBaseline.
+            description: |-
+              MiddlewareActionBaselineSpec defines the desired state of MiddlewareActionBaseline.
+              It serves as the cluster-scoped template that defines execution steps for MiddlewareAction instances.
             properties:
               actionType:
+                description: ActionType is the type identifier for this action (e.g.,
+                  "backup", "restore", "healthcheck").
                 type: string
               baselineType:
+                description: |-
+                  BaselineType indicates whether this baseline is a pre-action or normal action.
+                  Valid values: PreAction, NormalAction.
                 type: string
               necessary:
+                description: Necessary holds required default parameters for this
+                  action type.
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
               steps:
+                description: Steps is the ordered list of execution steps that make
+                  up this action.
                 items:
+                  description: Step defines a single execution step within a MiddlewareActionBaseline.
                   properties:
                     cmd:
+                      description: CMD holds the command to execute for this step.
+                        Mutually exclusive with CUE and HTTP.
                       properties:
                         command:
+                          description: Command is the command and arguments to execute
+                            as a subprocess.
                           items:
                             type: string
                           type: array
                       type: object
                     cue:
+                      description: CUE holds the CUE expression to evaluate for this
+                        step. Mutually exclusive with CMD and HTTP.
                       type: string
                     http:
+                      description: HTTP holds the HTTP request to execute for this
+                        step. Mutually exclusive with CUE and CMD.
                       properties:
                         body:
+                          description: Body is the optional HTTP request body content.
+                            Supports template variable substitution.
                           type: string
                         header:
                           additionalProperties:
                             type: string
+                          description: Header is the optional map of HTTP headers
+                            to include in the request.
                           type: object
                         method:
+                          description: Method is the HTTP method to use (e.g., GET,
+                            POST, PUT, DELETE).
                           type: string
                         url:
+                          description: URL is the target URL for the HTTP request.
+                            Supports template variable substitution.
                           type: string
                       required:
                       - method
                       - url
                       type: object
                     name:
+                      description: Name is the unique name identifying this step within
+                        the action.
                       type: string
                     output:
+                      description: Output defines how the step's output is handled
+                        and exposed.
                       properties:
                         expose:
+                          description: Expose indicates whether the step output should
+                            be exposed to the parent MiddlewareAction status.
                           type: boolean
                         type:
+                          description: Type is the format type of the output (e.g.,
+                            for serialization or display).
                           type: string
                       type: object
                     type:
+                      description: Type is the optional step type classifier for conditional
+                        logic.
                       type: string
                   required:
                   - name
                   type: object
                 type: array
               supportedBaselines:
+                description: SupportedBaselines is the optional list of MiddlewareBaseline
+                  names that this action supports.
                 items:
                   type: string
                 type: array
@@ -117,11 +157,11 @@ spec:
             type: object
           status:
             description: MiddlewareActionBaselineStatus defines the observed state
-              of MiddlewareActionBaseline
+              of MiddlewareActionBaseline.
             properties:
               conditions:
-                description: Represents the latest available observations of a deployment's
-                  current state.
+                description: Conditions represent the latest available observations
+                  of the baseline's current state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -182,7 +222,8 @@ spec:
                 format: int64
                 type: integer
               state:
-                description: The state of the middleware.
+                description: 'State is the high-level state of the baseline. Valid
+                  values: Available, Unavailable, Updating.'
                 type: string
             type: object
         type: object

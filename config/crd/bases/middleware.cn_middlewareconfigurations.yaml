@@ -32,8 +32,9 @@ spec:
     name: v1
     schema:
       openAPIV3Schema:
-        description: MiddlewareConfiguration is the Schema for the middlewareconfigurations
-          API.
+        description: |-
+          MiddlewareConfiguration is the Schema for the middlewareconfigurations API.
+          It is a cluster-scoped resource that holds templates for generating Kubernetes resources from configuration values.
         properties:
           apiVersion:
             description: |-
@@ -57,6 +58,8 @@ spec:
               MiddlewareConfiguration.
             properties:
               template:
+                description: Template is the CUE or Go template string used to generate
+                  Kubernetes resources from configuration values.
                 type: string
                 x-kubernetes-preserve-unknown-fields: true
             required:
@@ -67,8 +70,8 @@ spec:
               of MiddlewareConfiguration.
             properties:
               conditions:
-                description: Represents the latest available observations of a deployment's
-                  current state.
+                description: Conditions represent the latest available observations
+                  of the configuration's current state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -125,7 +128,8 @@ spec:
                   type: object
                 type: array
               gvks:
-                description: configuration 的使用者列表
+                description: Users is the list of GroupVersionKind resources that
+                  consume this configuration.
                 items:
                   description: |-
                     GroupVersionKind unambiguously identifies a kind.  It doesn't anonymously include GroupVersion
@@ -148,7 +152,8 @@ spec:
                 format: int64
                 type: integer
               state:
-                description: The state of the middleware.
+                description: 'State is the high-level state of the configuration.
+                  Valid values: Available, Unavailable, Updating.'
                 type: string
             type: object
         type: object

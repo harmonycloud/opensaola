@@ -31,6 +31,7 @@ import (
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/middlewarepackage"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/tools/record"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -47,7 +48,8 @@ import (
 // MiddlewarePackageReconciler reconciles a MiddlewarePackage object
 type MiddlewarePackageReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 const secretRequestPrefix = "__secret__/"
@@ -82,6 +84,7 @@ func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			"key", types.NamespacedName{Namespace: req.Namespace, Name: secretName}.String(),
 		)
 		if err := r.HandleSecret(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: req.Namespace, Name: secretName}}); err != nil {
+			r.Recorder.Eventf(r.getPackageForEvent(ctx, secretName), "Warning", "HandleSecretFailed", "Failed to handle secret %s: %v", secretName, err)
 			log.FromContext(ctx).Error(err, "failed to handle Secret", "secretName", secretName)
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
@@ -90,6 +93,7 @@ func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	log.FromContext(ctx).V(1).Info("start processing MiddlewarePackage", "name", req.Name)
 	if err := r.HandlePackage(ctx, req); err != nil {
+		r.Recorder.Eventf(r.getPackageForEvent(ctx, req.Name), "Warning", "HandlePackageFailed", "Failed to handle package %s: %v", req.Name, err)
 		log.FromContext(ctx).Error(err, "failed to handle MiddlewarePackage", "name", req.Name)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -112,15 +116,31 @@ func (r *MiddlewarePackageReconciler) HandlePackage(ctx context.Context, req ctr
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middlewarepackage.Check(ctx, r.Client, mp); err != nil {
 		stop()
+		r.Recorder.Event(mp, "Warning", "ValidationFailed", err.Error())
 		return err
 	}
 	stop()
+
+	r.Recorder.Eventf(mp, "Normal", "Validated", "Package %s validated successfully", mp.Name)
 
 	// if err = middlewarepackage.HandlePackage(ctx, r.Client, mp); err != nil {
 	//	return err
 	// }
 
 	return nil
+}
+
+// getPackageForEvent returns a minimal MiddlewarePackage object suitable for recording events.
+// Used when the full object is not available (e.g., in Reconcile before HandlePackage).
+func (r *MiddlewarePackageReconciler) getPackageForEvent(ctx context.Context, name string) *v1.MiddlewarePackage {
+	mp, err := k8s.GetMiddlewarePackage(ctx, r.Client, name)
+	if err != nil {
+		// Return a minimal object so the event recorder doesn't panic
+		return &v1.MiddlewarePackage{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+		}
+	}
+	return mp
 }
 
 func (r *MiddlewarePackageReconciler) HandleSecret(ctx context.Context, req ctrl.Request) error {

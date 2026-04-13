@@ -39,6 +39,10 @@ config:
   # -- Annotations configuration
   annotations:
     component: "middleware.cn/component"
+  # -- pprof profiling server (for development/debugging only, NOT for production)
+  pprof:
+    enabled: false
+    port: "6060"
 
 # -- Pod resource requirements
 resources:

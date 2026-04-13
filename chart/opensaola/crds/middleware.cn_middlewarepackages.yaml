@@ -26,7 +26,9 @@ spec:
     name: v1
     schema:
       openAPIV3Schema:
-        description: MiddlewarePackage is the Schema for the middlewarepackages API.
+        description: |-
+          MiddlewarePackage is the Schema for the middlewarepackages API.
+          It is a cluster-scoped resource that represents an installable middleware distribution package.
         properties:
           apiVersion:
             description: |-
@@ -46,44 +48,64 @@ spec:
           metadata:
             type: object
           spec:
-            description: MiddlewarePackageSpec defines the desired state of MiddlewarePackage.
+            description: |-
+              MiddlewarePackageSpec defines the desired state of MiddlewarePackage.
+              It describes the metadata and contents of a middleware distribution package.
             properties:
               catalog:
+                description: Catalog lists the resources included in this package
+                  (CRDs, baselines, configurations, actions).
                 properties:
                   actions:
+                    description: Actions is the list of MiddlewareActionBaseline resource
+                      names in this package.
                     items:
                       type: string
                     type: array
                   configurations:
+                    description: Configurations is the list of MiddlewareConfiguration
+                      resource names in this package.
                     items:
                       type: string
                     type: array
                   crds:
+                    description: Crds is the list of CustomResourceDefinition names
+                      bundled in this package.
                     items:
                       type: string
                     type: array
                   definitions:
+                    description: Baselines is the list of baseline resource names
+                      (MiddlewareBaseline and MiddlewareOperatorBaseline) in this
+                      package.
                     items:
                       type: string
                     type: array
                 type: object
               description:
+                description: Description is a human-readable description of this middleware
+                  package.
                 type: string
               name:
+                description: Name is the display name of the middleware package.
                 type: string
               owner:
+                description: Owner is the entity or team that maintains this package.
                 type: string
               type:
+                description: Type is the middleware type identifier (e.g., "mysql",
+                  "redis", "kafka").
                 type: string
               version:
+                description: Version is the semantic version of this package.
                 type: string
             type: object
           status:
             description: MiddlewarePackageStatus defines the observed state of MiddlewarePackage.
             properties:
               conditions:
-                description: Represents the latest available observations of a deployment's
-                  current state.
+                description: Conditions represent the latest available observations
+                  of the package's current state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -144,7 +166,8 @@ spec:
                 format: int64
                 type: integer
               state:
-                description: The state of the middleware.
+                description: 'State is the high-level state of the package. Valid
+                  values: Available, Unavailable, Updating.'
                 type: string
             type: object
         type: object

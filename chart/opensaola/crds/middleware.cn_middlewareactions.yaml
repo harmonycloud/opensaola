@@ -29,7 +29,9 @@ spec:
     name: v1
     schema:
       openAPIV3Schema:
-        description: MiddlewareAction is the Schema for the middlewareactions API.
+        description: |-
+          MiddlewareAction is the Schema for the middlewareactions API.
+          It represents a one-shot operational action (e.g., backup, restore) executed against a Middleware instance.
         properties:
           apiVersion:
             description: |-
@@ -52,13 +54,16 @@ spec:
             description: MiddlewareActionSpec defines the desired state of MiddlewareAction.
             properties:
               baseline:
-                description: |-
-                  INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-                  Important: Run "make" to regenerate code after modifying this file
+                description: Baseline is the name of the MiddlewareActionBaseline
+                  that defines the steps for this action.
                 type: string
               middlewareName:
+                description: MiddlewareName is the name of the Middleware instance
+                  this action targets.
                 type: string
               necessary:
+                description: Necessary holds required parameters passed to the action
+                  steps.
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
             required:
@@ -66,11 +71,11 @@ spec:
             - middlewareName
             type: object
           status:
-            description: MiddlewareActionStatus defines the observed state of MiddlewareAction
+            description: MiddlewareActionStatus defines the observed state of MiddlewareAction.
             properties:
               conditions:
-                description: Represents the latest available observations of a deployment's
-                  current state.
+                description: Conditions represent the latest available observations
+                  of the action's current state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -131,13 +136,12 @@ spec:
                 format: int64
                 type: integer
               reason:
-                description: |-
-                  StatusReason is an enumeration of possible failure causes.  Each StatusReason
-                  must map to a single HTTP status code, but multiple reasons may map
-                  to the same HTTP status code.
+                description: Reason provides a machine-readable reason for the current
+                  state.
                 type: string
               state:
-                description: The state of the middleware.
+                description: 'State is the high-level state of the action. Valid values:
+                  Available, Unavailable, Updating.'
                 type: string
             type: object
         type: object

@@ -404,15 +404,21 @@ spec:
 			}, 60*time.Second, 2*time.Second).Should(Succeed())
 
 			By("verifying Middleware enters error state due to nonexistent baseline")
+			// Wait for controller to set a status (non-empty state)
 			Eventually(func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "mid", midName, "-n", namespace,
 					"-o", "jsonpath={.status.state}")
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				state := string(output)
-				// State should be Unavailable or empty (not yet reconciled)
-				g.Expect(state).To(Or(Equal("Unavailable"), Equal("")))
-			}, 30*time.Second, 2*time.Second).Should(Succeed())
+				g.Expect(string(output)).NotTo(BeEmpty())
+			}, 60*time.Second, 2*time.Second).Should(Succeed())
+
+			// Verify the state is Unavailable (not just any non-empty value)
+			cmd = exec.Command("kubectl", "get", "mid", midName, "-n", namespace,
+				"-o", "jsonpath={.status.state}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(output)).To(Equal("Unavailable"))
 
 			By("deleting the Middleware")
 			cmd = exec.Command("kubectl", "delete", "mid", midName, "-n", namespace, "--timeout=60s")

@@ -142,7 +142,7 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 		mp = &v1.MiddlewarePackage{
 			TypeMeta: metav1.TypeMeta{
 				Kind:       "MiddlewarePackage",
-				APIVersion: "middleware.zeus.com/v1",
+				APIVersion: "middleware.cn/v1",
 			},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   secret.Name,

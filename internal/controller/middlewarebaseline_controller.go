@@ -23,7 +23,7 @@ import (
 
 	middlewarecnv1 "github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
+	metrics "github.com/OpenSaola/opensaola/pkg/metrics"
 	"github.com/OpenSaola/opensaola/internal/service/middlewarebaseline"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -56,13 +56,13 @@ type MiddlewareBaselineReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.2/pkg/reconcile
 func (r *MiddlewareBaselineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	startTime := time.Now()
-	_, timer := zeusmetrics.NewReconcileTimer(ctx, "middlewarebaseline")
+	_, timer := metrics.NewReconcileTimer(ctx, "middlewarebaseline")
 	defer func() {
-		zeusmetrics.ObserveReconcile("middlewarebaseline", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := zeusmetrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
+		metrics.ObserveReconcile("middlewarebaseline", startTime, result.Requeue, result.RequeueAfter, retErr)
+		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
 		timer.Observe(res)
-		zeusmetrics.ObserveRequeue("middlewarebaseline", result.Requeue, result.RequeueAfter)
-		zeusmetrics.ObserveAPIError("middlewarebaseline", retErr)
+		metrics.ObserveRequeue("middlewarebaseline", result.Requeue, result.RequeueAfter)
+		metrics.ObserveAPIError("middlewarebaseline", retErr)
 	}()
 
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
@@ -71,7 +71,7 @@ func (r *MiddlewareBaselineReconciler) Reconcile(ctx context.Context, req ctrl.R
 	log.FromContext(ctx).V(1).Info("start processing middlewareBaseline", "req", req)
 
 	// Get middlewareBaseline
-	stop := timer.Start(zeusmetrics.PhaseAPIRead)
+	stop := timer.Start(metrics.PhaseAPIRead)
 	middlewareBaseline, err := k8s.GetMiddlewareBaseline(ctx, r.Client, req.Name)
 	stop()
 	if err != nil {
@@ -79,7 +79,7 @@ func (r *MiddlewareBaselineReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// Validate middlewareBaseline
-	stop = timer.Start(zeusmetrics.PhaseCompute)
+	stop = timer.Start(metrics.PhaseCompute)
 	if err := middlewarebaseline.Check(ctx, r.Client, middlewareBaseline); err != nil {
 		stop()
 		r.Recorder.Event(middlewareBaseline, "Warning", "ValidationFailed", err.Error())

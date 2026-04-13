@@ -23,7 +23,7 @@ import (
 
 	middlewarecnv1 "github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
+	metrics "github.com/OpenSaola/opensaola/pkg/metrics"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareconfiguration"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -56,13 +56,13 @@ type MiddlewareConfigurationReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.2/pkg/reconcile
 func (r *MiddlewareConfigurationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	startTime := time.Now()
-	_, timer := zeusmetrics.NewReconcileTimer(ctx, "middlewareconfiguration")
+	_, timer := metrics.NewReconcileTimer(ctx, "middlewareconfiguration")
 	defer func() {
-		zeusmetrics.ObserveReconcile("middlewareconfiguration", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := zeusmetrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
+		metrics.ObserveReconcile("middlewareconfiguration", startTime, result.Requeue, result.RequeueAfter, retErr)
+		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
 		timer.Observe(res)
-		zeusmetrics.ObserveRequeue("middlewareconfiguration", result.Requeue, result.RequeueAfter)
-		zeusmetrics.ObserveAPIError("middlewareconfiguration", retErr)
+		metrics.ObserveRequeue("middlewareconfiguration", result.Requeue, result.RequeueAfter)
+		metrics.ObserveAPIError("middlewareconfiguration", retErr)
 	}()
 
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
@@ -71,14 +71,14 @@ func (r *MiddlewareConfigurationReconciler) Reconcile(ctx context.Context, req c
 	log.FromContext(ctx).V(1).Info("start processing middlewareConfiguration", "req", req)
 
 	// Get middlewareConfiguration
-	stop := timer.Start(zeusmetrics.PhaseAPIRead)
+	stop := timer.Start(metrics.PhaseAPIRead)
 	middlewareConfiguration, err := k8s.GetMiddlewareConfiguration(ctx, r.Client, req.Name)
 	stop()
 	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	stop = timer.Start(zeusmetrics.PhaseCompute)
+	stop = timer.Start(metrics.PhaseCompute)
 	if err = middlewareconfiguration.Check(ctx, r.Client, middlewareConfiguration); err != nil {
 		stop()
 		r.Recorder.Event(middlewareConfiguration, "Warning", "ValidationFailed", err.Error())

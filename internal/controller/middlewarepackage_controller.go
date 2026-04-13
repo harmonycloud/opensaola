@@ -27,7 +27,7 @@ import (
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
+	metrics "github.com/OpenSaola/opensaola/pkg/metrics"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/middlewarepackage"
 	corev1 "k8s.io/api/core/v1"
@@ -66,13 +66,13 @@ const secretRequestPrefix = "__secret__/"
 // move the current state of the cluster closer to the desired state.
 func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	startTime := time.Now()
-	ctx, timer := zeusmetrics.NewReconcileTimer(ctx, "middlewarepackage")
+	ctx, timer := metrics.NewReconcileTimer(ctx, "middlewarepackage")
 	defer func() {
-		zeusmetrics.ObserveReconcile("middlewarepackage", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := zeusmetrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
+		metrics.ObserveReconcile("middlewarepackage", startTime, result.Requeue, result.RequeueAfter, retErr)
+		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
 		timer.Observe(res)
-		zeusmetrics.ObserveRequeue("middlewarepackage", result.Requeue, result.RequeueAfter)
-		zeusmetrics.ObserveAPIError("middlewarepackage", retErr)
+		metrics.ObserveRequeue("middlewarepackage", result.Requeue, result.RequeueAfter)
+		metrics.ObserveAPIError("middlewarepackage", retErr)
 	}()
 
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
@@ -102,10 +102,10 @@ func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Re
 }
 
 func (r *MiddlewarePackageReconciler) HandlePackage(ctx context.Context, req ctrl.Request) error {
-	timer := zeusmetrics.TimerFromContext(ctx)
+	timer := metrics.TimerFromContext(ctx)
 
 	// Get MiddlewarePackage
-	stop := timer.Start(zeusmetrics.PhaseAPIRead)
+	stop := timer.Start(metrics.PhaseAPIRead)
 	mp, err := k8s.GetMiddlewarePackage(ctx, r.Client, req.Name)
 	stop()
 	if err != nil {
@@ -113,7 +113,7 @@ func (r *MiddlewarePackageReconciler) HandlePackage(ctx context.Context, req ctr
 	}
 
 	// Validate MiddlewarePackage
-	stop = timer.Start(zeusmetrics.PhaseCompute)
+	stop = timer.Start(metrics.PhaseCompute)
 	if err = middlewarepackage.Check(ctx, r.Client, mp); err != nil {
 		stop()
 		r.Recorder.Event(mp, "Warning", "ValidationFailed", err.Error())
@@ -144,23 +144,23 @@ func (r *MiddlewarePackageReconciler) getPackageForEvent(ctx context.Context, na
 }
 
 func (r *MiddlewarePackageReconciler) HandleSecret(ctx context.Context, req ctrl.Request) error {
-	timer := zeusmetrics.TimerFromContext(ctx)
+	timer := metrics.TimerFromContext(ctx)
 
-	stop := timer.Start(zeusmetrics.PhaseAPIRead)
+	stop := timer.Start(metrics.PhaseAPIRead)
 	secret, err := k8s.GetSecret(ctx, r.Client, req.Name, req.Namespace)
 	stop()
 	if err != nil && !apiErrors.IsNotFound(err) {
 		return err
 	}
 	if secret != nil {
-		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
+		stop = timer.Start(metrics.PhaseAPIWrite)
 		if err = middlewarepackage.HandleSecret(ctx, r.Client, secret, consts.HandleActionPublish); err != nil {
 			stop()
 			return err
 		}
 		stop()
 	} else {
-		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
+		stop = timer.Start(metrics.PhaseAPIWrite)
 		if err = middlewarepackage.HandleSecret(ctx, r.Client, &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      req.Name,
@@ -175,7 +175,7 @@ func (r *MiddlewarePackageReconciler) HandleSecret(ctx context.Context, req ctrl
 	return nil
 }
 
-func (r *MiddlewarePackageReconciler) isZeusOperatorSecret(object client.Object) bool {
+func (r *MiddlewarePackageReconciler) isOpenSaolaSecret(object client.Object) bool {
 	if object == nil {
 		return false
 	}
@@ -194,13 +194,13 @@ func (r *MiddlewarePackageReconciler) secretPredicate() predicate.Predicate {
 
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
-			return r.isZeusOperatorSecret(e.Object)
+			return r.isOpenSaolaSecret(e.Object)
 		},
 		DeleteFunc: func(e event.DeleteEvent) bool {
-			return r.isZeusOperatorSecret(e.Object)
+			return r.isOpenSaolaSecret(e.Object)
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			if !r.isZeusOperatorSecret(e.ObjectNew) {
+			if !r.isOpenSaolaSecret(e.ObjectNew) {
 				return false
 			}
 			oldSecret, okOld := e.ObjectOld.(*corev1.Secret)
@@ -225,7 +225,7 @@ func (r *MiddlewarePackageReconciler) secretPredicate() predicate.Predicate {
 }
 
 func (r *MiddlewarePackageReconciler) secretToRequests(ctx context.Context, object client.Object) []reconcile.Request {
-	if !r.isZeusOperatorSecret(object) {
+	if !r.isOpenSaolaSecret(object) {
 		return nil
 	}
 	return []reconcile.Request{{

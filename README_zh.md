@@ -170,6 +170,7 @@ make lint
 | [包适配文档](docs/opensaola-packaging.md) | 包格式、基线体系、操作系统、CUE 模板、Redis 完整案例 |
 | [故障排查指南](docs/troubleshooting_zh.md) | 常见问题、调试命令、日志配置 |
 | [升级指南](docs/upgrade-guide_zh.md) | 版本升级流程与回滚 |
+| [测试指南](docs/testing-guide_zh.md) | 测试层级、运行测试、覆盖率、基准测试 |
 | [贡献指南](CONTRIBUTING_zh.md) | 开发环境搭建、架构说明、编码规范 |
 
 ## 参与贡献

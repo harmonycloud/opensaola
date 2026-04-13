@@ -170,6 +170,7 @@ Run `make help` to see all available targets.
 | [Package Documentation](docs/opensaola-packaging_en.md) | Package format, baselines, actions, CUE templates, Redis case study |
 | [Troubleshooting Guide](docs/troubleshooting.md) | Common issues, debugging commands, log configuration |
 | [Upgrade Guide](docs/upgrade-guide.md) | Version upgrade procedures and rollback |
+| [Testing Guide](docs/testing-guide.md) | Test tiers, running tests, coverage, benchmarks |
 | [Contributing Guide](CONTRIBUTING.md) | Development setup, architecture, coding standards |
 
 ## Contributing

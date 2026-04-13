@@ -64,6 +64,7 @@ RUN if [ -n "${APK_MIRROR}" ]; then \
     && adduser -u 65532 -S -G nonroot nonroot
 
 WORKDIR /app
+RUN mkdir -p /app/logs && chown 65532:65532 /app/logs
 
 # Copy binaries from builder
 COPY --from=builder --chown=65532:65532 --chmod=0555 /workspace/manager .

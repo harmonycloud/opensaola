@@ -1,7 +1,7 @@
 # OpenSaola
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/)
 
 ## Overview
 
@@ -65,7 +65,7 @@ Once a package is installed, you create a `MiddlewareOperator` to deploy the ope
 
 ## Prerequisites
 
-- Go 1.24+
+- Go 1.26+
 - Kubernetes 1.21+
 - kubectl
 - Helm 3

@@ -1,4 +1,4 @@
-module github.com/OpenSaola/opensaola
+module github.com/opensaola/opensaola
 
 go 1.26.1
 

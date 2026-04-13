@@ -19,7 +19,7 @@ package k8s
 import (
 	"context"
 
-	v1 "github.com/OpenSaola/opensaola/api/v1"
+	v1 "github.com/opensaola/opensaola/api/v1"
 	"github.com/tidwall/gjson"
 
 	appsv1 "k8s.io/api/apps/v1"

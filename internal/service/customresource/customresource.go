@@ -21,9 +21,9 @@ import (
 	"encoding/json"
 	"fmt"
 
-	v1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/service/middlewarebaseline"
-	"github.com/OpenSaola/opensaola/internal/service/middlewareoperatorbaseline"
+	v1 "github.com/opensaola/opensaola/api/v1"
+	"github.com/opensaola/opensaola/internal/service/middlewarebaseline"
+	"github.com/opensaola/opensaola/internal/service/middlewareoperatorbaseline"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"

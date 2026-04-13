@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	v1 "github.com/OpenSaola/opensaola/api/v1"
+	v1 "github.com/opensaola/opensaola/api/v1"
 )
 
 func reconcileMiddleware(name, ns string) (reconcile.Result, error) {

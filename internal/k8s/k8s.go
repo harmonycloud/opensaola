@@ -21,7 +21,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/OpenSaola/opensaola/internal/k8s/kubeclient"
+	"github.com/opensaola/opensaola/internal/k8s/kubeclient"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"

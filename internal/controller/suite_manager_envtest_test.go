@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	v1 "github.com/OpenSaola/opensaola/api/v1"
+	v1 "github.com/opensaola/opensaola/api/v1"
 )
 
 var _ = Describe("Envtest Manager", func() {

@@ -21,18 +21,18 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/OpenSaola/opensaola/internal/cache"
-	"github.com/OpenSaola/opensaola/internal/service/packages"
+	"github.com/opensaola/opensaola/internal/cache"
+	"github.com/opensaola/opensaola/internal/service/packages"
 	"github.com/mohae/deepcopy"
 	"k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/OpenSaola/opensaola/internal/k8s"
+	"github.com/opensaola/opensaola/internal/k8s"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
 
-	"github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/service/status"
+	"github.com/opensaola/opensaola/api/v1"
+	"github.com/opensaola/opensaola/internal/service/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"

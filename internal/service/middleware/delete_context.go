@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"strings"
 
-	v1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/k8s"
+	v1 "github.com/opensaola/opensaola/api/v1"
+	"github.com/opensaola/opensaola/internal/k8s"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )

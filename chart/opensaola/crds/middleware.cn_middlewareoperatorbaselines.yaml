@@ -32,8 +32,9 @@ spec:
     name: v1
     schema:
       openAPIV3Schema:
-        description: MiddlewareOperatorBaseline is the Schema for the middlewareoperatorbaselines
-          API.
+        description: |-
+          MiddlewareOperatorBaseline is the Schema for the middlewareoperatorbaselines API.
+          It is a cluster-scoped resource that provides default templates for MiddlewareOperator instances.
         properties:
           apiVersion:
             description: |-
@@ -53,48 +54,77 @@ spec:
           metadata:
             type: object
           spec:
-            description: MiddlewareOperatorBaselineSpec defines the desired state
-              of MiddlewareOperatorBaseline.
+            description: |-
+              MiddlewareOperatorBaselineSpec defines the desired state of MiddlewareOperatorBaseline.
+              It serves as the cluster-scoped default template for creating MiddlewareOperator instances.
             properties:
               configurations:
+                description: Configurations is the list of default configuration resources
+                  included in this baseline.
                 items:
-                  description: Configuration 配置
+                  description: Configuration defines a named configuration with raw
+                    values.
                   properties:
                     name:
+                      description: Name is the unique name identifying this configuration
+                        entry.
                       type: string
                     values:
+                      description: |-
+                        Values holds configuration values as raw JSON, rendered from CUE/Go templates.
+                        The structure depends on the Configuration name and target resource type.
+                        For ConfigMap targets, this typically contains key-value pairs; for RBAC targets,
+                        it contains role/binding specifications.
+                        Example (ConfigMap): {"my.cnf": "max_connections=200\ninnodb_buffer_pool_size=1G"}
+                        Example (ServiceAccount): {"automountServiceAccountToken": true}
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                   type: object
                 type: array
               deployment:
+                description: Deployment holds the default operator Deployment spec
+                  as raw JSON.
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
               globe:
+                description: Globe holds optional global configuration (e.g., image
+                  repository) as raw JSON.
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
               gvks:
+                description: GVKs is the list of GroupVersionKind definitions for
+                  custom resources managed by this operator.
                 items:
                   description: GVK defines the GroupVersionKind of a Kubernetes object.
                   properties:
                     group:
+                      description: Group is the API group of the Kubernetes resource.
                       type: string
                     kind:
+                      description: Kind is the kind of the Kubernetes resource.
                       type: string
                     name:
+                      description: Name is the name identifier for this GVK entry.
                       type: string
                     version:
+                      description: Version is the API version of the Kubernetes resource.
                       type: string
                   type: object
                 type: array
               permissionScope:
-                description: PermissionScope 权限作用域
+                description: PermissionScope defines whether RBAC resources are created
+                  at Cluster or Namespace scope.
                 type: string
               permissions:
+                description: Permissions is the list of default RBAC permission definitions
+                  for operator service accounts.
                 items:
-                  description: Permission 权限
+                  description: Permission defines the RBAC permission for a service
+                    account.
                   properties:
                     rules:
+                      description: Rules is the list of RBAC policy rules to apply
+                        to the service account.
                       items:
                         description: |-
                           PolicyRule holds information that describes a policy rule, but does not contain information
@@ -145,19 +175,35 @@ spec:
                         type: object
                       type: array
                     serviceAccountName:
+                      description: ServiceAccountName is the name of the service account
+                        to bind these RBAC rules to.
                       type: string
                   type: object
                 type: array
               preActions:
+                description: PreActions is the list of pre-actions to execute before
+                  the main operator reconciliation.
                 items:
+                  description: PreAction defines a pre-action to execute before the
+                    main reconciliation workflow.
                   properties:
                     exposed:
+                      description: Exposed indicates whether this pre-action's output
+                        is exposed to the parent resource.
                       type: boolean
                     fixed:
+                      description: Fixed indicates whether this pre-action uses fixed
+                        parameters that cannot be overridden.
                       type: boolean
                     name:
+                      description: Name is the name of the MiddlewareActionBaseline
+                        to execute.
                       type: string
                     parameters:
+                      description: |-
+                        Parameters holds input parameters for the pre-action as raw JSON.
+                        The schema is defined by the corresponding MiddlewareActionBaseline.
+                        Example: {"backupPath": "/data/backup", "compress": true}
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                   type: object
@@ -168,8 +214,8 @@ spec:
               of MiddlewareOperatorBaseline.
             properties:
               conditions:
-                description: Represents the latest available observations of a deployment's
-                  current state.
+                description: Conditions represent the latest available observations
+                  of the baseline's current state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -230,7 +276,8 @@ spec:
                 format: int64
                 type: integer
               state:
-                description: The state of the middleware.
+                description: 'State is the high-level state of the baseline. Valid
+                  values: Available, Unavailable, Updating.'
                 type: string
             type: object
         type: object

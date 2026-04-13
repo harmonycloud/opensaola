@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -288,13 +289,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// pprof debug endpoint (port 6060).
-	go func() {
-		setupLog.Info("pprof listening on :6060")
-		if err := http.ListenAndServe(":6060", nil); err != nil {
-			setupLog.Error(err, "pprof server failed")
-		}
-	}()
+	// pprof debug endpoint (configurable via config file).
+	if viper.GetBool("pprof.enabled") {
+		pprofAddr := fmt.Sprintf(":%s", viper.GetString("pprof.port"))
+		go func() {
+			setupLog.Info("pprof server starting", "addr", pprofAddr)
+			if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+				setupLog.Error(err, "pprof server failed")
+			}
+		}()
+	} else {
+		setupLog.Info("pprof server disabled")
+	}
 
 	// Set APIReader so packages.Get() bypasses the cache (which strips Secret.Data).
 	packages.SetAPIReader(mgr.GetAPIReader())
@@ -304,22 +310,25 @@ func main() {
 	k8s.SetStatusAPIReader(mgr.GetAPIReader())
 
 	if err = (&controller.MiddlewareOperatorBaselineReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("middlewareoperatorbaseline-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MiddlewareOperatorBaseline")
 		os.Exit(1)
 	}
 	if err = (&controller.MiddlewareReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("middleware-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Middleware")
 		os.Exit(1)
 	}
 	if err = (&controller.MiddlewareBaselineReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("middlewarebaseline-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MiddlewareBaseline")
 		os.Exit(1)
@@ -340,29 +349,33 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.MiddlewareConfigurationReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("middlewareconfiguration-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MiddlewareConfiguration")
 		os.Exit(1)
 	}
 	if err = (&controller.MiddlewareActionBaselineReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("middlewareactionbaseline-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MiddlewareActionBaseline")
 		os.Exit(1)
 	}
 	if err = (&controller.MiddlewareActionReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("middlewareaction-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MiddlewareAction")
 		os.Exit(1)
 	}
 	if err = (&controller.MiddlewarePackageReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorderFor("middlewarepackage-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MiddlewarePackage")
 		os.Exit(1)

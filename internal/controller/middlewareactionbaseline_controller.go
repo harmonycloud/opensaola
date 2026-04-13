@@ -26,6 +26,7 @@ import (
 	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareactionbaseline"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -36,7 +37,8 @@ import (
 // MiddlewareActionBaselineReconciler reconciles a MiddlewareActionBaseline object
 type MiddlewareActionBaselineReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewareactionbaselines,verbs=get;list;watch;create;update;patch;delete
@@ -80,6 +82,7 @@ func (r *MiddlewareActionBaselineReconciler) Reconcile(ctx context.Context, req 
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middlewareactionbaseline.Check(ctx, r.Client, middlewareActionBaseline); err != nil {
 		stop()
+		r.Recorder.Event(middlewareActionBaseline, "Warning", "ValidationFailed", err.Error())
 		log.FromContext(ctx).Error(err, "failed to validate MiddlewareActionBaseline", "name", req.Name)
 		return ctrl.Result{}, err
 	}

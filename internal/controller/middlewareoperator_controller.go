@@ -186,6 +186,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 				zeusmetrics.ObserveLegacyDelete("middlewareoperator", "success", start)
 			}
 			k8s.MiddlewareOperatorCache.Delete(req.NamespacedName.String())
+			r.Recorder.Event(mo, "Normal", "Deleted", "MiddlewareOperator cleanup completed")
 			log.FromContext(ctx).Info("MiddlewareOperator deletion cleanup completed",
 				"name", mo.Name,
 				"namespace", mo.Namespace,
@@ -311,6 +312,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middlewareoperator.Check(ctx, r.Client, mo); err != nil {
 		stop()
+		r.Recorder.Event(mo, "Warning", "ValidationFailed", err.Error())
 		log.FromContext(ctx).Error(err, "failed to validate MiddlewareOperator", "namespace", mo.Namespace, "name", mo.Name)
 		return fmt.Errorf("failed to validate middlewareOperatorBaseline: %w", err)
 	}
@@ -335,6 +337,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 			return fmt.Errorf("failed to generate resources: %w", err)
 		}
 		stop()
+		r.Recorder.Event(mo, "Normal", "Published", "MiddlewareOperator published successfully")
 	} else if generation > observedGeneration || mo.Status.State == v1.StateUpdating { // actual > observed means update needed
 		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
 		if err = middlewareoperator.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionUpdate, mo); err != nil {
@@ -342,6 +345,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 			return fmt.Errorf("failed to update resources: %w", err)
 		}
 		stop()
+		r.Recorder.Event(mo, "Normal", "Updated", "MiddlewareOperator updated successfully")
 	}
 
 	return nil

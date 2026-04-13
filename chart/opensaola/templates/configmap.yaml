@@ -14,3 +14,6 @@ data:
       component: {{ .Values.config.labels.component | quote }}
     annotations:
       component: {{ .Values.config.annotations.component | quote }}
+    pprof:
+      enabled: {{ .Values.config.pprof.enabled }}
+      port: {{ .Values.config.pprof.port | quote }}

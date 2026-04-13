@@ -35,7 +35,9 @@ spec:
     name: v1
     schema:
       openAPIV3Schema:
-        description: Middleware is the Schema for the middlewares API.
+        description: |-
+          Middleware is the Schema for the middlewares API.
+          It represents a deployed middleware instance (e.g., MySQL, Redis) managed by the operator.
         properties:
           apiVersion:
             description: |-
@@ -58,41 +60,85 @@ spec:
             description: MiddlewareSpec defines the desired state of Middleware.
             properties:
               baseline:
+                description: Baseline is the name of the MiddlewareBaseline to use
+                  as the default template.
                 type: string
               configurations:
+                description: Configurations is the list of additional configuration
+                  resources to create alongside the middleware.
                 items:
-                  description: Configuration 配置
+                  description: Configuration defines a named configuration with raw
+                    values.
                   properties:
                     name:
+                      description: Name is the unique name identifying this configuration
+                        entry.
                       type: string
                     values:
+                      description: |-
+                        Values holds configuration values as raw JSON, rendered from CUE/Go templates.
+                        The structure depends on the Configuration name and target resource type.
+                        For ConfigMap targets, this typically contains key-value pairs; for RBAC targets,
+                        it contains role/binding specifications.
+                        Example (ConfigMap): {"my.cnf": "max_connections=200\ninnodb_buffer_pool_size=1G"}
+                        Example (ServiceAccount): {"automountServiceAccountToken": true}
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                   type: object
                 type: array
               necessary:
+                description: |-
+                  Necessary holds required parameters for the middleware instance as raw JSON.
+                  The exact schema depends on the middleware type defined in the MiddlewareBaseline.
+                  Common fields include image, replicas, storage, and resource requirements.
+                  Example: {"image": "redis:7.2", "replicas": 3, "storage": "10Gi"}
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
               operatorBaseline:
+                description: OperatorBaseline references the MiddlewareOperatorBaseline
+                  that manages the operator for this middleware.
                 properties:
                   gvkName:
+                    description: GvkName is the GroupVersionKind identifier used to
+                      match the operator baseline.
                     type: string
                   name:
+                    description: Name is the name of the MiddlewareOperatorBaseline
+                      resource.
                     type: string
                 type: object
               parameters:
+                description: |-
+                  Parameters holds user-configurable parameters for the middleware instance as raw JSON.
+                  These values are merged with defaults from the MiddlewareBaseline during reconciliation.
+                  The schema varies by middleware type; common fields include port, password, and tuning knobs.
+                  Example: {"port": 6379, "maxmemory": "256mb", "databases": 16}
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
               preActions:
+                description: PreActions is the list of pre-actions to execute before
+                  the main reconciliation workflow.
                 items:
+                  description: PreAction defines a pre-action to execute before the
+                    main reconciliation workflow.
                   properties:
                     exposed:
+                      description: Exposed indicates whether this pre-action's output
+                        is exposed to the parent resource.
                       type: boolean
                     fixed:
+                      description: Fixed indicates whether this pre-action uses fixed
+                        parameters that cannot be overridden.
                       type: boolean
                     name:
+                      description: Name is the name of the MiddlewareActionBaseline
+                        to execute.
                       type: string
                     parameters:
+                      description: |-
+                        Parameters holds input parameters for the pre-action as raw JSON.
+                        The schema is defined by the corresponding MiddlewareActionBaseline.
+                        Example: {"backupPath": "/data/backup", "compress": true}
                       type: object
                       x-kubernetes-preserve-unknown-fields: true
                   type: object
@@ -102,8 +148,8 @@ spec:
             description: MiddlewareStatus defines the observed state of Middleware.
             properties:
               conditions:
-                description: Represents the latest available observations of a deployment's
-                  current state.
+                description: Conditions represent the latest available observations
+                  of the middleware's current state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -160,144 +206,243 @@ spec:
                   type: object
                 type: array
               customResources:
+                description: CustomResources holds the status of the underlying custom
+                  resources managed by the middleware operator.
                 properties:
                   creationTimestamp:
+                    description: CreationTimestamp is the time when the custom resources
+                      were first created.
                     format: date-time
                     type: string
                   disaster:
+                    description: Disaster holds the optional disaster recovery configuration
+                      and status.
                     properties:
                       data:
+                        description: Data holds the data replication configuration
+                          and status.
                         properties:
                           oppositeAddress:
+                            description: OppositeAddress is the address of the peer
+                              cluster for bidirectional replication.
                             type: string
                           oppositeClusterId:
+                            description: OppositeClusterId is the unique identifier
+                              of the peer cluster.
                             type: string
                           oppositeClusterName:
+                            description: OppositeClusterName is the name of the peer
+                              cluster.
                             type: string
                           oppositeClusterNamespace:
+                            description: OppositeClusterNamespace is the namespace
+                              in the peer cluster.
                             type: string
                           phase:
+                            description: Phase is the current phase of the data replication
+                              process.
                             type: string
                           targetAddress:
+                            description: Address is the target address for data replication.
                             type: string
                         type: object
                       gossip:
+                        description: Gossip holds the gossip protocol discovery configuration
+                          for cluster membership.
                         properties:
                           advertiseAddress:
+                            description: AdvertiseAddress is the address this node
+                              advertises to peers for gossip communication.
                             type: string
                           advertisePort:
+                            description: AdvertisePort is the port this node advertises
+                              to peers for gossip communication.
                             format: int64
                             type: integer
                           clusterPhase:
+                            description: ClusterPhase is the current phase of the
+                              cluster as a whole.
                             type: string
                           clusterRole:
+                            description: ClusterRole is the role of this node within
+                              the cluster (e.g., primary, secondary).
                             type: string
                           gossipPhase:
+                            description: GossipPhase is the current phase of the gossip
+                              subsystem specifically.
                             type: string
                           phase:
+                            description: Phase is the current phase of the gossip
+                              protocol.
                             type: string
                           role:
+                            description: Role is the replication role of this node.
                             type: string
                         type: object
                     type: object
                   include:
+                    description: Include holds references to sub-resources (pods,
+                      PVCs, services, etc.) associated with this middleware.
                     properties:
                       daemonsets:
+                        description: Daemonsets is the list of associated DaemonSet
+                          resources.
                         items:
+                          description: IncludeModel represents a reference to a Kubernetes
+                            sub-resource.
                           properties:
                             name:
+                              description: Name is the name of the sub-resource.
                               type: string
                             source:
+                              description: Source is the origin of this sub-resource
+                                reference.
                               type: string
                             sourceName:
+                              description: SourceName is the name of the source that
+                                created this sub-resource.
                               type: string
                             type:
+                              description: Type is the kind of the sub-resource.
                               type: string
                           type: object
                         type: array
                       deployments:
+                        description: Deployments is the list of associated Deployment
+                          resources.
                         items:
+                          description: IncludeModel represents a reference to a Kubernetes
+                            sub-resource.
                           properties:
                             name:
+                              description: Name is the name of the sub-resource.
                               type: string
                             source:
+                              description: Source is the origin of this sub-resource
+                                reference.
                               type: string
                             sourceName:
+                              description: SourceName is the name of the source that
+                                created this sub-resource.
                               type: string
                             type:
+                              description: Type is the kind of the sub-resource.
                               type: string
                           type: object
                         type: array
                       pods:
+                        description: Pods is the list of associated Pod resources.
                         items:
+                          description: IncludeModel represents a reference to a Kubernetes
+                            sub-resource.
                           properties:
                             name:
+                              description: Name is the name of the sub-resource.
                               type: string
                             source:
+                              description: Source is the origin of this sub-resource
+                                reference.
                               type: string
                             sourceName:
+                              description: SourceName is the name of the source that
+                                created this sub-resource.
                               type: string
                             type:
+                              description: Type is the kind of the sub-resource.
                               type: string
                           type: object
                         type: array
                       pvcs:
+                        description: Pvcs is the list of associated PersistentVolumeClaim
+                          resources.
                         items:
+                          description: IncludeModel represents a reference to a Kubernetes
+                            sub-resource.
                           properties:
                             name:
+                              description: Name is the name of the sub-resource.
                               type: string
                             source:
+                              description: Source is the origin of this sub-resource
+                                reference.
                               type: string
                             sourceName:
+                              description: SourceName is the name of the source that
+                                created this sub-resource.
                               type: string
                             type:
+                              description: Type is the kind of the sub-resource.
                               type: string
                           type: object
                         type: array
                       services:
+                        description: Services is the list of associated Service resources.
                         items:
+                          description: IncludeModel represents a reference to a Kubernetes
+                            sub-resource.
                           properties:
                             name:
+                              description: Name is the name of the sub-resource.
                               type: string
                             source:
+                              description: Source is the origin of this sub-resource
+                                reference.
                               type: string
                             sourceName:
+                              description: SourceName is the name of the source that
+                                created this sub-resource.
                               type: string
                             type:
+                              description: Type is the kind of the sub-resource.
                               type: string
                           type: object
                         type: array
                       statefulsets:
+                        description: Statefulsets is the list of associated StatefulSet
+                          resources.
                         items:
+                          description: IncludeModel represents a reference to a Kubernetes
+                            sub-resource.
                           properties:
                             name:
+                              description: Name is the name of the sub-resource.
                               type: string
                             source:
+                              description: Source is the origin of this sub-resource
+                                reference.
                               type: string
                             sourceName:
+                              description: SourceName is the name of the source that
+                                created this sub-resource.
                               type: string
                             type:
+                              description: Type is the kind of the sub-resource.
                               type: string
                           type: object
                         type: array
                     type: object
                   phase:
-                    description: Phase 阶段
+                    description: Phase is the current lifecycle phase of the custom
+                      resources.
                     type: string
                   reason:
+                    description: Reason provides a human-readable explanation of the
+                      current phase.
                     type: string
                   replicas:
+                    description: Replicas is the number of replicas reported by the
+                      custom resources.
                     type: integer
                   resources:
-                    description: ResourceRequirements describes the compute resource
-                      requirements.
+                    description: Resources holds the compute resource requirements
+                      (CPU, memory) of the custom resources.
                     properties:
                       claims:
                         description: |-
                           Claims lists the names of resources, defined in spec.resourceClaims,
                           that are used by this container.
 
-                          This is an alpha field and requires enabling the
+                          This field depends on the
                           DynamicResourceAllocation feature gate.
 
                           This field is immutable. It can only be set for containers.
@@ -349,6 +494,8 @@ spec:
                         type: object
                     type: object
                   type:
+                    description: Type is the kind identifier of the custom resource
+                      (e.g., "cluster", "resources").
                     type: string
                 type: object
               observedGeneration:
@@ -356,9 +503,12 @@ spec:
                 format: int64
                 type: integer
               reason:
+                description: Reason provides a human-readable explanation of the current
+                  state.
                 type: string
               state:
-                description: The state of the middleware.
+                description: 'State is the high-level state of the middleware. Valid
+                  values: Available, Unavailable, Updating.'
                 type: string
             type: object
         type: object

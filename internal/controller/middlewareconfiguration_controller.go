@@ -26,6 +26,7 @@ import (
 	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareconfiguration"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -36,7 +37,8 @@ import (
 // MiddlewareConfigurationReconciler reconciles a MiddlewareConfiguration object
 type MiddlewareConfigurationReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewareconfigurations,verbs=get;list;watch;create;update;patch;delete
@@ -79,6 +81,7 @@ func (r *MiddlewareConfigurationReconciler) Reconcile(ctx context.Context, req c
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middlewareconfiguration.Check(ctx, r.Client, middlewareConfiguration); err != nil {
 		stop()
+		r.Recorder.Event(middlewareConfiguration, "Warning", "ValidationFailed", err.Error())
 		log.FromContext(ctx).Error(err, "failed to validate MiddlewareConfiguration", "name", req.Name)
 		return ctrl.Result{}, err
 	}

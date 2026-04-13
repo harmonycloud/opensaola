@@ -30,6 +30,7 @@ import (
 	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareaction"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -40,7 +41,8 @@ import (
 // MiddlewareActionReconciler reconciles a MiddlewareAction object
 type MiddlewareActionReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewareactions,verbs=get;list;watch;create;update;patch;delete
@@ -110,6 +112,7 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middlewareaction.Check(ctx, r.Client, middlewareAction); err != nil {
 		stop()
+		r.Recorder.Event(middlewareAction, "Warning", "ValidationFailed", err.Error())
 		log.FromContext(ctx).Error(err, "failed to validate MiddlewareAction", "namespace", req.Namespace, "name", req.Name)
 		return ctrl.Result{}, err
 	}
@@ -128,10 +131,12 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
 		if err = middlewareaction.Execute(ctx, r.Client, middlewareAction); err != nil {
 			stop()
+			r.Recorder.Event(middlewareAction, "Warning", "ExecutionFailed", err.Error())
 			log.FromContext(ctx).Error(err, "failed to execute MiddlewareAction", "namespace", req.Namespace, "name", req.Name)
 			return ctrl.Result{}, err
 		}
 		stop()
+		r.Recorder.Event(middlewareAction, "Normal", "Executed", "Action executed successfully")
 	}
 
 	return ctrl.Result{}, nil

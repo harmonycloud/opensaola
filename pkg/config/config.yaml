@@ -13,3 +13,6 @@ annotations:
   crsync: "middleware.cn/crsync"
 data_namespace: "middleware-operator"
 cache_cleanup_interval: 1800 # cache cleanup interval in seconds
+pprof:
+  enabled: false
+  port: "6060"

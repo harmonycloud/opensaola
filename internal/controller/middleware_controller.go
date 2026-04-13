@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 
 	"github.com/OpenSaola/opensaola/api/v1"
@@ -46,7 +47,8 @@ import (
 // MiddlewareReconciler reconciles a Middleware object
 type MiddlewareReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewares,verbs=get;list;watch;create;update;patch;delete
@@ -150,6 +152,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			if usedLegacy {
 				zeusmetrics.ObserveLegacyDelete("middleware", "success", start)
 			}
+			r.Recorder.Event(mid, "Normal", "Deleted", "Middleware cleanup completed")
 			log.FromContext(ctx).Info("Middleware deletion cleanup completed",
 				"name", mid.Name,
 				"namespace", mid.Namespace,
@@ -269,6 +272,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middleware.Check(ctx, r.Client, mid); err != nil {
 		stop()
+		r.Recorder.Event(mid, "Warning", "ValidationFailed", err.Error())
 		log.FromContext(ctx).Error(err, "middleware check failed", "namespace", mid.Namespace, "name", mid.Name)
 		return ctrl.Result{}, err
 	}
@@ -278,6 +282,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err = middleware.ReplacePackage(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, mid); err != nil {
 		stop()
 		if errors.Is(err, consts.ErrPackageNotReady) {
+			r.Recorder.Event(mid, "Warning", "PackageNotReady", "Package not ready, will retry")
 			log.FromContext(ctx).Info("middleware package not ready, requeuing", "namespace", mid.Namespace, "name", mid.Name, "requeueAfter", 5*time.Second)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
@@ -285,6 +290,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			log.FromContext(ctx).Info("middleware package install failed, aborting", "warning", true, "namespace", mid.Namespace, "name", mid.Name, "err", err)
 			return ctrl.Result{}, nil
 		}
+		r.Recorder.Event(mid, "Warning", "UpgradeFailed", err.Error())
 		return ctrl.Result{}, fmt.Errorf("upgrade failed: %w", err)
 	}
 	stop()
@@ -300,6 +306,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, err
 		}
 		stop()
+		r.Recorder.Event(mid, "Normal", "Published", "Middleware published successfully")
 	} else if generation > observedGeneration || mid.Status.State == v1.StateUpdating {
 		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
 		if err = middleware.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionUpdate, mid); err != nil {
@@ -308,6 +315,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, err
 		}
 		stop()
+		r.Recorder.Event(mid, "Normal", "Updated", "Middleware updated successfully")
 	}
 	return ctrl.Result{}, nil
 }

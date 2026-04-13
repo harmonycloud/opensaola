@@ -101,11 +101,13 @@ func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.R
 			logger.Log.Warnf("package unavailable for too long, aborting upgrade: %v", err)
 			return ctrl.Result{}, nil
 		}
+		logger.Log.Errorf("failed to handle MiddlewareOperator %s/%s: %v", req.Namespace, req.Name, err)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	// Handle deployment
 	if err := r.handleDeployment(ctx, req); err != nil {
+		logger.Log.Errorf("failed to handle deployment for MiddlewareOperator %s/%s: %v", req.Namespace, req.Name, err)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -139,12 +141,14 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 				if usedLegacy {
 					zeusmetrics.ObserveLegacyDelete("middlewareoperator", "error", start)
 				}
-				logger.Log.Infoj(map[string]interface{}{
+				logger.Log.Errorj(map[string]interface{}{
+					"name":             mo.Name,
+					"namespace":        mo.Namespace,
 					"path":             path,
 					"finalizer_action": "pending",
 					"legacy_reason":    legacyReason,
 					"cleanup_result":   "error",
-					"error":            resolveErr.Error(),
+					"err":              resolveErr.Error(),
 				})
 				return resolveErr
 			}
@@ -152,12 +156,14 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 				if usedLegacy {
 					zeusmetrics.ObserveLegacyDelete("middlewareoperator", "error", start)
 				}
-				logger.Log.Infoj(map[string]interface{}{
+				logger.Log.Errorj(map[string]interface{}{
+					"name":             mo.Name,
+					"namespace":        mo.Namespace,
 					"path":             path,
 					"finalizer_action": "pending",
 					"legacy_reason":    legacyReason,
 					"cleanup_result":   "error",
-					"error":            cleanErr.Error(),
+					"err":              cleanErr.Error(),
 				})
 				return cleanErr
 			}
@@ -179,6 +185,8 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 			}
 			k8s.MiddlewareOperatorCache.Delete(req.NamespacedName.String())
 			logger.Log.Infoj(map[string]interface{}{
+				"name":             mo.Name,
+				"namespace":        mo.Namespace,
 				"path":             path,
 				"finalizer_action": "remove",
 				"legacy_reason":    legacyReason,
@@ -186,6 +194,8 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 			})
 		} else {
 			logger.Log.Warnj(map[string]interface{}{
+				"name":             mo.Name,
+				"namespace":        mo.Namespace,
 				"path":             "mainline",
 				"finalizer_action": "missing",
 				"legacy_reason":    "",
@@ -198,10 +208,13 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 	if !controllerutil.ContainsFinalizer(mo, v1.FinalizerMiddlewareOperator) {
 		controllerutil.AddFinalizer(mo, v1.FinalizerMiddlewareOperator)
 		if updateErr := r.Update(ctx, mo); updateErr != nil {
+			logger.Log.Errorf("failed to add finalizer for MiddlewareOperator %s/%s: %v", mo.Namespace, mo.Name, updateErr)
 			return updateErr
 		}
 		zeusmetrics.ObserveFinalizerBackfill("middlewareoperator", "success")
 		logger.Log.Infoj(map[string]interface{}{
+			"name":             mo.Name,
+			"namespace":        mo.Namespace,
 			"path":             "mainline",
 			"finalizer_action": "add",
 			"legacy_reason":    "",
@@ -291,12 +304,14 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middlewareoperator.Check(ctx, r.Client, mo); err != nil {
 		stop()
+		logger.Log.Errorf("failed to validate MiddlewareOperator %s/%s: %v", mo.Namespace, mo.Name, err)
 		return fmt.Errorf("failed to validate middlewareOperatorBaseline: %w", err)
 	}
 	stop()
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middlewareoperator.ReplacePackage(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, mo); err != nil {
 		stop()
+		logger.Log.Errorf("failed to replace package for MiddlewareOperator %s/%s: %v", mo.Namespace, mo.Name, err)
 		return fmt.Errorf("upgrade failed: %w", err)
 	}
 	stop()

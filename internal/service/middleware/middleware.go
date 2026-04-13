@@ -149,7 +149,9 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 						if mo.Annotations != nil {
 							delete(mo.Annotations, v1.LabelUpdate)
 						}
-						_ = k8s.UpdateMiddleware(ctx, cli, mo)
+						if updateErr := k8s.UpdateMiddleware(ctx, cli, mo); updateErr != nil {
+						logger.Log.Warnf("failed to clear upgrade annotation on Middleware %s/%s: %v", mo.Namespace, mo.Name, updateErr)
+					}
 					}
 					if m.Annotations != nil {
 						delete(m.Annotations, v1.LabelUpdate)
@@ -213,7 +215,10 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 				rollback()
 				return err
 			}
-			_, _ = k8s.GetMiddleware(ctx, cli, m.Name, m.Namespace)
+			// Refresh cache after successful upgrade
+			if _, err := k8s.GetMiddleware(ctx, cli, m.Name, m.Namespace); err != nil {
+				logger.Log.Warnf("failed to refresh Middleware %s/%s cache: %v", m.Namespace, m.Name, err)
+			}
 		}
 	}
 	return nil

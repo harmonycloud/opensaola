@@ -88,7 +88,7 @@ func executeCmd(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 			cmd = exec.Command("sh", "-c", strings.Join(step.CMD.Command, " "))
 		}
 
-		logger.Log.Info(strings.Join(step.CMD.Command, " "))
+		logger.Log.Debug(strings.Join(step.CMD.Command, " "))
 
 		// Use CombinedOutput to capture both stdout and stderr
 		var output []byte

@@ -18,10 +18,16 @@ package synchronizer
 
 import (
 	"sync"
+
+	"github.com/OpenSaola/opensaola/internal/resource/logger"
 )
 
 func safeClose(ch chan struct{}) {
-	defer func() { _ = recover() }()
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Log.Errorf("panic recovered in sync state: %v", r)
+		}
+	}()
 	close(ch)
 }
 

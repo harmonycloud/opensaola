@@ -176,6 +176,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if !controllerutil.ContainsFinalizer(mid, v1.FinalizerMiddleware) {
 		controllerutil.AddFinalizer(mid, v1.FinalizerMiddleware)
 		if updateErr := r.Update(ctx, mid); updateErr != nil {
+			logger.Log.Errorf("failed to add finalizer for middleware %s/%s: %v", mid.Namespace, mid.Name, updateErr)
 			return ctrl.Result{}, updateErr
 		}
 		zeusmetrics.ObserveFinalizerBackfill("middleware", "success")
@@ -260,14 +261,14 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		err = k8s.UpdateMiddlewareStatus(ctx, r.Client, mid)
 		stopStatus()
 		if err != nil {
-			logger.Log.Errorf("failed to update middleware status: %v", err)
+			logger.Log.Errorf("failed to update middleware %s/%s status: %v", mid.Namespace, mid.Name, err)
 		}
 	}()
 
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middleware.Check(ctx, r.Client, mid); err != nil {
 		stop()
-		logger.Log.Errorf("middleware check failed: %v", err)
+		logger.Log.Errorf("middleware %s/%s check failed: %v", mid.Namespace, mid.Name, err)
 		return ctrl.Result{}, err
 	}
 	stop()
@@ -276,11 +277,11 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err = middleware.ReplacePackage(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, mid); err != nil {
 		stop()
 		if errors.Is(err, consts.ErrPackageNotReady) {
-			logger.Log.Infof("package not ready, requeuing after %s", 5*time.Second)
+			logger.Log.Infof("middleware %s/%s package not ready, requeuing after %s", mid.Namespace, mid.Name, 5*time.Second)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 		if errors.Is(err, consts.ErrPackageInstallFailed) {
-			logger.Log.Warnf("package install failed, aborting upgrade: %v", err)
+			logger.Log.Warnf("middleware %s/%s package install failed, aborting: %v", mid.Namespace, mid.Name, err)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("upgrade failed: %w", err)
@@ -294,7 +295,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
 		if err = middleware.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionPublish, mid); err != nil {
 			stop()
-			logger.Log.Errorf("middleware build failed: %v", err)
+			logger.Log.Errorf("middleware %s/%s build failed: %v", mid.Namespace, mid.Name, err)
 			return ctrl.Result{}, err
 		}
 		stop()
@@ -302,7 +303,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
 		if err = middleware.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionUpdate, mid); err != nil {
 			stop()
-			logger.Log.Errorf("middleware update failed: %v", err)
+			logger.Log.Errorf("middleware %s/%s update failed: %v", mid.Namespace, mid.Name, err)
 			return ctrl.Result{}, err
 		}
 		stop()

@@ -37,6 +37,37 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+// sanitizeHeaders returns a copy of headers with sensitive values redacted.
+func sanitizeHeaders(headers map[string]string) map[string]string {
+	if headers == nil {
+		return nil
+	}
+	sensitiveKeys := map[string]bool{
+		"authorization":       true,
+		"cookie":              true,
+		"x-api-key":           true,
+		"x-auth-token":        true,
+		"proxy-authorization": true,
+	}
+	safe := make(map[string]string, len(headers))
+	for k, v := range headers {
+		if sensitiveKeys[strings.ToLower(k)] {
+			safe[k] = "***"
+		} else {
+			safe[k] = v
+		}
+	}
+	return safe
+}
+
+// truncateBody returns the first maxLen bytes of body, appending "..." if truncated.
+func truncateBody(body string, maxLen int) string {
+	if len(body) <= maxLen {
+		return body
+	}
+	return body[:maxLen] + "..."
+}
+
 // executeHTTP executes an HTTP step
 func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.MiddlewareAction) (err error) {
 	conditionExecuteHttp := status.GetCondition(*ctx, &m.Status.Conditions, fmt.Sprintf("STEP-%s", step.Name))
@@ -95,11 +126,11 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 		var output []byte
 		output, err = io.ReadAll(resp.Body)
 		if err != nil {
-			return fmt.Errorf("execute http error: %w output: %s method: %s url: %s header: %v body: %s", err, string(output), step.HTTP.Method, step.HTTP.URL, step.HTTP.Header, step.HTTP.Body)
+			return fmt.Errorf("execute http error: %w output: %s method: %s url: %s header: %v body: %s", err, string(output), step.HTTP.Method, step.HTTP.URL, sanitizeHeaders(step.HTTP.Header), truncateBody(step.HTTP.Body, 200))
 
 		}
 
-		msg = fmt.Sprintf("output: %s method: %s url: %s header: %v body: %s", string(output), step.HTTP.Method, step.HTTP.URL, step.HTTP.Header, step.HTTP.Body)
+		msg = fmt.Sprintf("output: %s method: %s url: %s header: %v body: %s", string(output), step.HTTP.Method, step.HTTP.URL, sanitizeHeaders(step.HTTP.Header), truncateBody(step.HTTP.Body, 200))
 
 		if step.Output.Expose {
 			stepMap := ctxkeys.StepFrom(*ctx)

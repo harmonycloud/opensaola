@@ -26,8 +26,8 @@ import (
 	"github.com/mohae/deepcopy"
 	"k8s.io/apimachinery/pkg/api/equality"
 
-	v1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/k8s"
+	v1 "github.com/opensaola/opensaola/api/v1"
+	"github.com/opensaola/opensaola/internal/k8s"
 	"github.com/tidwall/gjson"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"

@@ -28,7 +28,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/OpenSaola/opensaola/test/utils"
+	"github.com/opensaola/opensaola/test/utils"
 )
 
 var (

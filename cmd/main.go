@@ -26,14 +26,14 @@ import (
 	"path/filepath"
 	"time"
 
-	v1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/controller"
-	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
-	"github.com/OpenSaola/opensaola/internal/service/consts"
-	"github.com/OpenSaola/opensaola/internal/service/packages"
-	"github.com/OpenSaola/opensaola/pkg/config"
+	v1 "github.com/opensaola/opensaola/api/v1"
+	"github.com/opensaola/opensaola/internal/controller"
+	"github.com/opensaola/opensaola/internal/k8s"
+	"github.com/opensaola/opensaola/internal/resource"
+	"github.com/opensaola/opensaola/internal/resource/logger"
+	"github.com/opensaola/opensaola/internal/service/consts"
+	"github.com/opensaola/opensaola/internal/service/packages"
+	"github.com/opensaola/opensaola/pkg/config"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"

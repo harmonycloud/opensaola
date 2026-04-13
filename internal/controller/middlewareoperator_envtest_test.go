@@ -25,7 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	v1 "github.com/OpenSaola/opensaola/api/v1"
+	v1 "github.com/opensaola/opensaola/api/v1"
 )
 
 func reconcileMO(namespace, name string) (reconcile.Result, error) {

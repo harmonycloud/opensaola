@@ -24,11 +24,11 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 
-	"github.com/OpenSaola/opensaola/internal/k8s"
+	"github.com/opensaola/opensaola/internal/k8s"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	v1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/pkg/tools"
+	v1 "github.com/opensaola/opensaola/api/v1"
+	"github.com/opensaola/opensaola/pkg/tools"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"

@@ -22,8 +22,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	"github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/cache"
+	"github.com/opensaola/opensaola/api/v1"
+	"github.com/opensaola/opensaola/internal/cache"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"

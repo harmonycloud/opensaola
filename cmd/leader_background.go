@@ -19,10 +19,10 @@ package main
 import (
 	"context"
 
-	"github.com/OpenSaola/opensaola/internal/resource"
-	"github.com/OpenSaola/opensaola/internal/service/synchronizer"
-	"github.com/OpenSaola/opensaola/internal/service/watcher"
-	"github.com/OpenSaola/opensaola/pkg/tools/ctxkeys"
+	"github.com/opensaola/opensaola/internal/resource"
+	"github.com/opensaola/opensaola/internal/service/synchronizer"
+	"github.com/opensaola/opensaola/internal/service/watcher"
+	"github.com/opensaola/opensaola/pkg/tools/ctxkeys"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"

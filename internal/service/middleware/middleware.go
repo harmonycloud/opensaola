@@ -31,27 +31,19 @@ import (
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Check validates Middleware
 func Check(ctx context.Context, cli client.Client, m *v1.Middleware) error {
 	defer func() {
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":      "finished validating Middleware",
-			"name":      m.Name,
-			"namespace": m.Namespace,
-		})
+		log.FromContext(ctx).Info("finished validating Middleware", "name", m.Name, "namespace", m.Namespace)
 	}()
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":      "validating Middleware",
-		"name":      m.Name,
-		"namespace": m.Namespace,
-	})
+	log.FromContext(ctx).Info("validating Middleware", "name", m.Name, "namespace", m.Namespace)
 
 	conditionChecked := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeChecked)
 	if conditionChecked.Status != metav1.ConditionTrue || conditionChecked.ObservedGeneration < m.Generation {
@@ -88,25 +80,21 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 		}
 		defer func() {
 			if err != nil {
-				logger.Log.Errorf("failed to upgrade Middleware: %v", err)
+				log.FromContext(ctx).Error(err, "failed to upgrade Middleware")
 				conditionUpdating.Failed(ctx, err.Error(), m.Generation)
 			} else {
-				logger.Log.Infof("Middleware upgrade succeeded")
+				log.FromContext(ctx).Info("Middleware upgrade succeeded")
 				conditionUpdating.Success(ctx, m.Generation)
 			}
 			if updateErr := k8s.UpdateMiddlewareStatus(ctx, cli, m); updateErr != nil {
-				logger.Log.Errorf("failed to update Middleware status during upgrade: %v", updateErr)
+				log.FromContext(ctx).Error(updateErr, "failed to update Middleware status during upgrade")
 				if err == nil {
 					err = updateErr
 				}
 			}
 		}()
 
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":      "upgrading Middleware",
-			"name":      m.Name,
-			"namespace": m.Namespace,
-		})
+		log.FromContext(ctx).Info("upgrading Middleware", "name", m.Name, "namespace", m.Namespace)
 		if conditionChecked.Status == metav1.ConditionTrue {
 			// Delete already published resources
 			// err = HandleResource(ctx, cli, consts.HandleActionDelete, m)
@@ -130,14 +118,7 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 				return err
 			}
 
-			logger.Log.Infoj(map[string]interface{}{
-				"amsg":      "upgrading in progress",
-				"name":      m.Name,
-				"namespace": m.Namespace,
-				"package":   mp[0].Name,
-				"version":   m.Annotations[v1.LabelUpdate],
-				"baseline":  m.Annotations[v1.LabelBaseline],
-			})
+			log.FromContext(ctx).Info("upgrading in progress", "name", m.Name, "namespace", m.Namespace, "package", mp[0].Name, "version", m.Annotations[v1.LabelUpdate], "baseline", m.Annotations[v1.LabelBaseline])
 
 			// Do not continue parsing/switching baseline when package is not ready: avoid tight loop stuck in Updating state.
 			enabled, installErr, statusErr := packages.GetInstallStatus(ctx, cli, mp[0].Name)
@@ -150,7 +131,7 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 							delete(mo.Annotations, v1.LabelUpdate)
 						}
 						if updateErr := k8s.UpdateMiddleware(ctx, cli, mo); updateErr != nil {
-						logger.Log.Warnf("failed to clear upgrade annotation on Middleware %s/%s: %v", mo.Namespace, mo.Name, updateErr)
+						log.FromContext(ctx).Info("failed to clear upgrade annotation on Middleware", "warning", true, "namespace", mo.Namespace, "name", mo.Name, "err", updateErr)
 					}
 					}
 					if m.Annotations != nil {
@@ -167,14 +148,7 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 			if err != nil {
 				return err
 			}
-			logger.Log.Infoj(map[string]interface{}{
-				"amsg":      "upgrading [querying baseline]",
-				"name":      m.Name,
-				"namespace": m.Namespace,
-				"package":   mp[0].Name,
-				"version":   m.Annotations[v1.LabelUpdate],
-				"baseline":  baseline.Name,
-			})
+			log.FromContext(ctx).Info("upgrading [querying baseline]", "name", m.Name, "namespace", m.Namespace, "package", mp[0].Name, "version", m.Annotations[v1.LabelUpdate], "baseline", baseline.Name)
 
 			// Save original state; roll back in-memory changes if subsequent cluster write fails,
 			// preventing the controller defer from reading polluted Annotations/Labels/Spec.
@@ -217,7 +191,7 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 			}
 			// Refresh cache after successful upgrade
 			if _, err := k8s.GetMiddleware(ctx, cli, m.Name, m.Namespace); err != nil {
-				logger.Log.Warnf("failed to refresh Middleware %s/%s cache: %v", m.Namespace, m.Name, err)
+				log.FromContext(ctx).Info("failed to refresh Middleware cache", "warning", true, "namespace", m.Namespace, "name", m.Name, "err", err)
 			}
 		}
 	}
@@ -233,14 +207,14 @@ func TemplateParseWithBaseline(ctx context.Context, cli client.Client, m *v1.Mid
 	conditionTemplateParseWithBaseline := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeTemplateParseWithBaseline)
 	defer func() {
 		if err != nil {
-			logger.Log.Errorf("TemplateParseWithBaseline error: %v", err)
+			log.FromContext(ctx).Error(err, "TemplateParseWithBaseline error")
 			conditionTemplateParseWithBaseline.Failed(ctx, err.Error(), m.Generation)
 		} else {
-			logger.Log.Infof("TemplateParseWithBaseline finished")
+			log.FromContext(ctx).Info("TemplateParseWithBaseline finished")
 			conditionTemplateParseWithBaseline.Success(ctx, m.Generation)
 		}
 		if updateErr := k8s.UpdateMiddlewareStatus(ctx, cli, m); updateErr != nil {
-			logger.Log.Errorf("update middleware status error: %v", updateErr)
+			log.FromContext(ctx).Error(updateErr, "update middleware status error")
 			if err == nil {
 				err = updateErr
 			}

@@ -24,12 +24,12 @@ import (
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/cuecontext"
 	v1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareactionbaseline"
 	"github.com/OpenSaola/opensaola/internal/service/status"
 	"github.com/OpenSaola/opensaola/pkg/tools"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func HandlePreActions(ctx context.Context, cli client.Client, m tools.Quoter) (err error) {
@@ -37,7 +37,7 @@ func HandlePreActions(ctx context.Context, cli client.Client, m tools.Quoter) (e
 		var mad v1.MiddlewareActionBaseline
 		mad, err = middlewareactionbaseline.Get(ctx, cli, preAction.Name, m.GetLabels()[v1.LabelPackageName])
 		if err != nil {
-			logger.Log.Errorf("get middleware action baseline error: %v", err)
+			log.FromContext(ctx).Error(err, "get middleware action baseline error")
 			return err
 		}
 		if mad.Spec.BaselineType != v1.WorkflowPreAction {
@@ -52,13 +52,13 @@ func HandlePreActions(ctx context.Context, cli client.Client, m tools.Quoter) (e
 		var mBytes []byte
 		mBytes, err = json.Marshal(m)
 		if err != nil {
-			logger.Log.Errorf("marshal middleware error: %v", err)
+			log.FromContext(ctx).Error(err, "marshal middleware error")
 			return err
 		}
 		temp := new(unstructured.Unstructured)
 		err = json.Unmarshal(mBytes, temp)
 		if err != nil {
-			logger.Log.Errorf("unmarshal middleware error: %v", err)
+			log.FromContext(ctx).Error(err, "unmarshal middleware error")
 			return err
 		}
 
@@ -69,20 +69,20 @@ func HandlePreActions(ctx context.Context, cli client.Client, m tools.Quoter) (e
 
 		err = ExecutePreAction(ctx, cli, temp, &mad, ma)
 		if err != nil {
-			logger.Log.Errorf("execute pre action error: %s %v", mad.Name, err)
+			log.FromContext(ctx).Error(err, "execute pre action error", "name", mad.Name)
 			return err
 		}
 
 		var tempBytes []byte
 		tempBytes, err = json.Marshal(temp)
 		if err != nil {
-			logger.Log.Errorf("marshal temp error: %v", err)
+			log.FromContext(ctx).Error(err, "marshal temp error")
 			return err
 		}
 
 		err = json.Unmarshal(tempBytes, m)
 		if err != nil {
-			logger.Log.Errorf("unmarshal temp error: %v", err)
+			log.FromContext(ctx).Error(err, "unmarshal temp error")
 			return err
 		}
 	}

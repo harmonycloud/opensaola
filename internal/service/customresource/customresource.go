@@ -22,12 +22,12 @@ import (
 	"fmt"
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/middlewarebaseline"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareoperatorbaseline"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // HandleGvk resolves the GVK for a Middleware
@@ -102,7 +102,7 @@ func RestoreIfIllegalUpdate(ctx context.Context, cli client.Client, oldObj, newO
 
 	// If new managedFields does not contain any expected owner, revert the resource
 	if isIllegal {
-		logger.Log.Errorf("illegal update event for resource %s/%s, reverting", newObj.GetNamespace(), newObj.GetName())
+		log.FromContext(ctx).Error(nil, "illegal update event for resource, reverting", "namespace", newObj.GetNamespace(), "name", newObj.GetName())
 
 		// Revert the resource using oldObj
 		err := cli.Update(ctx, oldObj)
@@ -110,11 +110,11 @@ func RestoreIfIllegalUpdate(ctx context.Context, cli client.Client, oldObj, newO
 			return fmt.Errorf("failed to revert resource: %w", err)
 		}
 
-		logger.Log.Infof("resource %s/%s successfully reverted\n", oldObj.GetNamespace(), oldObj.GetName())
+		log.FromContext(ctx).Info("resource successfully reverted", "namespace", oldObj.GetNamespace(), "name", oldObj.GetName())
 		return nil
 	}
 
-	logger.Log.Infof("resource %s/%s update is legitimate, no revert needed\n", newObj.GetNamespace(), newObj.GetName())
+	log.FromContext(ctx).Info("resource update is legitimate, no revert needed", "namespace", newObj.GetNamespace(), "name", newObj.GetName())
 	return nil
 }
 
@@ -128,7 +128,7 @@ func GetNeedPublishCustomResource(ctx context.Context, cli client.Client, m *v1.
 	// Resolve GVK
 	gvk, err := HandleGvk(ctx, cli, m)
 	if err != nil {
-		logger.Log.Errorf("HandleGvk error :%v", err)
+		log.FromContext(ctx).Error(err, "HandleGvk error")
 		return nil, err
 	}
 

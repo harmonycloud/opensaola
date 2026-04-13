@@ -26,7 +26,6 @@ import (
 	"github.com/OpenSaola/opensaola/internal/concurrency"
 	"github.com/OpenSaola/opensaola/internal/k8s"
 	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareoperator"
 	"github.com/OpenSaola/opensaola/internal/service/status"
@@ -44,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
@@ -79,7 +79,11 @@ func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.R
 		zeusmetrics.ObserveRequeue("middlewareoperator", result.Requeue, result.RequeueAfter)
 		zeusmetrics.ObserveAPIError("middlewareoperator", retErr)
 	}()
-	logger.Log.Debugj(map[string]interface{}{"amsg": "start processing middlewareOperator", "req": req})
+
+	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
+	ctx = log.IntoContext(ctx, l)
+
+	log.FromContext(ctx).V(1).Info("start processing middlewareOperator", "req", req)
 
 	// Handle middlewareOperator
 	if err := r.handleMiddlewareOperator(ctx, req); err != nil {
@@ -90,24 +94,24 @@ func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{}, nil
 		}
 		if errors.Is(err, consts.ErrPackageNotReady) {
-			logger.Log.Infof("package not ready, requeuing after %s", 5*time.Second)
+			log.FromContext(ctx).Info("package not ready, requeuing", "requeueAfter", 5*time.Second)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 		if errors.Is(err, consts.ErrPackageInstallFailed) {
-			logger.Log.Warnf("package install failed, aborting upgrade: %v", err)
+			log.FromContext(ctx).Info("package install failed, aborting upgrade", "warning", true, "err", err)
 			return ctrl.Result{}, nil
 		}
 		if errors.Is(err, consts.ErrPackageUnavailableExceeded) {
-			logger.Log.Warnf("package unavailable for too long, aborting upgrade: %v", err)
+			log.FromContext(ctx).Info("package unavailable for too long, aborting upgrade", "warning", true, "err", err)
 			return ctrl.Result{}, nil
 		}
-		logger.Log.Errorf("failed to handle MiddlewareOperator %s/%s: %v", req.Namespace, req.Name, err)
+		log.FromContext(ctx).Error(err, "failed to handle MiddlewareOperator", "namespace", req.Namespace, "name", req.Name)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	// Handle deployment
 	if err := r.handleDeployment(ctx, req); err != nil {
-		logger.Log.Errorf("failed to handle deployment for MiddlewareOperator %s/%s: %v", req.Namespace, req.Name, err)
+		log.FromContext(ctx).Error(err, "failed to handle deployment for MiddlewareOperator", "namespace", req.Namespace, "name", req.Name)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -141,30 +145,28 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 				if usedLegacy {
 					zeusmetrics.ObserveLegacyDelete("middlewareoperator", "error", start)
 				}
-				logger.Log.Errorj(map[string]interface{}{
-					"name":             mo.Name,
-					"namespace":        mo.Namespace,
-					"path":             path,
-					"finalizer_action": "pending",
-					"legacy_reason":    legacyReason,
-					"cleanup_result":   "error",
-					"err":              resolveErr.Error(),
-				})
+				log.FromContext(ctx).Error(resolveErr, "MiddlewareOperator delete context resolution failed",
+					"name", mo.Name,
+					"namespace", mo.Namespace,
+					"path", path,
+					"finalizer_action", "pending",
+					"legacy_reason", legacyReason,
+					"cleanup_result", "error",
+				)
 				return resolveErr
 			}
 			if cleanErr := middlewareoperator.HandleResource(ctx, r.Client, consts.HandleActionDelete, resolved); cleanErr != nil {
 				if usedLegacy {
 					zeusmetrics.ObserveLegacyDelete("middlewareoperator", "error", start)
 				}
-				logger.Log.Errorj(map[string]interface{}{
-					"name":             mo.Name,
-					"namespace":        mo.Namespace,
-					"path":             path,
-					"finalizer_action": "pending",
-					"legacy_reason":    legacyReason,
-					"cleanup_result":   "error",
-					"err":              cleanErr.Error(),
-				})
+				log.FromContext(ctx).Error(cleanErr, "MiddlewareOperator cleanup failed",
+					"name", mo.Name,
+					"namespace", mo.Namespace,
+					"path", path,
+					"finalizer_action", "pending",
+					"legacy_reason", legacyReason,
+					"cleanup_result", "error",
+				)
 				return cleanErr
 			}
 			if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -184,23 +186,24 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 				zeusmetrics.ObserveLegacyDelete("middlewareoperator", "success", start)
 			}
 			k8s.MiddlewareOperatorCache.Delete(req.NamespacedName.String())
-			logger.Log.Infoj(map[string]interface{}{
-				"name":             mo.Name,
-				"namespace":        mo.Namespace,
-				"path":             path,
-				"finalizer_action": "remove",
-				"legacy_reason":    legacyReason,
-				"cleanup_result":   "success",
-			})
+			log.FromContext(ctx).Info("MiddlewareOperator deletion cleanup completed",
+				"name", mo.Name,
+				"namespace", mo.Namespace,
+				"path", path,
+				"finalizer_action", "remove",
+				"legacy_reason", legacyReason,
+				"cleanup_result", "success",
+			)
 		} else {
-			logger.Log.Warnj(map[string]interface{}{
-				"name":             mo.Name,
-				"namespace":        mo.Namespace,
-				"path":             "mainline",
-				"finalizer_action": "missing",
-				"legacy_reason":    "",
-				"cleanup_result":   "skipped",
-			})
+			log.FromContext(ctx).Info("MiddlewareOperator has no finalizer on deletion, skipping cleanup",
+				"warning", true,
+				"name", mo.Name,
+				"namespace", mo.Namespace,
+				"path", "mainline",
+				"finalizer_action", "missing",
+				"legacy_reason", "",
+				"cleanup_result", "skipped",
+			)
 		}
 		return nil
 	}
@@ -208,18 +211,18 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 	if !controllerutil.ContainsFinalizer(mo, v1.FinalizerMiddlewareOperator) {
 		controllerutil.AddFinalizer(mo, v1.FinalizerMiddlewareOperator)
 		if updateErr := r.Update(ctx, mo); updateErr != nil {
-			logger.Log.Errorf("failed to add finalizer for MiddlewareOperator %s/%s: %v", mo.Namespace, mo.Name, updateErr)
+			log.FromContext(ctx).Error(updateErr, "failed to add finalizer for MiddlewareOperator", "namespace", mo.Namespace, "name", mo.Name)
 			return updateErr
 		}
 		zeusmetrics.ObserveFinalizerBackfill("middlewareoperator", "success")
-		logger.Log.Infoj(map[string]interface{}{
-			"name":             mo.Name,
-			"namespace":        mo.Namespace,
-			"path":             "mainline",
-			"finalizer_action": "add",
-			"legacy_reason":    "",
-			"cleanup_result":   "skipped",
-		})
+		log.FromContext(ctx).Info("MiddlewareOperator finalizer added",
+			"name", mo.Name,
+			"namespace", mo.Namespace,
+			"path", "mainline",
+			"finalizer_action", "add",
+			"legacy_reason", "",
+			"cleanup_result", "skipped",
+		)
 		return errMiddlewareOperatorFinalizerAdded
 	}
 
@@ -279,6 +282,10 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 			}
 		}
 
+		if state != mo.Status.State {
+			log.FromContext(ctx).Info("state transition", "from", string(mo.Status.State), "to", string(state), "reason", reason)
+		}
+
 		mo.Status.State = state
 		mo.Status.Reason = reason
 
@@ -293,7 +300,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 		statusErr := k8s.UpdateMiddlewareOperatorStatus(ctx, r.Client, mo)
 		stopStatus()
 		if statusErr != nil {
-			logger.Log.Errorf("failed to update middlewareOperator status: %v", statusErr)
+			log.FromContext(ctx).Error(statusErr, "failed to update middlewareOperator status")
 			// If business logic succeeded but status write failed, propagate the error so the controller requeues.
 			if retErr == nil {
 				retErr = statusErr
@@ -304,14 +311,14 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middlewareoperator.Check(ctx, r.Client, mo); err != nil {
 		stop()
-		logger.Log.Errorf("failed to validate MiddlewareOperator %s/%s: %v", mo.Namespace, mo.Name, err)
+		log.FromContext(ctx).Error(err, "failed to validate MiddlewareOperator", "namespace", mo.Namespace, "name", mo.Name)
 		return fmt.Errorf("failed to validate middlewareOperatorBaseline: %w", err)
 	}
 	stop()
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middlewareoperator.ReplacePackage(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, mo); err != nil {
 		stop()
-		logger.Log.Errorf("failed to replace package for MiddlewareOperator %s/%s: %v", mo.Namespace, mo.Name, err)
+		log.FromContext(ctx).Error(err, "failed to replace package for MiddlewareOperator", "namespace", mo.Namespace, "name", mo.Name)
 		return fmt.Errorf("upgrade failed: %w", err)
 	}
 	stop()
@@ -351,7 +358,7 @@ func (r *MiddlewareOperatorReconciler) handleDeployment(ctx context.Context, req
 		return err
 	}
 	if _, ok := mo.Annotations[v1.LabelUpdate]; ok {
-		logger.Log.Warnf("MiddlewareOperator %s is updating, please try again later", req.Name)
+		log.FromContext(ctx).Info("MiddlewareOperator is updating, please try again later", "warning", true, "name", req.Name)
 		return nil
 	}
 	// Get deployment

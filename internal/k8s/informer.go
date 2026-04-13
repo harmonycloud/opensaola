@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/OpenSaola/opensaola/internal/k8s/kubeclient"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -34,6 +33,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // var StopChMap sync.Map
@@ -48,14 +48,15 @@ func NewInformerOptUnit(ctx context.Context, cli client.Client, stopCh chan stru
 }
 
 func newInformerOptUnitImpl(ctx context.Context, cli client.Client, stopCh chan struct{}, gvk schema.GroupVersionKind, ns string, rehf cache.ResourceEventHandlerFuncs, attempt int) (err error) {
+	logger := log.FromContext(ctx)
 	// Panic recovery
 	defer func() {
 		if err != nil {
-			logger.Log.Errorf("NewInformerOptUnit error: %v", err)
+			logger.Error(err, "NewInformerOptUnit error")
 			return
 		}
 		if r := recover(); r != nil {
-			logger.Log.Error(fmt.Errorf("panic: %v", r), "NewInformerOptUnit")
+			logger.Error(fmt.Errorf("panic: %v", r), "NewInformerOptUnit")
 
 			buf := make([]byte, 1024)
 			n := runtime.Stack(buf, false)
@@ -63,7 +64,7 @@ func newInformerOptUnitImpl(ctx context.Context, cli client.Client, stopCh chan 
 
 			nextAttempt := attempt + 1
 			delay := CalcPanicBackoff(nextAttempt)
-			logger.Log.Infof("NewInformerOptUnit panic backoff restart: attempt=%d, delay=%v", nextAttempt, delay)
+			logger.Info("NewInformerOptUnit panic backoff restart", "attempt", nextAttempt, "delay", delay)
 			select {
 			case <-ctx.Done():
 				return
@@ -77,7 +78,7 @@ func newInformerOptUnitImpl(ctx context.Context, cli client.Client, stopCh chan 
 
 	dynClient, err := kubeclient.GetDynClient()
 	if err != nil {
-		logger.Log.Error(err, "Error building dynamic clientset")
+		logger.Error(err, "Error building dynamic clientset")
 		return err
 	}
 
@@ -92,7 +93,7 @@ func newInformerOptUnitImpl(ctx context.Context, cli client.Client, stopCh chan 
 	}
 	gvr, err := GetGroupVersionResource(discoveryClient, gvk)
 	if err != nil {
-		logger.Log.Error(err, "Error getting GroupVersionResource")
+		logger.Error(err, "Error getting GroupVersionResource")
 		return err
 	}
 
@@ -143,15 +144,11 @@ func newInformerOptUnitImpl(ctx context.Context, cli client.Client, stopCh chan 
 
 	_, err = informer.AddEventHandler(rehf)
 	if err != nil {
-		logger.Log.Error(err, "Error adding event handler")
+		logger.Error(err, "Error adding event handler")
 		return err
 	}
 
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg": "Start watching",
-		"gvk":  gvk.String(),
-		"ns":   ns,
-	})
+	logger.Info("Start watching", "gvk", gvk.String(), "ns", ns)
 
 	// Ensure the informer exits when ctx is cancelled, preventing goroutine leaks during leader switch or manager stop.
 	go func() {
@@ -164,18 +161,14 @@ func newInformerOptUnitImpl(ctx context.Context, cli client.Client, stopCh chan 
 
 	informer.Run(stopCh)
 
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg": "Stop watching",
-		"gvk":  gvk.String(),
-		"ns":   ns,
-	})
+	logger.Info("Stop watching", "gvk", gvk.String(), "ns", ns)
 	return nil
 }
 
 func safeClose(ch chan struct{}) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Log.Errorf("panic recovered in informer safeClose: %v", r)
+			ctrl.Log.WithName("k8s").Error(fmt.Errorf("panic: %v", r), "panic recovered in informer safeClose")
 		}
 	}()
 	close(ch)

@@ -32,24 +32,18 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	"github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Check validates a MiddlewareOperatorBaseline
 func Check(ctx context.Context, cli client.Client, m *v1.MiddlewareOperatorBaseline) error {
 	defer func() {
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg": "finished checking MiddlewareOperatorBaseline",
-			"name": m.Name,
-		})
+		log.FromContext(ctx).Info("finished checking MiddlewareOperatorBaseline", "name", m.Name)
 	}()
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg": "checking MiddlewareOperatorBaseline",
-		"name": m.Name,
-	})
+	log.FromContext(ctx).Info("checking MiddlewareOperatorBaseline", "name", m.Name)
 
 	conditionChecked := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeChecked)
 	if conditionChecked.Status != metav1.ConditionTrue || conditionChecked.ObservedGeneration < m.Generation {
@@ -141,10 +135,7 @@ func UpdateStatus(ctx context.Context, cli client.Client, m *v1.MiddlewareOperat
 			return fmt.Errorf("get middleware operator baseline error: %w", err)
 		}
 
-		logger.Log.Debugj(map[string]interface{}{
-			"amsg":    "updating MiddlewareOperatorBaseline status",
-			"version": now.ResourceVersion,
-		})
+		log.FromContext(ctx).V(1).Info("updating MiddlewareOperatorBaseline status", "version", now.ResourceVersion)
 		now.Status = m.Status
 
 		// Retry updating the CR

@@ -20,13 +20,13 @@ import (
 	"context"
 
 	"github.com/OpenSaola/opensaola/internal/resource"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/synchronizer"
 	"github.com/OpenSaola/opensaola/internal/service/watcher"
 	"github.com/OpenSaola/opensaola/pkg/tools/ctxkeys"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
@@ -45,6 +45,8 @@ func (t *leaderBackgroundTasks) NeedLeaderElection() bool {
 }
 
 func (t *leaderBackgroundTasks) Start(ctx context.Context) error {
+	l := log.FromContext(ctx).WithName("leaderBackgroundTasks")
+
 	// Leader may switch/re-enter; ensure global state is clean to prevent stale stopChan/Map from blocking watcher/sync startup or leaking goroutines.
 	watcher.StopAllCRWatchers()
 	synchronizer.StopAllSyncCustomResources()
@@ -52,7 +54,7 @@ func (t *leaderBackgroundTasks) Start(ctx context.Context) error {
 	// Start the namespace-scoped informer manager used by SyncCustomResourceV2.
 	if t.cfg != nil {
 		if _, err := synchronizer.StartNsInformerManager(ctx, t.cfg); err != nil {
-			logger.Log.Errorf("start NsInformerManager: %v", err)
+			l.Error(err, "start NsInformerManager")
 		} else {
 			// Wire informer events to the debouncer layer.
 			synchronizer.GetNsInformerManager().SetEventCallback(func(ns string) {
@@ -60,12 +62,12 @@ func (t *leaderBackgroundTasks) Start(ctx context.Context) error {
 			})
 		}
 	} else {
-		logger.Log.Warnf("leaderBackgroundTasks: no REST config provided, NsInformerManager will not start")
+		l.Info("no REST config provided, NsInformerManager will not start")
 	}
 
 	go func() {
 		if err := watcher.StartCRWatcher(ctxkeys.WithScheme(ctx, t.scheme), t.cli); err != nil {
-			logger.Log.Error(err)
+			l.Error(err, "StartCRWatcher failed")
 		}
 	}()
 	go resource.InitCacheCleanupTimer(ctx)

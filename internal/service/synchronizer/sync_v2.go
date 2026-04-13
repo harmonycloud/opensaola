@@ -28,7 +28,6 @@ import (
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/tidwall/gjson"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -36,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // recomputeAndUpdateStatus reads the latest Middleware and CR state, rebuilds
@@ -48,10 +48,10 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	if err != nil {
 		// Middleware has been deleted; nothing to do.
 		if apiErrors.IsNotFound(err) {
-			logger.Log.Infof("recomputeAndUpdateStatus: middleware %s/%s not found, skip", mid.Namespace, mid.Name)
+			log.FromContext(ctx).Info("recomputeAndUpdateStatus: middleware not found, skip", "namespace", mid.Namespace, "name", mid.Name)
 			return
 		}
-		logger.Log.Errorf("recomputeAndUpdateStatus: get middleware error: %v", err)
+		log.FromContext(ctx).Error(err, "recomputeAndUpdateStatus: get middleware error")
 		return
 	}
 	tempCustomResources := deepcopy.Copy(nowMid.Status.CustomResources)
@@ -60,23 +60,23 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	if err != nil {
 		// CR has been deleted; stop.
 		if apiErrors.IsNotFound(err) {
-			logger.Log.Infof("recomputeAndUpdateStatus: cr %s/%s/%s not found, skip",
-				cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName())
+			log.FromContext(ctx).Info("recomputeAndUpdateStatus: cr not found, skip",
+				"gvk", cr.GroupVersionKind().String(), "namespace", cr.GetNamespace(), "name", cr.GetName())
 			return
 		}
-		logger.Log.Errorf("recomputeAndUpdateStatus: get custom resource error: %v", err)
+		log.FromContext(ctx).Error(err, "recomputeAndUpdateStatus: get custom resource error")
 		return
 	}
 
 	nowCrStatusBytes, err := json.Marshal(nowCr.Object["status"])
 	if err != nil {
-		logger.Log.Errorf("recomputeAndUpdateStatus: marshal cr status error: %v", err)
+		log.FromContext(ctx).Error(err, "recomputeAndUpdateStatus: marshal cr status error")
 		return
 	}
 
 	err = json.Unmarshal(nowCrStatusBytes, &nowMid.Status.CustomResources)
 	if err != nil {
-		logger.Log.Errorf("recomputeAndUpdateStatus: unmarshal cr status error: %v", err)
+		log.FromContext(ctx).Error(err, "recomputeAndUpdateStatus: unmarshal cr status error")
 		return
 	}
 
@@ -126,21 +126,21 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	case "Deployment":
 		dep, depErr := k8s.GetDeployment(ctx, cli, nowCr.GetName(), nowCr.GetNamespace())
 		if depErr != nil {
-			logger.Log.Errorf("recomputeAndUpdateStatus: get deployment error: %v", depErr)
+			log.FromContext(ctx).Error(depErr, "recomputeAndUpdateStatus: get deployment error")
 			return
 		}
 		deployments[dep.Name] = *dep
 	case "StatefulSet":
 		sts, stsErr := k8s.GetStatefulSet(ctx, cli, nowCr.GetName(), nowCr.GetNamespace())
 		if stsErr != nil {
-			logger.Log.Errorf("recomputeAndUpdateStatus: get statefulset error: %v", stsErr)
+			log.FromContext(ctx).Error(stsErr, "recomputeAndUpdateStatus: get statefulset error")
 			return
 		}
 		statefulsets[sts.Name] = *sts
 	case "DaemonSet":
 		ds, dsErr := k8s.GetDaemonSet(ctx, cli, nowCr.GetName(), nowCr.GetNamespace())
 		if dsErr != nil {
-			logger.Log.Errorf("recomputeAndUpdateStatus: get daemonset error: %v", dsErr)
+			log.FromContext(ctx).Error(dsErr, "recomputeAndUpdateStatus: get daemonset error")
 			return
 		}
 		daemonsets[ds.Name] = *ds
@@ -150,7 +150,7 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	// If the cache is not yet ready, fall back to no-op for this tick.
 	cache := GetNsInformerManager().GetCache(nowMid.Namespace)
 	if cache == nil {
-		logger.Log.Warnf("recomputeAndUpdateStatus: cache not ready for ns=%s, skip", nowMid.Namespace)
+		log.FromContext(ctx).Info("recomputeAndUpdateStatus: cache not ready, skip", "warning", true, "namespace", nowMid.Namespace)
 		return
 	}
 
@@ -358,13 +358,13 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 				Kind:    kind,
 			})
 			if dsErr != nil && !apiErrors.IsNotFound(dsErr) {
-				logger.Log.Errorf("recomputeAndUpdateStatus: get disaster syncer error: %v", dsErr)
+				log.FromContext(ctx).Error(dsErr, "recomputeAndUpdateStatus: get disaster syncer error")
 				return
 			}
 			if disasterSyncer != nil {
 				disasterSyncerBytes, marshalErr := json.Marshal(disasterSyncer)
 				if marshalErr != nil {
-					logger.Log.Errorf("recomputeAndUpdateStatus: marshal disaster syncer error: %v", marshalErr)
+					log.FromContext(ctx).Error(marshalErr, "recomputeAndUpdateStatus: marshal disaster syncer error")
 					return
 				}
 				nowMid.Status.CustomResources.Disaster.Gossip = new(v1.Gossip)
@@ -406,13 +406,13 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 					Kind:    kind,
 				})
 				if dtErr != nil && !apiErrors.IsNotFound(dtErr) {
-					logger.Log.Errorf("recomputeAndUpdateStatus: get data syncer error: %v", dtErr)
+					log.FromContext(ctx).Error(dtErr, "recomputeAndUpdateStatus: get data syncer error")
 					return
 				}
 				if dataSyncer != nil {
 					dataSyncerBytes, marshalErr := json.Marshal(dataSyncer)
 					if marshalErr != nil {
-						logger.Log.Errorf("recomputeAndUpdateStatus: marshal data syncer error: %v", marshalErr)
+						log.FromContext(ctx).Error(marshalErr, "recomputeAndUpdateStatus: marshal data syncer error")
 						return
 					}
 					nowMid.Status.CustomResources.Disaster.Data = new(v1.Data)
@@ -513,7 +513,7 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	if updateErr := k8s.PatchMiddlewareStatusFields(ctx, cli, nowMid.Name, nowMid.Namespace, func(s *v1.MiddlewareStatus) {
 		s.CustomResources = computedCR
 	}); updateErr != nil {
-		logger.Log.Errorf("recomputeAndUpdateStatus: update middleware status error: %v", updateErr)
+		log.FromContext(ctx).Error(updateErr, "recomputeAndUpdateStatus: update middleware status error")
 	}
 }
 
@@ -556,7 +556,7 @@ func SyncCustomResourceV2(ctx context.Context, cli client.Client, cr *unstructur
 	if loaded {
 		// Another goroutine is already running for this CR; discard ours.
 		safeClose(stopChan)
-		logger.Log.Infof("SyncCustomResourceV2 already running for %s", key)
+		log.FromContext(ctx).Info("SyncCustomResourceV2 already running", "key", key)
 		return nil
 	}
 	stopChan = actual.(chan struct{})
@@ -572,7 +572,7 @@ func SyncCustomResourceV2(ctx context.Context, cli client.Client, cr *unstructur
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-stopChan:
-		logger.Log.Infof("SyncCustomResourceV2 stop for %s/%s/%s", cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName())
+		log.FromContext(ctx).Info("SyncCustomResourceV2 stop", "gvk", cr.GroupVersionKind().String(), "namespace", cr.GetNamespace(), "name", cr.GetName())
 		return nil
 	}
 }

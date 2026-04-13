@@ -24,7 +24,6 @@ import (
 	"github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/cache"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/packages"
 	"github.com/OpenSaola/opensaola/internal/service/status"
 	"github.com/mohae/deepcopy"
@@ -33,20 +32,15 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Check validates a MiddlewareBaseline
 func Check(ctx context.Context, cli client.Client, m *v1.MiddlewareBaseline) error {
 	defer func() {
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg": "finished checking MiddlewareBaseline",
-			"name": m.Name,
-		})
+		log.FromContext(ctx).Info("finished checking MiddlewareBaseline", "name", m.Name)
 	}()
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg": "checking MiddlewareBaseline",
-		"name": m.Name,
-	})
+	log.FromContext(ctx).Info("checking MiddlewareBaseline", "name", m.Name)
 
 	conditionChecked := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeChecked)
 	if conditionChecked.Status != metav1.ConditionTrue || conditionChecked.ObservedGeneration < m.Generation {

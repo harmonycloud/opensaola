@@ -26,7 +26,6 @@ import (
 
 	"github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/middlewarebaseline"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareoperatorbaseline"
 	"github.com/OpenSaola/opensaola/internal/service/synchronizer"
@@ -34,7 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type CustomResourceWatcher struct {
@@ -80,7 +81,7 @@ func startCRWatcherImpl(ctx context.Context, cli client.Client, attempt int) (er
 	defer func() {
 		r := recover()
 		if err != nil || r != nil {
-			logger.Log.Errorf("panic: %v error: %v", r, err)
+			log.FromContext(ctx).Error(fmt.Errorf("panic: %v error: %v", r, err), "StartCRWatcher panic")
 
 			buf := make([]byte, 1024)
 			n := runtime.Stack(buf, false)
@@ -88,7 +89,7 @@ func startCRWatcherImpl(ctx context.Context, cli client.Client, attempt int) (er
 
 			nextAttempt := attempt + 1
 			delay := k8s.CalcPanicBackoff(nextAttempt)
-			logger.Log.Infof("StartCRWatcher panic backoff restart: attempt=%d, delay=%v", nextAttempt, delay)
+			log.FromContext(ctx).Info("StartCRWatcher panic backoff restart", "attempt", nextAttempt, "delay", delay)
 
 			// Prevent informer/sync goroutine accumulation and stale global Map entries after panic restart.
 			StopAllCRWatchers()
@@ -106,24 +107,24 @@ func startCRWatcherImpl(ctx context.Context, cli client.Client, attempt int) (er
 	}()
 
 	// Initial list fetch: ensure apiserver is available before starting watch (supports ctx cancellation)
-	logger.Log.Info("start cr watcher waiting for initial list")
+	log.FromContext(ctx).Info("start cr watcher waiting for initial list")
 	var middlewares []v1.Middleware
 	for {
 		middlewares, err = k8s.ListMiddlewares(ctx, cli, "", nil)
 		if err == nil {
 			break
 		}
-		logger.Log.Errorf("get middlewares error: %v", err)
+		log.FromContext(ctx).Error(err, "get middlewares error")
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(2 * time.Second):
 		}
 	}
-	logger.Log.Info("start cr watcher initial list done")
+	log.FromContext(ctx).Info("start cr watcher initial list done")
 
 	// Start watching
-	logger.Log.Debugj(map[string]interface{}{"watcher get middlewares": middlewares})
+	log.FromContext(ctx).V(1).Info("watcher get middlewares", "middlewares", middlewares)
 	for _, mid := range middlewares {
 		// Get CR
 		var (
@@ -136,7 +137,7 @@ func startCRWatcherImpl(ctx context.Context, cli client.Client, attempt int) (er
 
 		baseline, err = middlewarebaseline.Get(ctx, cli, mid.Spec.Baseline, mid.Labels[v1.LabelPackageName])
 		if err != nil {
-			logger.Log.Errorf("get baseline error: %v", err)
+			log.FromContext(ctx).Error(err, "get baseline error")
 			continue
 		}
 
@@ -149,7 +150,7 @@ func startCRWatcherImpl(ctx context.Context, cli client.Client, attempt int) (er
 		if operatorBaselineName != "" {
 			operatorBaseline, err = middlewareoperatorbaseline.Get(ctx, cli, operatorBaselineName, mid.Labels[v1.LabelPackageName])
 			if err != nil {
-				logger.Log.Errorf("get operator baseline error: %v", err)
+				log.FromContext(ctx).Error(err, "get operator baseline error")
 				continue
 			}
 
@@ -175,31 +176,26 @@ func startCRWatcherImpl(ctx context.Context, cli client.Client, attempt int) (er
 
 		cr, err = k8s.GetCustomResource(ctx, cli, name, namespace, gvk)
 		if err != nil {
-			logger.Log.Errorf("get custom resource error: %v", err)
+			log.FromContext(ctx).Error(err, "get custom resource error")
 			continue
 		}
 
 		cr.SetGroupVersionKind(gvk)
 		cr.SetName(name)
 		cr.SetNamespace(namespace)
-		logger.Log.Debugj(map[string]interface{}{
-			"amsg":      "found CR to watch",
-			"gvk":       gvk,
-			"namespace": namespace,
-			"name":      name,
-		})
+		log.FromContext(ctx).V(1).Info("found CR to watch", "gvk", gvk, "namespace", namespace, "name", name)
 
 		// Check if the CR watcher already exists; if so, increment the reference count
 		go synchronizer.SyncCustomResourceV2(ctx, cli, cr, &mid)
 		cw := NewCRWatcher(cr.GroupVersionKind(), cr.GetNamespace())
 		if cwCache, ok := CustomResourceWatcherMap.Load(cw.GetKey()); ok {
-			logger.Log.Infof("CR watcher already exists: %s", cw.GetKey())
+			log.FromContext(ctx).Info("CR watcher already exists", "key", cw.GetKey())
 			cw = cwCache.(*CustomResourceWatcher)
 			cw.Counter.Add(1)
 			continue
 		}
 
-		logger.Log.Infof("creating CR watcher: %s", cw.GetKey())
+		log.FromContext(ctx).Info("creating CR watcher", "key", cw.GetKey())
 		CustomResourceWatcherMap.Store(cw.GetKey(), cw)
 		go k8s.NewInformerOptUnit(ctx, cli, cw.StopChan, cw.GVK, cw.Namespace, NewResourceEventHandlerFuncs(ctx, cli, mid.Name, mid.Namespace))
 	}
@@ -215,24 +211,24 @@ func CloseCRWatcher(ctx context.Context, obj *unstructured.Unstructured) {
 		// Concurrency-safe reference counting: only the transition from 1 -> 0 performs close/delete.
 		newVal := cw.Counter.Add(-1)
 		if newVal == 0 {
-			logger.Log.Infof("close cr watcher: %s", cw.GetKey())
-			logger.Log.Infof("send stop chan success: %s", cw.GetKey())
+			log.FromContext(ctx).Info("close cr watcher", "key", cw.GetKey())
+			log.FromContext(ctx).Info("send stop chan success", "key", cw.GetKey())
 			safeClose(cw.StopChan)
-			logger.Log.Infof("close cr watcher success: %s", cw.GetKey())
+			log.FromContext(ctx).Info("close cr watcher success", "key", cw.GetKey())
 			CustomResourceWatcherMap.Delete(cw.GetKey())
-			logger.Log.Infof("delete cr watcher success: %s", cw.GetKey())
+			log.FromContext(ctx).Info("delete cr watcher success", "key", cw.GetKey())
 		} else if newVal < 0 {
-			logger.Log.Errorf("cr watcher refcount < 0: %s", cw.GetKey())
+			log.FromContext(ctx).Error(nil, "cr watcher refcount < 0", "key", cw.GetKey())
 		}
 	} else {
-		logger.Log.Errorf("not found cr watcher: %s", temp.GetKey())
+		log.FromContext(ctx).Error(nil, "not found cr watcher", "key", temp.GetKey())
 	}
 }
 
 func safeClose(ch chan struct{}) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Log.Errorf("panic recovered in watcher safeClose: %v", r)
+			ctrl.Log.WithName("watcher").Error(fmt.Errorf("panic: %v", r), "panic recovered in watcher safeClose")
 		}
 	}()
 	close(ch)
@@ -253,10 +249,7 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 				return
 			}
 
-			logger.Log.Debugj(map[string]interface{}{
-				"amsg": "CR CREATE event",
-				"obj":  obj,
-			})
+			log.FromContext(ctx).V(1).Info("CR CREATE event", "obj", obj)
 
 			// // obj is the received custom resource object
 			// err := customresource.CoverStatus(ctx, cli, *obj.(*unstructured.Unstructured))
@@ -270,21 +263,13 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 				return
 			}
 
-			logger.Log.Debugj(map[string]interface{}{
-				"amsg":   "CR UPDATE event",
-				"oldObj": oldObj,
-				"newObj": newObj,
-			})
+			log.FromContext(ctx).V(1).Info("CR UPDATE event", "oldObj", oldObj, "newObj", newObj)
 
 			// Handle custom resource update event; oldObj is the old object, newObj is the updated object
 			oldVersion := oldObj.(*unstructured.Unstructured).GetResourceVersion()
 			newVersion := newObj.(*unstructured.Unstructured).GetResourceVersion()
 
-			logger.Log.Debugj(map[string]interface{}{
-				"amsg":       "CR UPDATE event",
-				"oldVersion": oldVersion,
-				"newVersion": newVersion,
-			})
+			log.FromContext(ctx).V(1).Info("CR UPDATE event", "oldVersion", oldVersion, "newVersion", newVersion)
 
 			// Compare versions
 			if oldVersion != newVersion {
@@ -303,10 +288,7 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 
 			// Handle custom resource delete event
 			// obj is the deleted custom resource object
-			logger.Log.Debugj(map[string]interface{}{
-				"amsg": "CR DELETE event",
-				"obj":  obj,
-			})
+			log.FromContext(ctx).V(1).Info("CR DELETE event", "obj", obj)
 
 			// If OwnerReferences no longer exist, stop watching
 			for _, reference := range obj.(*unstructured.Unstructured).GetOwnerReferences() {
@@ -331,7 +313,7 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 			obj.(*unstructured.Unstructured).SetResourceVersion("")
 			err := k8s.CreateCustomResource(ctx, cli, obj.(*unstructured.Unstructured))
 			if err != nil {
-				logger.Log.Errorf("create custom resource error: %v", err)
+				log.FromContext(ctx).Error(err, "create custom resource error")
 				return
 			}
 

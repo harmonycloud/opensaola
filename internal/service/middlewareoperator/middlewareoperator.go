@@ -32,13 +32,13 @@ import (
 
 	"github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareconfiguration"
 	"github.com/OpenSaola/opensaola/internal/service/status"
 	"github.com/OpenSaola/opensaola/pkg/tools"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const defaultUpgradePackageUnavailableTimeout = 50 * time.Second
@@ -70,17 +70,9 @@ func Check(ctx context.Context, cli client.Client, m *v1.MiddlewareOperator) err
 	conditionChecked := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeChecked)
 	// if conditionChecked.Status != metav1.ConditionTrue || conditionChecked.ObservedGeneration < m.Generation {
 	defer func() {
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":      "finished validating MiddlewareOperator",
-			"name":      m.Name,
-			"namespace": m.Namespace,
-		})
+		log.FromContext(ctx).Info("finished validating MiddlewareOperator", "name", m.Name, "namespace", m.Namespace)
 	}()
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":      "validating MiddlewareOperator",
-		"name":      m.Name,
-		"namespace": m.Namespace,
-	})
+	log.FromContext(ctx).Info("validating MiddlewareOperator", "name", m.Name, "namespace", m.Namespace)
 
 	if err := skipNoOperatorResource(ctx, cli, m); err != nil {
 		conditionChecked.Success(ctx, m.Generation)
@@ -107,7 +99,7 @@ func clearUpgradeAnnotation(ctx context.Context, cli client.Client, live, curren
 	if live != nil && live.Annotations != nil {
 		delete(live.Annotations, v1.LabelUpdate)
 		if err := k8s.UpdateMiddlewareOperator(ctx, cli, live); err != nil {
-			logger.Log.Warnf("failed to clear upgrade annotation on MiddlewareOperator %s/%s: %v", live.Namespace, live.Name, err)
+			log.FromContext(ctx).Info("failed to clear upgrade annotation on MiddlewareOperator", "warning", true, "namespace", live.Namespace, "name", live.Name, "err", err)
 		}
 	}
 	if current != nil && current.Annotations != nil {
@@ -119,7 +111,7 @@ func packageUnavailableMessage(targetVersion, reason string) string {
 	return fmt.Sprintf("waiting for upgrade target package to be ready: version=%s, reason=%s", targetVersion, reason)
 }
 
-func markPackageUnavailable(conditionUpdating *status.Condition, targetVersion, reason string, og int64) error {
+func markPackageUnavailable(ctx context.Context, conditionUpdating *status.Condition, targetVersion, reason string, og int64) error {
 	if conditionUpdating == nil || conditionUpdating.Condition == nil {
 		return consts.ErrPackageNotReady
 	}
@@ -132,7 +124,7 @@ func markPackageUnavailable(conditionUpdating *status.Condition, targetVersion, 
 	conditionUpdating.Reason = v1.CondReasonIniting
 	conditionUpdating.Message = message
 	if time.Since(conditionUpdating.LastTransitionTime.Time) < defaultUpgradePackageUnavailableTimeout {
-		logger.Log.Warnf("upgrade target package temporarily unavailable, %s", message)
+		log.FromContext(ctx).Info("upgrade target package temporarily unavailable", "warning", true, "message", message)
 		return consts.ErrPackageNotReady
 	}
 	return fmt.Errorf("%w: %s, timeout=%s", consts.ErrPackageUnavailableExceeded, message, defaultUpgradePackageUnavailableTimeout)
@@ -160,25 +152,21 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.MiddlewareOper
 		}
 		defer func() {
 			if err != nil && !errors.Is(err, consts.ErrPackageNotReady) {
-				logger.Log.Errorf("failed to upgrade MiddlewareOperator: %v", err)
+				log.FromContext(ctx).Error(err, "failed to upgrade MiddlewareOperator")
 				conditionUpdating.Failed(ctx, err.Error(), m.Generation)
 			} else if err == nil {
-				logger.Log.Infof("MiddlewareOperator upgrade succeeded")
+				log.FromContext(ctx).Info("MiddlewareOperator upgrade succeeded")
 				conditionUpdating.Success(ctx, m.Generation)
 			}
 			if updateErr := k8s.UpdateMiddlewareOperatorStatus(ctx, cli, m); updateErr != nil {
-				logger.Log.Errorf("failed to update MiddlewareOperator status during upgrade: %v", updateErr)
+				log.FromContext(ctx).Error(updateErr, "failed to update MiddlewareOperator status during upgrade")
 				if err == nil {
 					err = updateErr
 				}
 			}
 		}()
 
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":      "upgrading MiddlewareOperator",
-			"name":      m.Name,
-			"namespace": m.Namespace,
-		})
+		log.FromContext(ctx).Info("upgrading MiddlewareOperator", "name", m.Name, "namespace", m.Namespace)
 		if conditionChecked.Status == metav1.ConditionTrue {
 			targetVersion := m.Annotations[v1.LabelUpdate]
 			// // Delete already published resources
@@ -200,6 +188,7 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.MiddlewareOper
 
 			if len(mp) != 1 {
 				err = markPackageUnavailable(
+					ctx,
 					conditionUpdating,
 					targetVersion,
 					fmt.Sprintf("failed to get new package: expected 1 package but got %d", len(mp)),
@@ -224,7 +213,7 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.MiddlewareOper
 				if statusErr != nil {
 					reason = fmt.Sprintf("failed to get target package status: %v", statusErr)
 				}
-				err = markPackageUnavailable(conditionUpdating, targetVersion, reason, m.Generation)
+				err = markPackageUnavailable(ctx, conditionUpdating, targetVersion, reason, m.Generation)
 				if errors.Is(err, consts.ErrPackageUnavailableExceeded) {
 					clearUpgradeAnnotation(ctx, cli, mo, m)
 				}
@@ -284,7 +273,7 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.MiddlewareOper
 					reason = fmt.Sprintf("package still not enabled after switching: %s", m.Labels[v1.LabelPackageName])
 				}
 				rollback()
-				err = markPackageUnavailable(conditionUpdating, targetVersion, reason, m.Generation)
+				err = markPackageUnavailable(ctx, conditionUpdating, targetVersion, reason, m.Generation)
 				if errors.Is(err, consts.ErrPackageUnavailableExceeded) {
 					clearUpgradeAnnotation(ctx, cli, mo, m)
 				}
@@ -298,7 +287,7 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.MiddlewareOper
 			}
 			// Refresh cache after successful upgrade
 			if _, err := k8s.GetMiddlewareOperator(ctx, cli, m.Name, m.Namespace); err != nil {
-				logger.Log.Warnf("failed to refresh MiddlewareOperator %s/%s cache: %v", m.Namespace, m.Name, err)
+				log.FromContext(ctx).Info("failed to refresh MiddlewareOperator cache", "warning", true, "namespace", m.Namespace, "name", m.Name, "err", err)
 			}
 		}
 	}
@@ -312,15 +301,15 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 	defer func() {
 		if act != consts.HandleActionDelete {
 			if err != nil {
-				logger.Log.Errorf("%s extra resource error: %v", act, err)
+				log.FromContext(ctx).Error(err, "extra resource error", "action", act)
 				conditionBuildExtraResource.Failed(ctx, err.Error(), m.Generation)
 			} else {
-				logger.Log.Infof("%s extra resource finished", act)
+				log.FromContext(ctx).Info("extra resource finished", "action", act)
 				conditionBuildExtraResource.Success(ctx, m.Generation)
 			}
 			updateErr := k8s.UpdateMiddlewareOperatorStatus(ctx, cli, m)
 			if updateErr != nil {
-				logger.Log.Errorf("update middleware operator status error: %v", updateErr)
+				log.FromContext(ctx).Error(updateErr, "update middleware operator status error")
 			}
 		}
 	}()
@@ -376,15 +365,15 @@ func HandleResource(ctx context.Context, cli client.Client, action consts.Handle
 		}
 		// RBAC deletion is best-effort (historical behavior: delete does not report condition)
 		if err := handleRBAC(ctx, cli, action, m); err != nil {
-			logger.Log.Warnj(map[string]interface{}{
-				"amsg":            "MiddlewareOperator failed to delete RBAC, continuing with subsequent cleanup",
-				"name":            m.Name,
-				"namespace":       m.Namespace,
-				"packageName":     m.GetLabels()[v1.LabelPackageName],
-				"permissionScope": m.Spec.PermissionScope,
-				"permissions":     len(m.Spec.Permissions),
-				"err":             err.Error(),
-			})
+			log.FromContext(ctx).Info("MiddlewareOperator failed to delete RBAC, continuing with subsequent cleanup",
+				"warning", true,
+				"name", m.Name,
+				"namespace", m.Namespace,
+				"packageName", m.GetLabels()[v1.LabelPackageName],
+				"permissionScope", m.Spec.PermissionScope,
+				"permissions", len(m.Spec.Permissions),
+				"err", err.Error(),
+			)
 		}
 		// Deployment deletion only needs name/namespace
 		if err := k8s.DeleteDeployment(ctx, cli, m.Name, m.Namespace); err != nil && !apiErrors.IsNotFound(err) {
@@ -399,13 +388,13 @@ func HandleResource(ctx context.Context, cli client.Client, action consts.Handle
 		// Parse and merge templates
 		err := TemplateParseWithBaseline(ctx, cli, m)
 		if err != nil {
-			logger.Log.Errorf("template parse with baseline error: %v", err)
+			log.FromContext(ctx).Error(err, "template parse with baseline error")
 			return err
 		}
 
 		// Publish extra resources
 		if err = handleExtraResource(ctx, cli, action, m); err != nil {
-			logger.Log.Errorf("publish extra resource error: %v", err)
+			log.FromContext(ctx).Error(err, "publish extra resource error")
 			if action != consts.HandleActionDelete {
 				return err
 			}
@@ -413,7 +402,7 @@ func HandleResource(ctx context.Context, cli client.Client, action consts.Handle
 
 		// Generate RBAC
 		if err = handleRBAC(ctx, cli, action, m); err != nil {
-			logger.Log.Errorf("build rbac error: %v", err)
+			log.FromContext(ctx).Error(err, "build rbac error")
 			if action != consts.HandleActionDelete {
 				return err
 			}
@@ -428,17 +417,16 @@ func HandleResource(ctx context.Context, cli client.Client, action consts.Handle
 }
 
 func hydrateDeleteContext(ctx context.Context, cli client.Client, m *v1.MiddlewareOperator) error {
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":                "start hydrating MiddlewareOperator delete context",
-		"name":                m.Name,
-		"namespace":           m.Namespace,
-		"packageName":         m.Labels[v1.LabelPackageName],
-		"baseline":            m.Spec.Baseline,
-		"configurationsCount": len(m.Spec.Configurations),
-		"permissionsCount":    len(m.Spec.Permissions),
-		"permissionScope":     m.Spec.PermissionScope,
-		"hasGlobe":            m.Spec.Globe != nil && len(m.Spec.Globe.Raw) > 0,
-	})
+	log.FromContext(ctx).Info("start hydrating MiddlewareOperator delete context",
+		"name", m.Name,
+		"namespace", m.Namespace,
+		"packageName", m.Labels[v1.LabelPackageName],
+		"baseline", m.Spec.Baseline,
+		"configurationsCount", len(m.Spec.Configurations),
+		"permissionsCount", len(m.Spec.Permissions),
+		"permissionScope", m.Spec.PermissionScope,
+		"hasGlobe", m.Spec.Globe != nil && len(m.Spec.Globe.Raw) > 0,
+	)
 
 	baseline, err := middlewareoperatorbaseline.Get(ctx, cli, m.Spec.Baseline, m.Labels[v1.LabelPackageName])
 	if err != nil {
@@ -472,7 +460,7 @@ func hydrateDeleteContext(ctx context.Context, cli client.Client, m *v1.Middlewa
 		if strings.Contains(perm.ServiceAccountName, "{{") {
 			rendered, renderErr := tools.TemplateParse(ctx, perm.ServiceAccountName, templateValues)
 			if renderErr != nil {
-				logger.Log.Warnf("render permission ServiceAccountName failed: %v", renderErr)
+				log.FromContext(ctx).Info("render permission ServiceAccountName failed", "warning", true, "err", renderErr)
 				continue
 			}
 			m.Spec.Permissions[i].ServiceAccountName = strings.TrimSpace(rendered)
@@ -496,30 +484,29 @@ func hydrateDeleteContext(ctx context.Context, cli client.Client, m *v1.Middlewa
 		globeHydrated = true
 	}
 
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":                    "finished hydrating MiddlewareOperator delete context",
-		"name":                    m.Name,
-		"namespace":               m.Namespace,
-		"packageName":             m.Labels[v1.LabelPackageName],
-		"baseline":                m.Spec.Baseline,
-		"configurationsBefore":    configurationsBefore,
-		"configurationsAfter":     len(m.Spec.Configurations),
-		"permissionsBefore":       permissionsBefore,
-		"permissionsAfter":        len(m.Spec.Permissions),
-		"labelsBefore":            labelsBefore,
-		"labelsAfter":             len(m.Labels),
-		"annotationsBefore":       annotationsBefore,
-		"annotationsAfter":        len(m.Annotations),
-		"permissionScopeBefore":   scopeBefore,
-		"permissionScopeAfter":    m.Spec.PermissionScope,
-		"permissionScopeHydrated": (scopeBefore == v1.PermissionScopeUnknown || scopeBefore == "") && m.Spec.PermissionScope != "",
-		"globeHydrated":           globeHydrated,
-		"hasGlobeAfterHydrate":    m.Spec.Globe != nil && len(m.Spec.Globe.Raw) > 0,
-		"configurationsHydrated":  len(m.Spec.Configurations) > configurationsBefore,
-		"permissionsHydrated":     len(m.Spec.Permissions) > permissionsBefore,
-		"labelsHydrated":          len(m.Labels) > labelsBefore,
-		"annotationsHydrated":     len(m.Annotations) > annotationsBefore,
-	})
+	log.FromContext(ctx).Info("finished hydrating MiddlewareOperator delete context",
+		"name", m.Name,
+		"namespace", m.Namespace,
+		"packageName", m.Labels[v1.LabelPackageName],
+		"baseline", m.Spec.Baseline,
+		"configurationsBefore", configurationsBefore,
+		"configurationsAfter", len(m.Spec.Configurations),
+		"permissionsBefore", permissionsBefore,
+		"permissionsAfter", len(m.Spec.Permissions),
+		"labelsBefore", labelsBefore,
+		"labelsAfter", len(m.Labels),
+		"annotationsBefore", annotationsBefore,
+		"annotationsAfter", len(m.Annotations),
+		"permissionScopeBefore", scopeBefore,
+		"permissionScopeAfter", m.Spec.PermissionScope,
+		"permissionScopeHydrated", (scopeBefore == v1.PermissionScopeUnknown || scopeBefore == "") && m.Spec.PermissionScope != "",
+		"globeHydrated", globeHydrated,
+		"hasGlobeAfterHydrate", m.Spec.Globe != nil && len(m.Spec.Globe.Raw) > 0,
+		"configurationsHydrated", len(m.Spec.Configurations) > configurationsBefore,
+		"permissionsHydrated", len(m.Spec.Permissions) > permissionsBefore,
+		"labelsHydrated", len(m.Labels) > labelsBefore,
+		"annotationsHydrated", len(m.Annotations) > annotationsBefore,
+	)
 
 	return nil
 }

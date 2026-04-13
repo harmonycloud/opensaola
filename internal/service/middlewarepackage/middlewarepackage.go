@@ -30,13 +30,13 @@ import (
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/packages"
 	"github.com/OpenSaola/opensaola/internal/service/status"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func packageReleaseDigest(secret *corev1.Secret) string {
@@ -78,15 +78,9 @@ func Check(ctx context.Context, cli client.Client, mp *v1.MiddlewarePackage) err
 		return nil
 	}
 	defer func() {
-		logger.Log.Debugj(map[string]interface{}{
-			"amsg": "finished checking MiddlewarePackage",
-			"name": mp.Name,
-		})
+		log.FromContext(ctx).V(1).Info("finished checking MiddlewarePackage", "name", mp.Name)
 	}()
-	logger.Log.Debugj(map[string]interface{}{
-		"amsg": "checking MiddlewarePackage",
-		"name": mp.Name,
-	})
+	log.FromContext(ctx).V(1).Info("checking MiddlewarePackage", "name", mp.Name)
 
 	conditionChecked := status.GetCondition(ctx, &mp.Status.Conditions, v1.CondTypeChecked)
 	if conditionChecked.Status != metav1.ConditionTrue || conditionChecked.ObservedGeneration < mp.Generation {
@@ -199,7 +193,7 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 			for _, item := range enabledSecrets.Items {
 				err = HandleResource(ctx, cli, consts.HandleActionDelete, item.Name)
 				if err != nil {
-					logger.Log.Errorf("failed to delete package resource %s: %v", item.Name, err)
+					log.FromContext(ctx).Error(err, "failed to delete package resource", "name", item.Name)
 					continue
 				}
 				delete(item.Labels, v1.LabelEnabled)
@@ -216,13 +210,13 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 					secret.Annotations[v1.AnnotationInstallError] = truncateBytes(err.Error(), 1024)
 					if updateErr := k8s.UpdateSecret(ctx, cli, secret); updateErr != nil {
 						// Unable to persist the install error; return the original error so the queue retries (prevents silent failure)
-						logger.Log.Errorf("failed to persist install error to Secret %s: %v", secret.Name, updateErr)
+						log.FromContext(ctx).Error(updateErr, "failed to persist install error to Secret", "name", secret.Name)
 						return err
 					}
 					// Terminate this retry chain: wait for package content change (Secret.Data) before the next watch-triggered attempt
 					return nil
 				}
-				logger.Log.Errorf("failed to publish package resources %s: %v", secret.Name, err)
+				log.FromContext(ctx).Error(err, "failed to publish package resources", "name", secret.Name)
 				return err
 			}
 
@@ -232,7 +226,7 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 			delete(secret.Annotations, v1.AnnotationInstallError)
 			err = k8s.UpdateSecret(ctx, cli, secret)
 			if err != nil {
-				logger.Log.Errorf("failed to update package resource %s: %v", secret.Name, err)
+				log.FromContext(ctx).Error(err, "failed to update package resource", "name", secret.Name)
 				return err
 			}
 		} else if _, ok = secret.Annotations[v1.LabelUnInstall]; ok {
@@ -246,7 +240,7 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 			delete(secret.Annotations, v1.AnnotationInstallError)
 			err = k8s.UpdateSecret(ctx, cli, secret)
 			if err != nil {
-				logger.Log.Errorf("failed to update package resource %s: %v", secret.Name, err)
+				log.FromContext(ctx).Error(err, "failed to update package resource", "name", secret.Name)
 				return err
 			}
 		}
@@ -305,23 +299,14 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 	var err error
 	defer func() {
 		if err != nil && !apiErrors.IsAlreadyExists(err) {
-			logger.Log.Errorj(map[string]interface{}{
-				"amsg": "failed to handle MiddlewarePackage resources",
-				"name": secretName,
-				"err":  err.Error(),
-			})
+			log.FromContext(ctx).Error(err, "failed to handle MiddlewarePackage resources", "name", secretName)
 			return
 		} else {
-			logger.Log.Infoj(map[string]interface{}{
-				"amsg": "successfully handled MiddlewarePackage resources",
-				"name": secretName,
-			})
+			log.FromContext(ctx).Info("successfully handled MiddlewarePackage resources", "name", secretName)
 		}
 	}()
 
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg": "handling MiddlewarePackage resources",
-	})
+	log.FromContext(ctx).Info("handling MiddlewarePackage resources")
 
 	// Get MiddlewarePackage
 	var mp *v1.MiddlewarePackage
@@ -370,31 +355,31 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 		// Publish middleware baselines
 		var deployedMiddlewareBaseline []*v1.MiddlewareBaseline
 		for _, baseline := range middlewareBaseline {
-			logger.Log.Infof("start publishing MiddlewareBaseline %s", baseline.Name)
+			log.FromContext(ctx).Info("start publishing MiddlewareBaseline", "name", baseline.Name)
 			err = middlewarebaseline.Deploy(ctx, cli, pkg.Metadata.Name, pkg.Metadata.Version, pkg.Name, false, baseline, mp)
 			if err != nil && !apiErrors.IsAlreadyExists(err) {
-				logger.Log.Errorf("failed to publish MiddlewareBaseline %s: %v", baseline.Name, err)
+				log.FromContext(ctx).Error(err, "failed to publish MiddlewareBaseline", "name", baseline.Name)
 				// Rollback
 				for _, baselineDelete := range deployedMiddlewareBaseline {
-					logger.Log.Infof("start rolling back MiddlewareBaseline %s", baselineDelete.Name)
+					log.FromContext(ctx).Info("start rolling back MiddlewareBaseline", "name", baselineDelete.Name)
 					if rbErr := k8s.DeleteMiddlewareBaseline(ctx, cli, baselineDelete); rbErr != nil {
-						logger.Log.Warnf("rollback: failed to delete MiddlewareBaseline %s: %v", baselineDelete.Name, rbErr)
+						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareBaseline", "warning", true, "name", baselineDelete.Name, "err", rbErr)
 					}
-					logger.Log.Infof("finished rolling back MiddlewareBaseline %s", baselineDelete.Name)
+					log.FromContext(ctx).Info("finished rolling back MiddlewareBaseline", "name", baselineDelete.Name)
 				}
 				return err
 			}
-			logger.Log.Infof("finished publishing MiddlewareBaseline %s", baseline.Name)
+			log.FromContext(ctx).Info("finished publishing MiddlewareBaseline", "name", baseline.Name)
 		}
 
 		defer func() {
 			if err != nil && !apiErrors.IsAlreadyExists(err) {
 				for _, baseline := range middlewareBaseline {
-					logger.Log.Infof("start rolling back MiddlewareBaseline %s", baseline.Name)
+					log.FromContext(ctx).Info("start rolling back MiddlewareBaseline", "name", baseline.Name)
 					if rbErr := k8s.DeleteMiddlewareBaseline(ctx, cli, baseline); rbErr != nil {
-						logger.Log.Warnf("rollback: failed to delete MiddlewareBaseline %s: %v", baseline.Name, rbErr)
+						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareBaseline", "warning", true, "name", baseline.Name, "err", rbErr)
 					}
-					logger.Log.Infof("finished rolling back MiddlewareBaseline %s", baseline.Name)
+					log.FromContext(ctx).Info("finished rolling back MiddlewareBaseline", "name", baseline.Name)
 				}
 			}
 		}()
@@ -402,31 +387,31 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 		// Publish middleware operator baselines
 		var deployedMiddlewareOperatorBaseline []*v1.MiddlewareOperatorBaseline
 		for _, operatorBaseline := range middlewareOperatorBaseline {
-			logger.Log.Infof("start publishing MiddlewareOperatorBaseline %s", operatorBaseline.Name)
+			log.FromContext(ctx).Info("start publishing MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
 			err = middlewareoperatorbaseline.Deploy(ctx, cli, pkg.Metadata.Name, pkg.Metadata.Version, pkg.Name, false, operatorBaseline, mp)
 			if err != nil && !apiErrors.IsAlreadyExists(err) {
-				logger.Log.Errorf("failed to publish MiddlewareOperatorBaseline %s: %v", operatorBaseline.Name, err)
+				log.FromContext(ctx).Error(err, "failed to publish MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
 				// Rollback
 				for _, operatorBaselineDelete := range deployedMiddlewareOperatorBaseline {
-					logger.Log.Infof("start rolling back MiddlewareOperatorBaseline %s", operatorBaselineDelete.Name)
+					log.FromContext(ctx).Info("start rolling back MiddlewareOperatorBaseline", "name", operatorBaselineDelete.Name)
 					if rbErr := k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaselineDelete); rbErr != nil {
-						logger.Log.Warnf("rollback: failed to delete MiddlewareOperatorBaseline %s: %v", operatorBaselineDelete.Name, rbErr)
+						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareOperatorBaseline", "warning", true, "name", operatorBaselineDelete.Name, "err", rbErr)
 					}
-					logger.Log.Infof("finished rolling back MiddlewareOperatorBaseline %s", operatorBaselineDelete.Name)
+					log.FromContext(ctx).Info("finished rolling back MiddlewareOperatorBaseline", "name", operatorBaselineDelete.Name)
 				}
 				return err
 			}
-			logger.Log.Infof("finished publishing MiddlewareOperatorBaseline %s", operatorBaseline.Name)
+			log.FromContext(ctx).Info("finished publishing MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
 		}
 
 		defer func() {
 			if err != nil && !apiErrors.IsAlreadyExists(err) {
 				for _, operatorBaseline := range middlewareOperatorBaseline {
-					logger.Log.Infof("start rolling back MiddlewareOperatorBaseline %s", operatorBaseline.Name)
+					log.FromContext(ctx).Info("start rolling back MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
 					if rbErr := k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaseline); rbErr != nil {
-						logger.Log.Warnf("rollback: failed to delete MiddlewareOperatorBaseline %s: %v", operatorBaseline.Name, rbErr)
+						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareOperatorBaseline", "warning", true, "name", operatorBaseline.Name, "err", rbErr)
 					}
-					logger.Log.Infof("finished rolling back MiddlewareOperatorBaseline %s", operatorBaseline.Name)
+					log.FromContext(ctx).Info("finished rolling back MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
 				}
 			}
 		}()
@@ -434,31 +419,31 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 		// Publish action baselines
 		var deployedMiddlewareActionBaseline []*v1.MiddlewareActionBaseline
 		for _, actionBaseline := range middlewareActionBaselines {
-			logger.Log.Infof("start publishing MiddlewareActionBaseline %s", actionBaseline.Name)
+			log.FromContext(ctx).Info("start publishing MiddlewareActionBaseline", "name", actionBaseline.Name)
 			err = middlewareactionbaseline.Deploy(ctx, cli, pkg.Metadata.Name, pkg.Metadata.Version, pkg.Name, false, actionBaseline, mp)
 			if err != nil && !apiErrors.IsAlreadyExists(err) {
-				logger.Log.Errorf("failed to publish MiddlewareActionBaseline %s: %v", actionBaseline.Name, err)
+				log.FromContext(ctx).Error(err, "failed to publish MiddlewareActionBaseline", "name", actionBaseline.Name)
 				// Rollback
 				for _, actionBaselineDelete := range deployedMiddlewareActionBaseline {
-					logger.Log.Infof("start rolling back MiddlewareActionBaseline %s", actionBaselineDelete.Name)
+					log.FromContext(ctx).Info("start rolling back MiddlewareActionBaseline", "name", actionBaselineDelete.Name)
 					if rbErr := k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaselineDelete); rbErr != nil {
-						logger.Log.Warnf("rollback: failed to delete MiddlewareActionBaseline %s: %v", actionBaselineDelete.Name, rbErr)
+						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareActionBaseline", "warning", true, "name", actionBaselineDelete.Name, "err", rbErr)
 					}
-					logger.Log.Infof("finished rolling back MiddlewareActionBaseline %s", actionBaselineDelete.Name)
+					log.FromContext(ctx).Info("finished rolling back MiddlewareActionBaseline", "name", actionBaselineDelete.Name)
 				}
 				return err
 			}
-			logger.Log.Infof("finished publishing MiddlewareActionBaseline %s", actionBaseline.Name)
+			log.FromContext(ctx).Info("finished publishing MiddlewareActionBaseline", "name", actionBaseline.Name)
 		}
 
 		defer func() {
 			if err != nil && !apiErrors.IsAlreadyExists(err) {
 				for _, actionBaseline := range middlewareActionBaselines {
-					logger.Log.Infof("start rolling back MiddlewareActionBaseline %s", actionBaseline.Name)
+					log.FromContext(ctx).Info("start rolling back MiddlewareActionBaseline", "name", actionBaseline.Name)
 					if rbErr := k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaseline); rbErr != nil {
-						logger.Log.Warnf("rollback: failed to delete MiddlewareActionBaseline %s: %v", actionBaseline.Name, rbErr)
+						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareActionBaseline", "warning", true, "name", actionBaseline.Name, "err", rbErr)
 					}
-					logger.Log.Infof("finished rolling back MiddlewareActionBaseline %s", actionBaseline.Name)
+					log.FromContext(ctx).Info("finished rolling back MiddlewareActionBaseline", "name", actionBaseline.Name)
 				}
 			}
 		}()
@@ -468,63 +453,63 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 		for _, configuration := range configurations {
 			err = middlewareconfiguration.Deploy(ctx, cli, pkg.Metadata.Name, pkg.Metadata.Version, pkg.Name, false, configuration, mp)
 			if err != nil && !apiErrors.IsAlreadyExists(err) {
-				logger.Log.Errorf("failed to publish MiddlewareConfiguration %s: %v", configuration.Name, err)
+				log.FromContext(ctx).Error(err, "failed to publish MiddlewareConfiguration", "name", configuration.Name)
 				// Rollback
 				for _, configurationDelete := range deployedConfigurations {
-					logger.Log.Infof("start rolling back MiddlewareConfiguration %s", configurationDelete.Name)
+					log.FromContext(ctx).Info("start rolling back MiddlewareConfiguration", "name", configurationDelete.Name)
 					if rbErr := k8s.DeleteMiddlewareConfiguration(ctx, cli, configurationDelete); rbErr != nil {
-						logger.Log.Warnf("rollback: failed to delete MiddlewareConfiguration %s: %v", configurationDelete.Name, rbErr)
+						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareConfiguration", "warning", true, "name", configurationDelete.Name, "err", rbErr)
 					}
-					logger.Log.Infof("finished rolling back MiddlewareConfiguration %s", configurationDelete.Name)
+					log.FromContext(ctx).Info("finished rolling back MiddlewareConfiguration", "name", configurationDelete.Name)
 				}
 				return err
 			}
-			logger.Log.Infof("finished publishing MiddlewareConfiguration %s", configuration.Name)
+			log.FromContext(ctx).Info("finished publishing MiddlewareConfiguration", "name", configuration.Name)
 			deployedConfigurations = append(deployedConfigurations, configuration)
 		}
 	case consts.HandleActionDelete:
 		// Delete middleware baselines
 		for _, baseline := range middlewareBaseline {
-			logger.Log.Infof("start deleting MiddlewareBaseline %s", baseline.Name)
+			log.FromContext(ctx).Info("start deleting MiddlewareBaseline", "name", baseline.Name)
 			err = k8s.DeleteMiddlewareBaseline(ctx, cli, baseline)
 			if err != nil {
-				logger.Log.Errorf("failed to delete MiddlewareBaseline %s: %v", baseline.Name, err)
+				log.FromContext(ctx).Error(err, "failed to delete MiddlewareBaseline", "name", baseline.Name)
 				continue
 			}
-			logger.Log.Infof("finished deleting MiddlewareBaseline %s", baseline.Name)
+			log.FromContext(ctx).Info("finished deleting MiddlewareBaseline", "name", baseline.Name)
 		}
 
 		// Delete middleware operator baselines
 		for _, operatorBaseline := range middlewareOperatorBaseline {
-			logger.Log.Infof("start deleting MiddlewareOperatorBaseline %s", operatorBaseline.Name)
+			log.FromContext(ctx).Info("start deleting MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
 			err = k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaseline)
 			if err != nil {
-				logger.Log.Errorf("failed to delete MiddlewareOperatorBaseline %s: %v", operatorBaseline.Name, err)
+				log.FromContext(ctx).Error(err, "failed to delete MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
 				continue
 			}
-			logger.Log.Infof("finished deleting MiddlewareOperatorBaseline %s", operatorBaseline.Name)
+			log.FromContext(ctx).Info("finished deleting MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
 		}
 
 		// Delete action baselines
 		for _, actionBaseline := range middlewareActionBaselines {
-			logger.Log.Infof("start deleting MiddlewareActionBaseline %s", actionBaseline.Name)
+			log.FromContext(ctx).Info("start deleting MiddlewareActionBaseline", "name", actionBaseline.Name)
 			err = k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaseline)
 			if err != nil {
-				logger.Log.Errorf("failed to delete MiddlewareActionBaseline %s: %v", actionBaseline.Name, err)
+				log.FromContext(ctx).Error(err, "failed to delete MiddlewareActionBaseline", "name", actionBaseline.Name)
 				continue
 			}
-			logger.Log.Infof("finished deleting MiddlewareActionBaseline %s", actionBaseline.Name)
+			log.FromContext(ctx).Info("finished deleting MiddlewareActionBaseline", "name", actionBaseline.Name)
 		}
 
 		// Delete configurations
 		for _, configuration := range configurations {
-			logger.Log.Infof("start deleting MiddlewareConfiguration %s", configuration.Name)
+			log.FromContext(ctx).Info("start deleting MiddlewareConfiguration", "name", configuration.Name)
 			err = k8s.DeleteMiddlewareConfiguration(ctx, cli, configuration)
 			if err != nil {
-				logger.Log.Errorf("failed to delete MiddlewareConfiguration %s: %v", configuration.Name, err)
+				log.FromContext(ctx).Error(err, "failed to delete MiddlewareConfiguration", "name", configuration.Name)
 				continue
 			}
-			logger.Log.Infof("finished deleting MiddlewareConfiguration %s", configuration.Name)
+			log.FromContext(ctx).Info("finished deleting MiddlewareConfiguration", "name", configuration.Name)
 		}
 
 	}

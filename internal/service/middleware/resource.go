@@ -35,7 +35,6 @@ import (
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareconfiguration"
 	"github.com/OpenSaola/opensaola/internal/service/status"
@@ -43,20 +42,20 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func hydrateDeleteContext(ctx context.Context, cli client.Client, m *v1.Middleware) error {
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":                "start hydrating Middleware delete context",
-		"name":                m.Name,
-		"namespace":           m.Namespace,
-		"packageName":         m.Labels[v1.LabelPackageName],
-		"baseline":            m.Spec.Baseline,
-		"configurationsCount": len(m.Spec.Configurations),
-		"operatorBaseline":    m.Spec.OperatorBaseline.Name,
-		"gvkName":             m.Spec.OperatorBaseline.GvkName,
-		"hasNecessary":        len(m.Spec.Necessary.Raw) > 0,
-	})
+	log.FromContext(ctx).Info("start hydrating Middleware delete context",
+		"name", m.Name,
+		"namespace", m.Namespace,
+		"packageName", m.Labels[v1.LabelPackageName],
+		"baseline", m.Spec.Baseline,
+		"configurationsCount", len(m.Spec.Configurations),
+		"operatorBaseline", m.Spec.OperatorBaseline.Name,
+		"gvkName", m.Spec.OperatorBaseline.GvkName,
+		"hasNecessary", len(m.Spec.Necessary.Raw) > 0,
+	)
 
 	baseline, err := middlewarebaseline.Get(ctx, cli, m.Spec.Baseline, m.Labels[v1.LabelPackageName])
 	if err != nil {
@@ -93,30 +92,29 @@ func hydrateDeleteContext(ctx context.Context, cli client.Client, m *v1.Middlewa
 		necessaryHydrated = true
 	}
 
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":                     "finished hydrating Middleware delete context",
-		"name":                     m.Name,
-		"namespace":                m.Namespace,
-		"packageName":              m.Labels[v1.LabelPackageName],
-		"baseline":                 m.Spec.Baseline,
-		"configurationsBefore":     configurationsBefore,
-		"configurationsAfter":      len(m.Spec.Configurations),
-		"labelsBefore":             labelsBefore,
-		"labelsAfter":              len(m.Labels),
-		"annotationsBefore":        annotationsBefore,
-		"annotationsAfter":         len(m.Annotations),
-		"operatorBaselineBefore":   operatorBaselineNameBefore,
-		"operatorBaselineAfter":    m.Spec.OperatorBaseline.Name,
-		"gvkNameBefore":            gvkNameBefore,
-		"gvkNameAfter":             m.Spec.OperatorBaseline.GvkName,
-		"operatorBaselineHydrated": operatorBaselineNameBefore == "" && m.Spec.OperatorBaseline.Name != "",
-		"gvkNameHydrated":          gvkNameBefore == "" && m.Spec.OperatorBaseline.GvkName != "",
-		"necessaryHydrated":        necessaryHydrated,
-		"hasNecessaryAfterHydrate": len(m.Spec.Necessary.Raw) > 0,
-		"configurationsHydrated":   len(m.Spec.Configurations) > configurationsBefore,
-		"labelsHydrated":           len(m.Labels) > labelsBefore,
-		"annotationsHydrated":      len(m.Annotations) > annotationsBefore,
-	})
+	log.FromContext(ctx).Info("finished hydrating Middleware delete context",
+		"name", m.Name,
+		"namespace", m.Namespace,
+		"packageName", m.Labels[v1.LabelPackageName],
+		"baseline", m.Spec.Baseline,
+		"configurationsBefore", configurationsBefore,
+		"configurationsAfter", len(m.Spec.Configurations),
+		"labelsBefore", labelsBefore,
+		"labelsAfter", len(m.Labels),
+		"annotationsBefore", annotationsBefore,
+		"annotationsAfter", len(m.Annotations),
+		"operatorBaselineBefore", operatorBaselineNameBefore,
+		"operatorBaselineAfter", m.Spec.OperatorBaseline.Name,
+		"gvkNameBefore", gvkNameBefore,
+		"gvkNameAfter", m.Spec.OperatorBaseline.GvkName,
+		"operatorBaselineHydrated", operatorBaselineNameBefore == "" && m.Spec.OperatorBaseline.Name != "",
+		"gvkNameHydrated", gvkNameBefore == "" && m.Spec.OperatorBaseline.GvkName != "",
+		"necessaryHydrated", necessaryHydrated,
+		"hasNecessaryAfterHydrate", len(m.Spec.Necessary.Raw) > 0,
+		"configurationsHydrated", len(m.Spec.Configurations) > configurationsBefore,
+		"labelsHydrated", len(m.Labels) > labelsBefore,
+		"annotationsHydrated", len(m.Annotations) > annotationsBefore,
+	)
 
 	return nil
 }
@@ -130,17 +128,16 @@ func HandleResource(ctx context.Context, cli client.Client, action consts.Handle
 		if err := hydrateDeleteContext(ctx, cli, m); err != nil {
 			return fmt.Errorf("hydrate delete context error: %w", err)
 		}
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":                "start executing Middleware delete cleanup",
-			"name":                m.Name,
-			"namespace":           m.Namespace,
-			"packageName":         m.GetLabels()[v1.LabelPackageName],
-			"configurationsCount": len(m.Spec.Configurations),
-			"baseline":            m.Spec.Baseline,
-			"operatorBaseline":    m.Spec.OperatorBaseline.Name,
-			"gvkName":             m.Spec.OperatorBaseline.GvkName,
-			"deletionTimestamp":   m.GetDeletionTimestamp(),
-		})
+		log.FromContext(ctx).Info("start executing Middleware delete cleanup",
+			"name", m.Name,
+			"namespace", m.Namespace,
+			"packageName", m.GetLabels()[v1.LabelPackageName],
+			"configurationsCount", len(m.Spec.Configurations),
+			"baseline", m.Spec.Baseline,
+			"operatorBaseline", m.Spec.OperatorBaseline.Name,
+			"gvkName", m.Spec.OperatorBaseline.GvkName,
+			"deletionTimestamp", m.GetDeletionTimestamp(),
+		)
 		// Clean up extra resources (delete-only: prefer rendering metadata.name only; fall back to label-based list deletion on failure)
 		if err := handleExtraResource(ctx, cli, action, m); err != nil {
 			return fmt.Errorf("build extra resource error: %w", err)
@@ -183,14 +180,14 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 	defer func() {
 		if act != consts.HandleActionDelete {
 			if err != nil {
-				logger.Log.Errorf("%s extra resource error: %v", act, err)
+				log.FromContext(ctx).Error(err, "extra resource error", "action", act)
 				conditionBuildExtraResource.Failed(ctx, err.Error(), m.Generation)
 			} else {
-				logger.Log.Infof("%s extra resource finished", act)
+				log.FromContext(ctx).Info("extra resource finished", "action", act)
 				conditionBuildExtraResource.Success(ctx, m.Generation)
 			}
 			if updateErr := k8s.UpdateMiddlewareStatus(ctx, cli, m); updateErr != nil {
-				logger.Log.Errorf("update middleware status error: %v", updateErr)
+				log.FromContext(ctx).Error(updateErr, "update middleware status error")
 				if err == nil {
 					err = updateErr
 				}
@@ -206,13 +203,12 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 	switch act {
 	case consts.HandleActionDelete:
 		// Delete path: skip full template rendering (avoid nil pointer in template body blocking cleanup)
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":                "Middleware delete path starting extra resources cleanup",
-			"name":                m.Name,
-			"namespace":           m.Namespace,
-			"packageName":         m.GetLabels()[v1.LabelPackageName],
-			"configurationsCount": len(m.Spec.Configurations),
-		})
+		log.FromContext(ctx).Info("Middleware delete path starting extra resources cleanup",
+			"name", m.Name,
+			"namespace", m.Namespace,
+			"packageName", m.GetLabels()[v1.LabelPackageName],
+			"configurationsCount", len(m.Spec.Configurations),
+		)
 		return middlewareconfiguration.DeleteTemplateRenderedResources(ctx, cli, m, m)
 
 	case consts.HandleActionPublish, consts.HandleActionUpdate:
@@ -246,7 +242,7 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 				conditionApplyCluster.Success(ctx, m.Generation)
 			}
 			if updateErr := k8s.UpdateMiddlewareStatus(ctx, cli, m); updateErr != nil {
-				logger.Log.Errorf("update middleware status error: %v", updateErr)
+				log.FromContext(ctx).Error(updateErr, "update middleware status error")
 				if err == nil {
 					err = updateErr
 				}
@@ -281,13 +277,13 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 		}
 		err = ctrl.SetControllerReference(m, cr, scheme)
 		if err != nil {
-			logger.Log.Errorf("CustomResource set controller reference error: %v", err)
+			log.FromContext(ctx).Error(err, "CustomResource set controller reference error")
 			return err
 		}
 		err = k8s.CreateOrPatchCustomResource(ctx, cli, cr)
 		if err != nil && !apiErrors.IsAlreadyExists(err) {
 			// Stop watching
-			logger.Log.Error(err)
+			log.FromContext(ctx).Error(err, "create or patch custom resource error")
 			watcher.CloseCRWatcher(ctx, cr)
 			return err
 		}
@@ -297,11 +293,7 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 		cwCache, ok := watcher.CustomResourceWatcherMap.Load(cw.GetKey())
 		if !ok {
 			// If the watcher does not exist, create a new one
-			logger.Log.Infoj(map[string]interface{}{
-				"amsg":      "create watcher",
-				"gvk":       cr.GroupVersionKind(),
-				"namespace": cr.GetNamespace(),
-			})
+			log.FromContext(ctx).Info("create watcher", "gvk", cr.GroupVersionKind(), "namespace", cr.GetNamespace())
 			watcher.CustomResourceWatcherMap.Store(cw.GetKey(), cw)
 			go k8s.NewInformerOptUnit(ctx, cli, cw.StopChan, cw.GVK, cw.Namespace, watcher.NewResourceEventHandlerFuncs(ctx, cli, m.Name, m.Namespace))
 		} else {
@@ -315,12 +307,7 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 			cw.Counter.Store(int32(len(crList)))
 
 			// If the watcher exists, re-query CR count and calibrate the counter
-			logger.Log.Infoj(map[string]interface{}{
-				"amsg":      "sync watcher counter",
-				"gvk":       cr.GroupVersionKind(),
-				"namespace": cr.GetNamespace(),
-				"counter":   cw.Counter.Load(),
-			})
+			log.FromContext(ctx).Info("sync watcher counter", "gvk", cr.GroupVersionKind(), "namespace", cr.GetNamespace(), "counter", cw.Counter.Load())
 		}
 
 		go synchronizer.SyncCustomResourceV2(ctx, cli, cr, m)
@@ -344,7 +331,7 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 		// Delete CR
 		err = k8s.DeleteCustomResource(ctx, cli, cr)
 		if err != nil && !apiErrors.IsNotFound(err) {
-			logger.Log.Errorf("delete custom resource error: %v", err)
+			log.FromContext(ctx).Error(err, "delete custom resource error")
 			return err
 		}
 	}

@@ -24,7 +24,6 @@ import (
 
 	"github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/status"
 	"github.com/OpenSaola/opensaola/pkg/tools/ctxkeys"
@@ -33,6 +32,7 @@ import (
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Step4: MiddlewareOperator RBAC generation
@@ -48,16 +48,16 @@ func handleRBAC(ctx context.Context, cli client.Client, act consts.HandleAction,
 		if act != consts.HandleActionDelete {
 			if len(errs) > 0 {
 				err = errors.New(strings.Join(errs, ";"))
-				logger.Log.Errorf("%s rbac error: %v", act, err)
+				log.FromContext(ctx).Error(err, "rbac error", "action", act)
 				conditionApplyRBAC.Failed(ctx, err.Error(), m.Generation)
 			} else {
-				logger.Log.Infof("%s rbac finished", act)
+				log.FromContext(ctx).Info("rbac finished", "action", act)
 				conditionApplyRBAC.Success(ctx, m.Generation)
 			}
 			errUpdateStatus := k8s.UpdateMiddlewareOperatorStatus(ctx, cli, m)
 			if errUpdateStatus != nil {
 				err = errUpdateStatus
-				logger.Log.Errorf("update middleware operator status error: %v", err)
+				log.FromContext(ctx).Error(err, "update middleware operator status error")
 			}
 		}
 	}()
@@ -67,42 +67,42 @@ func handleRBAC(ctx context.Context, cli client.Client, act consts.HandleAction,
 		err = handleServiceAccount(ctx, cli, permission, act, m)
 		if err != nil {
 			if act == consts.HandleActionDelete {
-				logger.Log.Warnj(map[string]interface{}{
-					"amsg":               "failed to delete ServiceAccount",
-					"name":               m.Name,
-					"namespace":          m.Namespace,
-					"permissionScope":    m.Spec.PermissionScope,
-					"serviceAccountName": permission.ServiceAccountName,
-					"err":                err.Error(),
-				})
+				log.FromContext(ctx).Info("failed to delete ServiceAccount",
+					"warning", true,
+					"name", m.Name,
+					"namespace", m.Namespace,
+					"permissionScope", m.Spec.PermissionScope,
+					"serviceAccountName", permission.ServiceAccountName,
+					"err", err.Error(),
+				)
 			}
 			errs = append(errs, fmt.Sprintf("%s service account error: %v", act, err))
 		}
 		err = handleRole(ctx, cli, permission, act, m)
 		if err != nil {
 			if act == consts.HandleActionDelete {
-				logger.Log.Warnj(map[string]interface{}{
-					"amsg":               "failed to delete Role/ClusterRole",
-					"name":               m.Name,
-					"namespace":          m.Namespace,
-					"permissionScope":    m.Spec.PermissionScope,
-					"serviceAccountName": permission.ServiceAccountName,
-					"err":                err.Error(),
-				})
+				log.FromContext(ctx).Info("failed to delete Role/ClusterRole",
+					"warning", true,
+					"name", m.Name,
+					"namespace", m.Namespace,
+					"permissionScope", m.Spec.PermissionScope,
+					"serviceAccountName", permission.ServiceAccountName,
+					"err", err.Error(),
+				)
 			}
 			errs = append(errs, fmt.Sprintf("%s role error: %v", act, err))
 		}
 		err = handleRoleBinding(ctx, cli, permission, act, m)
 		if err != nil {
 			if act == consts.HandleActionDelete {
-				logger.Log.Warnj(map[string]interface{}{
-					"amsg":               "failed to delete RoleBinding/ClusterRoleBinding",
-					"name":               m.Name,
-					"namespace":          m.Namespace,
-					"permissionScope":    m.Spec.PermissionScope,
-					"serviceAccountName": permission.ServiceAccountName,
-					"err":                err.Error(),
-				})
+				log.FromContext(ctx).Info("failed to delete RoleBinding/ClusterRoleBinding",
+					"warning", true,
+					"name", m.Name,
+					"namespace", m.Namespace,
+					"permissionScope", m.Spec.PermissionScope,
+					"serviceAccountName", permission.ServiceAccountName,
+					"err", err.Error(),
+				)
 			}
 			errs = append(errs, fmt.Sprintf("%s role binding error: %v", act, err))
 		}

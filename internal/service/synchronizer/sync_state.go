@@ -17,15 +17,16 @@ limitations under the License.
 package synchronizer
 
 import (
+	"fmt"
 	"sync"
 
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 func safeClose(ch chan struct{}) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Log.Errorf("panic recovered in sync state: %v", r)
+			ctrl.Log.WithName("synchronizer").Error(fmt.Errorf("panic: %v", r), "panic recovered in sync state")
 		}
 	}()
 	close(ch)

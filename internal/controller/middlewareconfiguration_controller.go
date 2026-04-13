@@ -18,17 +18,18 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	middlewarecnv1 "github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
 	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareconfiguration"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
@@ -61,7 +62,11 @@ func (r *MiddlewareConfigurationReconciler) Reconcile(ctx context.Context, req c
 		zeusmetrics.ObserveRequeue("middlewareconfiguration", result.Requeue, result.RequeueAfter)
 		zeusmetrics.ObserveAPIError("middlewareconfiguration", retErr)
 	}()
-	logger.Log.Debugj(map[string]interface{}{"amsg": "start processing middlewareConfiguration", "req": req})
+
+	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
+	ctx = log.IntoContext(ctx, l)
+
+	log.FromContext(ctx).V(1).Info("start processing middlewareConfiguration", "req", req)
 
 	// Get middlewareConfiguration
 	stop := timer.Start(zeusmetrics.PhaseAPIRead)
@@ -74,7 +79,7 @@ func (r *MiddlewareConfigurationReconciler) Reconcile(ctx context.Context, req c
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middlewareconfiguration.Check(ctx, r.Client, middlewareConfiguration); err != nil {
 		stop()
-		logger.Log.Errorf("failed to validate MiddlewareConfiguration %s: %v", req.Name, err)
+		log.FromContext(ctx).Error(err, "failed to validate MiddlewareConfiguration", "name", req.Name)
 		return ctrl.Result{}, err
 	}
 	stop()

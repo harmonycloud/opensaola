@@ -28,12 +28,12 @@ import (
 	"github.com/OpenSaola/opensaola/internal/concurrency"
 	"github.com/OpenSaola/opensaola/internal/k8s"
 	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareaction"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
@@ -66,7 +66,11 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		zeusmetrics.ObserveRequeue("middlewareaction", result.Requeue, result.RequeueAfter)
 		zeusmetrics.ObserveAPIError("middlewareaction", retErr)
 	}()
-	logger.Log.Debugf("start processing MiddlewareAction: %s", req.NamespacedName)
+
+	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
+	ctx = log.IntoContext(ctx, l)
+
+	log.FromContext(ctx).V(1).Info("start processing MiddlewareAction", "name", req.NamespacedName)
 
 	// Get MiddlewareAction
 	stop := timer.Start(zeusmetrics.PhaseAPIRead)
@@ -99,14 +103,14 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		err = k8s.UpdateMiddlewareActionStatus(ctx, r.Client, middlewareAction)
 		stopStatus()
 		if err != nil {
-			logger.Log.Errorf("failed to update MiddlewareAction %s/%s status: %v", req.Namespace, req.Name, err)
+			log.FromContext(ctx).Error(err, "failed to update MiddlewareAction status", "namespace", req.Namespace, "name", req.Name)
 		}
 	}()
 
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middlewareaction.Check(ctx, r.Client, middlewareAction); err != nil {
 		stop()
-		logger.Log.Errorf("failed to validate MiddlewareAction %s/%s: %v", req.Namespace, req.Name, err)
+		log.FromContext(ctx).Error(err, "failed to validate MiddlewareAction", "namespace", req.Namespace, "name", req.Name)
 		return ctrl.Result{}, err
 	}
 	stop()
@@ -116,7 +120,7 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	middlewareActionBaseline, err := middlewareactionbaseline.Get(ctx, r.Client, middlewareAction.Spec.Baseline, middlewareAction.Labels[v1.LabelPackageName])
 	stop()
 	if err != nil {
-		logger.Log.Errorf("failed to get MiddlewareActionBaseline for MiddlewareAction %s/%s: %v", req.Namespace, req.Name, err)
+		log.FromContext(ctx).Error(err, "failed to get MiddlewareActionBaseline for MiddlewareAction", "namespace", req.Namespace, "name", req.Name)
 		return ctrl.Result{}, err
 	}
 
@@ -124,7 +128,7 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
 		if err = middlewareaction.Execute(ctx, r.Client, middlewareAction); err != nil {
 			stop()
-			logger.Log.Errorf("failed to execute MiddlewareAction %s/%s: %v", req.Namespace, req.Name, err)
+			log.FromContext(ctx).Error(err, "failed to execute MiddlewareAction", "namespace", req.Namespace, "name", req.Name)
 			return ctrl.Result{}, err
 		}
 		stop()

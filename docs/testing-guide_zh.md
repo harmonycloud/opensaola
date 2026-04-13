@@ -120,6 +120,26 @@ make bench > /tmp/new.txt
 make benchstat BENCH_OLD=/tmp/old.txt BENCH_NEW=/tmp/new.txt
 ```
 
+## 使用 saola-cli 进行 E2E 验证
+
+[saola-cli](https://gitee.com/opensaola/saola-cli) 项目提供了一个 CLI 工具，可用于端到端验证 operator 的行为。
+
+### 前置条件
+- 已构建 saola-cli 二进制文件：`cd ../saola-cli && make build`
+- 一个中间件包目录（例如 `../dataservice-baseline/clickhouse`）
+
+### 运行 saola-cli E2E
+部署 operator 之后（参见上方"构建和部署进行手动测试"），使用 saola-cli 的 E2E 脚本：
+
+```bash
+cd ../saola-cli
+PKG_DIR=../dataservice-baseline/clickhouse ./scripts/e2e-test.sh
+```
+
+此脚本覆盖：包安装 → Baseline 查询 → Operator 部署 → Middleware 部署 → 输出格式验证。
+
+ClickHouse 的示例 YAML 文件位于 `saola-cli/docs/e2e-samples/`。
+
 ## CI 检查（推送前在本地运行）
 
 ```bash

@@ -135,36 +135,36 @@ Packages **with** tests:
 | Package | Test Files |
 |---------|-----------|
 | `internal/controller` | 12 |
+| `pkg/tools` | 6 |
 | `internal/k8s` | 4 |
 | `internal/service/packages` | 3 |
 | `internal/service/middlewareoperator` | 3 |
 | `test/e2e` | 2 |
-| `pkg/tools` | 2 |
-| `pkg/tools/ctxkeys` | 1 |
-| `pkg/metrics` | 1 |
-| `internal/service/watcher` | 1 |
-| `internal/service/synchronizer` | 1 |
-| `internal/service/status` | 1 |
-| `internal/service/middlewareoperatorbaseline` | 1 |
-| `internal/service/middlewareconfiguration` | 1 |
-| `internal/service/middlewareaction` | 1 |
-| `internal/service/middleware` | 1 |
-| `internal/concurrency` | 1 |
+| `api/v1` | 1 |
 | `internal/cache` | 1 |
+| `internal/concurrency` | 1 |
+| `internal/k8s/kubeclient` | 1 |
+| `internal/resource` | 1 |
+| `internal/resource/logger` | 1 |
+| `internal/service/consts` | 1 |
+| `internal/service/customresource` | 1 |
+| `internal/service/middleware` | 1 |
+| `internal/service/middlewareaction` | 1 |
+| `internal/service/middlewareactionbaseline` | 1 |
+| `internal/service/middlewarebaseline` | 1 |
+| `internal/service/middlewareconfiguration` | 1 |
+| `internal/service/middlewareoperatorbaseline` | 1 |
+| `internal/service/middlewarepackage` | 1 |
+| `internal/service/status` | 1 |
+| `internal/service/synchronizer` | 1 |
+| `internal/service/watcher` | 1 |
+| `pkg/config` | 1 |
+| `pkg/metrics` | 1 |
+| `pkg/tools/ctxkeys` | 1 |
 
 Packages **without** tests:
 
 | Package | Notes |
 |---------|-------|
-| `api/v1` | Generated deepcopy code; low priority |
 | `cmd` | Main entrypoint; tested via e2e |
-| `internal/k8s/kubeclient` | Kubernetes client wrapper |
-| `internal/resource` | Resource helpers |
-| `internal/resource/logger` | Logging utilities |
-| `internal/service/consts` | Constants only |
-| `internal/service/customresource` | CR helpers |
-| `internal/service/middlewareactionbaseline` | Baseline action logic |
-| `internal/service/middlewarebaseline` | Baseline middleware logic |
-| `internal/service/middlewarepackage` | Package service logic |
-| `pkg/config` | Configuration loading |
 | `test/utils` | Test utilities (not a testable package) |

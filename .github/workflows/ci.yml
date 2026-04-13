@@ -39,6 +39,19 @@ jobs:
           name: coverage
           path: cover.out
 
+  envtest:
+    name: Controller Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Setup envtest binaries
+        run: make setup-envtest
+      - name: Run controller envtest
+        run: make test-envtest
+
   build:
     name: Build
     runs-on: ubuntu-latest

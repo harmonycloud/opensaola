@@ -8,20 +8,33 @@ echo "========================================="
 echo "  OpenSaola E2E Full Lifecycle Test"
 echo "========================================="
 
-# Cleanup on exit
+# Prerequisite checks
+for cmd in kubectl make docker; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: $cmd not found"; exit 1; }
+done
+kubectl cluster-info >/dev/null 2>&1 || { echo "ERROR: cluster not reachable"; exit 1; }
+
+# Cleanup on exit — preserves original exit code
 cleanup() {
+  local exit_code=$?
   echo ""
   echo "=== Cleanup ==="
-  kubectl delete namespace $NS --timeout=60s 2>/dev/null || true
-  make undeploy IMG=$IMG ignore-not-found=true 2>/dev/null || true
+  kubectl delete namespace "$NS" --timeout=60s 2>/dev/null || true
+  make undeploy IMG="$IMG" ignore-not-found=true 2>/dev/null || true
   make uninstall ignore-not-found=true 2>/dev/null || true
   echo "Cleanup complete."
+  exit $exit_code
 }
 trap cleanup EXIT
 
 echo ""
+echo "=== Step 0: Pre-clean ==="
+make undeploy IMG="$IMG" ignore-not-found=true 2>/dev/null || true
+make uninstall ignore-not-found=true 2>/dev/null || true
+
+echo ""
 echo "=== Step 1: Build operator image ==="
-make docker-build IMG=$IMG
+make docker-build IMG="$IMG"
 
 echo ""
 echo "=== Step 2: Install CRDs ==="
@@ -29,7 +42,7 @@ make install
 
 echo ""
 echo "=== Step 3: Deploy operator ==="
-make deploy IMG=$IMG
+make deploy IMG="$IMG"
 
 echo ""
 echo "=== Step 4: Wait for operator ready ==="
@@ -43,7 +56,7 @@ kubectl logs -n opensaola-system deploy/opensaola-controller-manager --tail=10
 
 echo ""
 echo "=== Step 6: Create test namespace ==="
-kubectl create namespace $NS --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
 
 echo ""
 echo "=== Step 7: Run Ginkgo E2E tests ==="
@@ -54,8 +67,9 @@ echo "=== Step 8: Check operator logs for errors ==="
 ERROR_COUNT=$(kubectl logs -n opensaola-system deploy/opensaola-controller-manager --tail=200 2>&1 | grep -ci 'error\|panic\|fatal' || true)
 echo "Error count in operator logs: $ERROR_COUNT"
 if [ "$ERROR_COUNT" -gt 5 ]; then
-  echo "WARNING: High error count in operator logs"
+  echo "FAIL: High error count in operator logs ($ERROR_COUNT errors)"
   kubectl logs -n opensaola-system deploy/opensaola-controller-manager --tail=200 2>&1 | grep -i 'error\|panic\|fatal' | tail -10
+  exit 1
 fi
 
 echo ""

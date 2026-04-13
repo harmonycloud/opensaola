@@ -4,6 +4,8 @@
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/)
 [![CI](https://img.shields.io/github/actions/workflow/status/OpenSaola/opensaola/ci.yml?branch=main&label=CI)](https://github.com/OpenSaola/opensaola/actions)
 
+**English** | [中文](README_zh.md)
+
 A Kubernetes operator for **middleware lifecycle management**. Declaratively install, upgrade, configure, monitor, and delete middleware instances (Redis, MySQL, Kafka, etc.) on Kubernetes clusters.
 
 ## Why OpenSaola?

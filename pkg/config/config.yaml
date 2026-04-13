@@ -1,7 +1,7 @@
 log:
   level: 0 # 0.debug 1.info 2.warn 3.error 4.fatal 5.panic 7.disable
   format: "console" # "console" for human-readable, "json" for structured JSON output
-  file_path: "" # log file path (empty = disabled, set via Helm values if needed)
+  file_path: "logs/opensaola.log" # log file path
   count: 10 # max historical backups
   size: 50 # max file size in MB
 kube:

@@ -68,6 +68,17 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
+# ---------------------------------------------------------------
+# Testing Tiers:
+#   make test          -- Unit tests (excludes controller envtest and e2e)
+#   make test-race     -- Unit tests with Go race detector
+#   make test-envtest  -- Controller integration tests (requires setup-envtest)
+#   make test-e2e      -- E2E tests on existing Kind cluster
+#   make test-e2e-smoke-- E2E tests (auto-creates/destroys Kind cluster)
+#   make bench         -- Performance benchmarks
+#   make coverage      -- Unit tests with HTML coverage report
+# ---------------------------------------------------------------
+
 .PHONY: test
 test: manifests generate fmt vet ## Run tests.
 	go test $$(go list ./... | grep -v /e2e | grep -v /internal/controller) -coverprofile cover.out

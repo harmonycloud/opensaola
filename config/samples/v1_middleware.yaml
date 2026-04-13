@@ -1,9 +1,39 @@
+# Sample Middleware instance
+# A Middleware represents a running middleware instance (e.g., Redis, MySQL, Kafka)
+# managed by its corresponding MiddlewareOperator.
+#
+# Key references:
+#   - spec.baseline: must match an existing MiddlewareBaseline name
+#   - spec.operatorBaseline.name: must match an existing MiddlewareOperatorBaseline name
+#   - metadata.labels: middleware.cn/component and middleware.cn/packagename are used
+#     by controllers for filtering and display
 apiVersion: middleware.cn/v1
 kind: Middleware
 metadata:
+  name: my-middleware
+  namespace: default
   labels:
-    app.kubernetes.io/name: opensaola
-    app.kubernetes.io/managed-by: kustomize
-  name: middleware-sample
+    middleware.cn/component: MyMiddleware
+    middleware.cn/packagename: my-middleware-1.0.0
 spec:
-  # TODO(user): Add fields here
+  baseline: my-middleware-standard
+  operatorBaseline:
+    name: my-operator-baseline
+    gvkName: v1
+  necessary:
+    repository: "docker.io/library"
+    version: "latest"
+    resource:
+      main:
+        limits:
+          cpu: "1"
+          memory: "1Gi"
+        requests:
+          cpu: "500m"
+          memory: "512Mi"
+        volume:
+          size: 10
+          storageClass: "standard"
+  parameters:
+    port: 6379
+    maxConnections: 1000

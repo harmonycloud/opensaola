@@ -134,8 +134,6 @@ func checkStep(ctx context.Context, step v1.Step, m *v1.MiddlewareActionBaseline
 			// 	return fmt.Errorf("failed to validate CUE: %w", err)
 			// }
 		}
-		// TODO: check http
-		// TODO: check cmd
 	}
 	return nil
 }

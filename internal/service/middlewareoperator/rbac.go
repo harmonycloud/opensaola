@@ -41,9 +41,7 @@ func handleRBAC(ctx context.Context, cli client.Client, act consts.HandleAction,
 	var (
 		errs               []string
 		conditionApplyRBAC = status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeApplyRBAC)
-		// conditionBuildExtraResource = status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeBuildExtraResource)
 	)
-	// if (conditionApplyRBAC.Status != metav1.ConditionTrue && conditionBuildExtraResource.Status == metav1.ConditionTrue) || act == consts.HandleActionDelete {
 	defer func() {
 		if act != consts.HandleActionDelete {
 			if len(errs) > 0 {

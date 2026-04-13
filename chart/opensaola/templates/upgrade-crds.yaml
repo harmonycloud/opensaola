@@ -107,7 +107,7 @@ spec:
       serviceAccountName: {{ include "opensaola.fullname" . }}-install-crds
       containers:
         - name: kubectl
-          image: "{{ .Values.image.repository }}/kubectl:{{ .Values.image.kubectlTag | default .Chart.AppVersion }}"
+          image: "{{ if .Values.image.registry }}{{ .Values.image.registry }}/{{ end }}{{ .Values.kubectl.image.repository }}:{{ .Values.kubectl.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command:
             - /bin/sh

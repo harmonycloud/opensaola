@@ -10,8 +10,9 @@ image:
   tag: ""
   # -- Image pull policy
   pullPolicy: IfNotPresent
-  # -- kubectl image tag for CRD upgrade jobs
-  kubectlTag: "1.21"
+
+# -- Image pull secrets for private registries
+imagePullSecrets: []
 
 # -- Number of operator replicas
 replicas: 1
@@ -20,6 +21,10 @@ replicas: 1
 kubectl:
   # -- Whether to install/upgrade CRDs via pre-install hook
   installCRDs: true
+  # -- kubectl image for CRD install job
+  image:
+    repository: bitnami/kubectl
+    tag: "1.30"
 
 # -- Operator configuration
 config:

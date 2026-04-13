@@ -234,13 +234,6 @@ func safeClose(ch chan struct{}) {
 	close(ch)
 }
 
-// // GetCustomResourceWithBaseInfo retrieves custom resource base info: gvk, name, namespace
-// func GetCustomResourceWithBaseInfo(ctx context.Context, cli client.Client, m *v1.Middleware) (*unstructured.Unstructured, error) {
-//	cr := new(unstructured.Unstructured)
-//
-//	return cr, nil
-// }
-
 // NewResourceEventHandlerFuncs creates resource event handler functions
 func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, namespace string) cache.ResourceEventHandlerFuncs {
 	return cache.ResourceEventHandlerFuncs{
@@ -250,13 +243,6 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 			}
 
 			log.FromContext(ctx).V(1).Info("CR CREATE event", "obj", obj)
-
-			// // obj is the received custom resource object
-			// err := customresource.CoverStatus(ctx, cli, *obj.(*unstructured.Unstructured))
-			// if err != nil {
-			// 	logger.Log.Errorf("coverStatus error: %v", err)
-			// 	return
-			// }
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			if _, ok := oldObj.(*unstructured.Unstructured).GetLabels()[v1.LabelPackageName]; !ok {
@@ -273,13 +259,7 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 
 			// Compare versions
 			if oldVersion != newVersion {
-				// customresource.RestoreIfIllegalUpdate(ctx, cli, oldObj.(*unstructured.Unstructured), newObj.(*unstructured.Unstructured))
 			}
-			// err := customresource.CoverStatus(ctx, cli, *newObj.(*unstructured.Unstructured))
-			// if err != nil {
-			// 	logger.Log.Errorf("coverStatus error: %v", err)
-			// 	return
-			// }
 		},
 		DeleteFunc: func(obj interface{}) {
 			if _, ok := obj.(*unstructured.Unstructured).GetLabels()[v1.LabelPackageName]; !ok {
@@ -292,9 +272,6 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 
 			// If OwnerReferences no longer exist, stop watching
 			for _, reference := range obj.(*unstructured.Unstructured).GetOwnerReferences() {
-				// Get middleware
-				// var err error
-				// middleware := new(v1.Middleware)
 				_, err := k8s.GetMiddleware(ctx, cli, reference.Name, obj.(*unstructured.Unstructured).GetNamespace())
 				if err != nil {
 					if apiErrors.IsNotFound(err) {
@@ -317,53 +294,6 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 				return
 			}
 
-			// err = customresource.CoverStatus(ctx, cli, *obj.(*unstructured.Unstructured))
-			// if err != nil && !apiErrors.IsNotFound(err) {
-			// 	logger.Log.Errorf("coverStatus error: %v", err)
-			// 	return
-			// }
 		},
 	}
 }
-
-// CompareNewAndPublished compares the new CustomResource with the published CustomResource
-// func CompareNewAndPublished(ctx context.Context, cli client.Client, CustomResource *unstructured.Unstructured, m *v1.Middleware) error {
-// 	// Get the published CustomResource
-// 	publishCustomResource, err := customresource.GetNeedPublishCustomResource(ctx, cli, m)
-// 	if err != nil {
-// 		return fmt.Errorf("parse CustomResource error: %w", err)
-// 	}
-//
-// 	logger.Log.Debug("comparing new CustomResource with published")
-// 	// Compare CustomResource
-// 	isSame, err := CompareCustomResourceSpec(ctx, CustomResource, publishCustomResource)
-// 	if err != nil {
-// 		return fmt.Errorf("compare CustomResource spec error: %w", err)
-// 	}
-// 	if !isSame {
-// 		logger.Log.Debugj(map[string]interface{}{
-// 			"amsg":                  "new CustomResource differs from published",
-// 			"CustomResource":        CustomResource,
-// 			"publishCustomResource": publishCustomResource,
-// 		})
-//
-// 		// Update middleware, sync CustomResource spec
-// 		if m.Annotations != nil {
-// 			m.Annotations[viper.GetString("annotations.CustomResourcesync")] = strconv.FormatInt(m.Generation, 10)
-// 		}
-// 		var specByte []byte
-// 		specByte, err = json.Marshal(CustomResource.Object["spec"])
-// 		if err != nil {
-// 			return fmt.Errorf("marshal spec error: %w", err)
-// 		}
-// 		m.Spec.Parameters = apiruntime.RawExtension{
-// 			Raw: specByte,
-// 		}
-//
-// 		err = k8s.UpdateCustomResource(ctx, cli, publishCustomResource)
-// 		if err != nil {
-// 			return fmt.Errorf("update CustomResource error: %w", err)
-// 		}
-// 	}
-// 	return nil
-// }

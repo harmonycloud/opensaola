@@ -132,18 +132,8 @@ func UpdateMiddlewareStatus(ctx context.Context, cli client.Client, m *v1.Middle
 			m.Status.ObservedGeneration = now.Status.ObservedGeneration
 		}
 
-		// if now.Status.ObservedGeneration >= m.Status.ObservedGeneration {
-		// 	return nil
-		// }
-
 		log.FromContext(ctx).V(1).Info("Update Middleware status", "version", now.ResourceVersion)
 
-		// isSame, err := tools.CompareJson(ctx, now.Status, m.Status)
-		// if err != nil {
-		// 	return err
-		// }
-		//
-		// if !isSame {
 		// Compare whether status has changed
 		if equality.Semantic.DeepEqual(now.Status, m.Status) {
 			return nil
@@ -155,7 +145,6 @@ func UpdateMiddlewareStatus(ctx context.Context, cli client.Client, m *v1.Middle
 		if err != nil {
 			return fmt.Errorf("update middleware status error: %w", err)
 		}
-		// }
 		return nil
 	})
 }

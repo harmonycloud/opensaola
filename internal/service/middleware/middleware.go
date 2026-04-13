@@ -96,13 +96,6 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 
 		log.FromContext(ctx).Info("upgrading Middleware", "name", m.Name, "namespace", m.Namespace)
 		if conditionChecked.Status == metav1.ConditionTrue {
-			// Delete already published resources
-			// err = HandleResource(ctx, cli, consts.HandleActionDelete, m)
-			// if err != nil {
-			// 	logger.Log.Errorf("failed to delete resources: %v", err)
-			// 	return err
-			// }
-
 			// Get the new package
 			var mp []v1.MiddlewarePackage
 			mp, err = k8s.ListMiddlewarePackages(ctx, cli, client.MatchingLabels{

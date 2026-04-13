@@ -36,12 +36,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// var StopChMap sync.Map
-//
-// func GetCRWatcherpKey(gvk, ns string) string {
-// 	return fmt.Sprintf("%s/%s", ns, gvk)
-// }
-
 // NewInformerOptUnit creates a new informer operation unit.
 func NewInformerOptUnit(ctx context.Context, cli client.Client, stopCh chan struct{}, gvk schema.GroupVersionKind, ns string, rehf cache.ResourceEventHandlerFuncs) error {
 	return newInformerOptUnitImpl(ctx, cli, stopCh, gvk, ns, rehf, 0)

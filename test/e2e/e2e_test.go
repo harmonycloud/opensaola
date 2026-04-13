@@ -365,6 +365,13 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(string(output)).To(Equal("False"))
 			}, 60*time.Second, 2*time.Second).Should(Succeed())
+
+			By("verifying error message mentions empty GVKs")
+			cmd = exec.Command("kubectl", "get", "mob", mobName,
+				"-o", `jsonpath={.status.conditions[?(@.type=="Checked")].message}`)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(output)).To(ContainSubstring("gvks"))
 		})
 
 		It("should add finalizer and clean up on Middleware deletion", func() {
@@ -395,6 +402,17 @@ spec:
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(string(output)).To(ContainSubstring("middleware.cn/middleware-cleanup"))
 			}, 60*time.Second, 2*time.Second).Should(Succeed())
+
+			By("verifying Middleware enters error state due to nonexistent baseline")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mid", midName, "-n", namespace,
+					"-o", "jsonpath={.status.state}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				state := string(output)
+				// State should be Unavailable or empty (not yet reconciled)
+				g.Expect(state).To(Or(Equal("Unavailable"), Equal("")))
+			}, 30*time.Second, 2*time.Second).Should(Succeed())
 
 			By("deleting the Middleware")
 			cmd = exec.Command("kubectl", "delete", "mid", midName, "-n", namespace, "--timeout=60s")

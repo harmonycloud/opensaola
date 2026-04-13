@@ -28,7 +28,6 @@ import (
 	"github.com/OpenSaola/opensaola/internal/concurrency"
 	"github.com/OpenSaola/opensaola/internal/k8s"
 	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/middleware"
 	"github.com/OpenSaola/opensaola/pkg/tools/ctxkeys"
@@ -40,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
@@ -72,7 +72,11 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		zeusmetrics.ObserveRequeue("middleware", result.Requeue, result.RequeueAfter)
 		zeusmetrics.ObserveAPIError("middleware", retErr)
 	}()
-	logger.Log.Debugj(map[string]interface{}{"amsg": "start processing middleware", "req": req})
+
+	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
+	ctx = log.IntoContext(ctx, l)
+
+	log.FromContext(ctx).V(1).Info("start processing middleware", "req", req)
 
 	var err error
 	// Get middleware
@@ -85,15 +89,14 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	stop()
 
 	if !mid.DeletionTimestamp.IsZero() {
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":                "Middleware entering deletion branch",
-			"name":                mid.Name,
-			"namespace":           mid.Namespace,
-			"hasFinalizer":        controllerutil.ContainsFinalizer(mid, v1.FinalizerMiddleware),
-			"deletionTimestamp":   mid.GetDeletionTimestamp(),
-			"packageName":         mid.GetLabels()[v1.LabelPackageName],
-			"configurationsCount": len(mid.Spec.Configurations),
-		})
+		log.FromContext(ctx).Info("Middleware entering deletion branch",
+			"name", mid.Name,
+			"namespace", mid.Namespace,
+			"hasFinalizer", controllerutil.ContainsFinalizer(mid, v1.FinalizerMiddleware),
+			"deletionTimestamp", mid.GetDeletionTimestamp(),
+			"packageName", mid.GetLabels()[v1.LabelPackageName],
+			"configurationsCount", len(mid.Spec.Configurations),
+		)
 		if controllerutil.ContainsFinalizer(mid, v1.FinalizerMiddleware) {
 			start := time.Now()
 			resolved, usedLegacy, legacyReason, resolveErr := middleware.ResolveDeleteContext(ctx, r.Client, mid)
@@ -105,32 +108,28 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				if usedLegacy {
 					zeusmetrics.ObserveLegacyDelete("middleware", "error", start)
 				}
-				logger.Log.Errorj(map[string]interface{}{
-					"amsg":             "Middleware delete context resolution failed",
-					"name":             mid.Name,
-					"namespace":        mid.Namespace,
-					"path":             path,
-					"finalizer_action": "keep",
-					"legacy_reason":    legacyReason,
-					"cleanup_result":   "error",
-					"err":              resolveErr.Error(),
-				})
+				log.FromContext(ctx).Error(resolveErr, "Middleware delete context resolution failed",
+					"name", mid.Name,
+					"namespace", mid.Namespace,
+					"path", path,
+					"finalizer_action", "keep",
+					"legacy_reason", legacyReason,
+					"cleanup_result", "error",
+				)
 				return ctrl.Result{}, resolveErr
 			}
 			if cleanErr := middleware.HandleResource(ctx, r.Client, consts.HandleActionDelete, resolved); cleanErr != nil {
 				if usedLegacy {
 					zeusmetrics.ObserveLegacyDelete("middleware", "error", start)
 				}
-				logger.Log.Errorj(map[string]interface{}{
-					"amsg":             "Middleware cleanup failed",
-					"name":             mid.Name,
-					"namespace":        mid.Namespace,
-					"path":             path,
-					"finalizer_action": "keep",
-					"legacy_reason":    legacyReason,
-					"cleanup_result":   "error",
-					"err":              cleanErr.Error(),
-				})
+				log.FromContext(ctx).Error(cleanErr, "Middleware cleanup failed",
+					"name", mid.Name,
+					"namespace", mid.Namespace,
+					"path", path,
+					"finalizer_action", "keep",
+					"legacy_reason", legacyReason,
+					"cleanup_result", "error",
+				)
 				return ctrl.Result{}, cleanErr
 			}
 			if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -151,44 +150,42 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			if usedLegacy {
 				zeusmetrics.ObserveLegacyDelete("middleware", "success", start)
 			}
-			logger.Log.Infoj(map[string]interface{}{
-				"amsg":             "Middleware deletion cleanup completed",
-				"name":             mid.Name,
-				"namespace":        mid.Namespace,
-				"path":             path,
-				"finalizer_action": "remove",
-				"legacy_reason":    legacyReason,
-				"cleanup_result":   "success",
-			})
+			log.FromContext(ctx).Info("Middleware deletion cleanup completed",
+				"name", mid.Name,
+				"namespace", mid.Namespace,
+				"path", path,
+				"finalizer_action", "remove",
+				"legacy_reason", legacyReason,
+				"cleanup_result", "success",
+			)
 		} else {
-			logger.Log.Warnj(map[string]interface{}{
-				"amsg":             "Middleware has no finalizer on deletion, skipping cleanup",
-				"name":             mid.Name,
-				"namespace":        mid.Namespace,
-				"path":             "mainline",
-				"finalizer_action": "missing",
-				"legacy_reason":    "",
-				"cleanup_result":   "skipped",
-			})
+			log.FromContext(ctx).Info("Middleware has no finalizer on deletion, skipping cleanup",
+				"warning", true,
+				"name", mid.Name,
+				"namespace", mid.Namespace,
+				"path", "mainline",
+				"finalizer_action", "missing",
+				"legacy_reason", "",
+				"cleanup_result", "skipped",
+			)
 		}
 		return ctrl.Result{}, nil
 	}
 	if !controllerutil.ContainsFinalizer(mid, v1.FinalizerMiddleware) {
 		controllerutil.AddFinalizer(mid, v1.FinalizerMiddleware)
 		if updateErr := r.Update(ctx, mid); updateErr != nil {
-			logger.Log.Errorf("failed to add finalizer for middleware %s/%s: %v", mid.Namespace, mid.Name, updateErr)
+			log.FromContext(ctx).Error(updateErr, "failed to add finalizer for middleware", "namespace", mid.Namespace, "name", mid.Name)
 			return ctrl.Result{}, updateErr
 		}
 		zeusmetrics.ObserveFinalizerBackfill("middleware", "success")
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":             "Middleware finalizer added",
-			"name":             mid.Name,
-			"namespace":        mid.Namespace,
-			"path":             "mainline",
-			"finalizer_action": "add",
-			"legacy_reason":    "",
-			"cleanup_result":   "skipped",
-		})
+		log.FromContext(ctx).Info("Middleware finalizer added",
+			"name", mid.Name,
+			"namespace", mid.Namespace,
+			"path", "mainline",
+			"finalizer_action", "add",
+			"legacy_reason", "",
+			"cleanup_result", "skipped",
+		)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
@@ -246,6 +243,10 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			reason = ""
 		}
 
+		if state != mid.Status.State {
+			log.FromContext(ctx).Info("state transition", "from", string(mid.Status.State), "to", string(state), "reason", reason)
+		}
+
 		mid.Status.State = state
 		mid.Status.Reason = reason
 
@@ -261,14 +262,14 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		err = k8s.UpdateMiddlewareStatus(ctx, r.Client, mid)
 		stopStatus()
 		if err != nil {
-			logger.Log.Errorf("failed to update middleware %s/%s status: %v", mid.Namespace, mid.Name, err)
+			log.FromContext(ctx).Error(err, "failed to update middleware status", "namespace", mid.Namespace, "name", mid.Name)
 		}
 	}()
 
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middleware.Check(ctx, r.Client, mid); err != nil {
 		stop()
-		logger.Log.Errorf("middleware %s/%s check failed: %v", mid.Namespace, mid.Name, err)
+		log.FromContext(ctx).Error(err, "middleware check failed", "namespace", mid.Namespace, "name", mid.Name)
 		return ctrl.Result{}, err
 	}
 	stop()
@@ -277,11 +278,11 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err = middleware.ReplacePackage(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, mid); err != nil {
 		stop()
 		if errors.Is(err, consts.ErrPackageNotReady) {
-			logger.Log.Infof("middleware %s/%s package not ready, requeuing after %s", mid.Namespace, mid.Name, 5*time.Second)
+			log.FromContext(ctx).Info("middleware package not ready, requeuing", "namespace", mid.Namespace, "name", mid.Name, "requeueAfter", 5*time.Second)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 		if errors.Is(err, consts.ErrPackageInstallFailed) {
-			logger.Log.Warnf("middleware %s/%s package install failed, aborting: %v", mid.Namespace, mid.Name, err)
+			log.FromContext(ctx).Info("middleware package install failed, aborting", "warning", true, "namespace", mid.Namespace, "name", mid.Name, "err", err)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("upgrade failed: %w", err)
@@ -295,7 +296,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
 		if err = middleware.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionPublish, mid); err != nil {
 			stop()
-			logger.Log.Errorf("middleware %s/%s build failed: %v", mid.Namespace, mid.Name, err)
+			log.FromContext(ctx).Error(err, "middleware build failed", "namespace", mid.Namespace, "name", mid.Name)
 			return ctrl.Result{}, err
 		}
 		stop()
@@ -303,7 +304,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
 		if err = middleware.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionUpdate, mid); err != nil {
 			stop()
-			logger.Log.Errorf("middleware %s/%s update failed: %v", mid.Namespace, mid.Name, err)
+			log.FromContext(ctx).Error(err, "middleware update failed", "namespace", mid.Namespace, "name", mid.Name)
 			return ctrl.Result{}, err
 		}
 		stop()

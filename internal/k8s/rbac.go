@@ -20,13 +20,13 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 /*
@@ -74,11 +74,7 @@ func CreateServiceAccount(ctx context.Context, cli client.Client, serviceAccount
 	} else if err != nil {
 		return fmt.Errorf("get service account error: %w", err)
 	}
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":      "Create ServiceAccount succeeded",
-		"name":      serviceAccount.Name,
-		"namespace": serviceAccount.Namespace,
-	})
+	log.FromContext(ctx).Info("Create ServiceAccount succeeded", "name", serviceAccount.Name, "namespace", serviceAccount.Namespace)
 	return nil
 }
 
@@ -89,11 +85,7 @@ func DeleteServiceAccount(ctx context.Context, cli client.Client, serviceAccount
 	if err != nil {
 		return err
 	}
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":      "Delete ServiceAccount succeeded",
-		"name":      serviceAccount.Name,
-		"namespace": serviceAccount.Namespace,
-	})
+	log.FromContext(ctx).Info("Delete ServiceAccount succeeded", "name", serviceAccount.Name, "namespace", serviceAccount.Namespace)
 	return nil
 }
 
@@ -115,11 +107,7 @@ func UpdateServiceAccount(ctx context.Context, cli client.Client, serviceAccount
 		if err := cli.Update(ctx, now); err != nil {
 			return fmt.Errorf("update service account error: %w", err)
 		}
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":      "Update ServiceAccount succeeded",
-			"name":      serviceAccount.Name,
-			"namespace": serviceAccount.Namespace,
-		})
+		log.FromContext(ctx).Info("Update ServiceAccount succeeded", "name", serviceAccount.Name, "namespace", serviceAccount.Namespace)
 		return nil
 	})
 }
@@ -154,11 +142,7 @@ func CreateRole(ctx context.Context, cli client.Client, role *rbacv1.Role) error
 	if role.Name == existRole.Name && role.Namespace == existRole.Namespace && !cmp.Equal(role.Rules, existRole.Rules) {
 		return fmt.Errorf("role with same name but different rules already exists: %s", role.Name)
 	}
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":      "Create Role succeeded",
-		"name":      role.Name,
-		"namespace": role.Namespace,
-	})
+	log.FromContext(ctx).Info("Create Role succeeded", "name", role.Name, "namespace", role.Namespace)
 	return nil
 }
 
@@ -175,11 +159,7 @@ func UpdateRole(ctx context.Context, cli client.Client, role *rbacv1.Role) error
 		if err := cli.Update(ctx, now); err != nil {
 			return fmt.Errorf("update role error: %w", err)
 		}
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":      "Update Role succeeded",
-			"name":      role.Name,
-			"namespace": role.Namespace,
-		})
+		log.FromContext(ctx).Info("Update Role succeeded", "name", role.Name, "namespace", role.Namespace)
 		return nil
 	})
 }
@@ -206,11 +186,7 @@ func DeleteRole(ctx context.Context, cli client.Client, name, namespace string) 
 	if err != nil {
 		return err
 	}
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":      "Delete Role succeeded",
-		"name":      role.Name,
-		"namespace": role.Namespace,
-	})
+	log.FromContext(ctx).Info("Delete Role succeeded", "name", role.Name, "namespace", role.Namespace)
 	return nil
 }
 
@@ -244,10 +220,7 @@ func CreateClusterRole(ctx context.Context, cli client.Client, clusterRole *rbac
 	if existClusterRole.Name == clusterRole.Name && !cmp.Equal(clusterRole.Rules, existClusterRole.Rules) {
 		return fmt.Errorf("cluster role with same name but different rules already exists: %s", clusterRole.Name)
 	}
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg": "Create ClusterRole succeeded",
-		"name": clusterRole.Name,
-	})
+	log.FromContext(ctx).Info("Create ClusterRole succeeded", "name", clusterRole.Name)
 	return nil
 }
 
@@ -265,10 +238,7 @@ func UpdateClusterRole(ctx context.Context, cli client.Client, cr *rbacv1.Cluste
 		if err := cli.Update(ctx, now); err != nil {
 			return fmt.Errorf("update cluster role error: %w", err)
 		}
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg": "Update ClusterRole succeeded",
-			"name": cr.Name,
-		})
+		log.FromContext(ctx).Info("Update ClusterRole succeeded", "name", cr.Name)
 		return nil
 	})
 }
@@ -298,11 +268,7 @@ func DeleteClusterRole(ctx context.Context, cli client.Client, name string) erro
 	if err != nil {
 		return err
 	}
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":      "Delete ClusterRole succeeded",
-		"name":      cr.Name,
-		"namespace": cr.Namespace,
-	})
+	log.FromContext(ctx).Info("Delete ClusterRole succeeded", "name", cr.Name, "namespace", cr.Namespace)
 	return nil
 }
 
@@ -337,11 +303,7 @@ func CreateRoleBinding(ctx context.Context, cli client.Client, rb *rbacv1.RoleBi
 		(!cmp.Equal(rb.Subjects, existRb.Subjects) || !cmp.Equal(rb.RoleRef, existRb.RoleRef)) {
 		return fmt.Errorf("role binding with same name but different spec already exists: %s", rb.Name)
 	}
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":      "Create RoleBinding succeeded",
-		"name":      rb.Name,
-		"namespace": rb.Namespace,
-	})
+	log.FromContext(ctx).Info("Create RoleBinding succeeded", "name", rb.Name, "namespace", rb.Namespace)
 	return nil
 }
 
@@ -359,11 +321,7 @@ func UpdateRoleBinding(ctx context.Context, cli client.Client, rb *rbacv1.RoleBi
 		if err := cli.Update(ctx, now); err != nil {
 			return fmt.Errorf("update role binding error: %w", err)
 		}
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":      "Update RoleBinding succeeded",
-			"name":      rb.Name,
-			"namespace": rb.Namespace,
-		})
+		log.FromContext(ctx).Info("Update RoleBinding succeeded", "name", rb.Name, "namespace", rb.Namespace)
 		return nil
 	})
 }
@@ -390,11 +348,7 @@ func DeleteRoleBinding(ctx context.Context, cli client.Client, name, namespace s
 	if err != nil {
 		return err
 	}
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":      "Delete RoleBinding succeeded",
-		"name":      rb.Name,
-		"namespace": rb.Namespace,
-	})
+	log.FromContext(ctx).Info("Delete RoleBinding succeeded", "name", rb.Name, "namespace", rb.Namespace)
 	return nil
 }
 
@@ -429,10 +383,7 @@ func CreateClusterRoleBinding(ctx context.Context, cli client.Client, crb *rbacv
 		(!cmp.Equal(crb.Subjects, existCrb.Subjects) || !cmp.Equal(crb.RoleRef, existCrb.RoleRef)) {
 		return fmt.Errorf("cluster role binding with same name but different spec already exists: %s", crb.Name)
 	}
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg": "Create ClusterRoleBinding succeeded",
-		"name": crb.Name,
-	})
+	log.FromContext(ctx).Info("Create ClusterRoleBinding succeeded", "name", crb.Name)
 	return nil
 }
 
@@ -450,10 +401,7 @@ func UpdateClusterRoleBinding(ctx context.Context, cli client.Client, crb *rbacv
 		if err := cli.Update(ctx, now); err != nil {
 			return fmt.Errorf("update cluster role binding error: %w", err)
 		}
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg": "Update ClusterRoleBinding succeeded",
-			"name": crb.Name,
-		})
+		log.FromContext(ctx).Info("Update ClusterRoleBinding succeeded", "name", crb.Name)
 		return nil
 	})
 }
@@ -480,9 +428,6 @@ func DeleteClusterRoleBinding(ctx context.Context, cli client.Client, name strin
 	if err != nil {
 		return err
 	}
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg": "Delete ClusterRoleBinding succeeded",
-		"name": crb.Name,
-	})
+	log.FromContext(ctx).Info("Delete ClusterRoleBinding succeeded", "name", crb.Name)
 	return nil
 }

@@ -23,7 +23,6 @@ import (
 
 	"github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/status"
 	"github.com/OpenSaola/opensaola/pkg/tools/ctxkeys"
@@ -31,6 +30,7 @@ import (
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Step5: MiddlewareOperator Deployment generation
@@ -41,16 +41,16 @@ func buildDeployment(ctx context.Context, cli client.Client, action consts.Handl
 	defer func() {
 		if action != consts.HandleActionDelete {
 			if err != nil {
-				logger.Log.Errorf("build deployment error: %v", err)
+				log.FromContext(ctx).Error(err, "build deployment error")
 				conditionApplyOperator.Failed(ctx, err.Error(), m.Generation)
 			} else {
-				logger.Log.Infof("build deployment finished")
+				log.FromContext(ctx).Info("build deployment finished")
 				conditionApplyOperator.Success(ctx, m.Generation)
 			}
 			errUpdateStatus := k8s.UpdateMiddlewareOperatorStatus(ctx, cli, m)
 			if errUpdateStatus != nil {
 				err = errUpdateStatus
-				logger.Log.Errorf("update middleware operator status error: %v", err)
+				log.FromContext(ctx).Error(err, "update middleware operator status error")
 			}
 		}
 	}()
@@ -88,7 +88,7 @@ func buildDeployment(ctx context.Context, cli client.Client, action consts.Handl
 		if err != nil {
 			return fmt.Errorf("set controller reference error: %w", err)
 		}
-		logger.Log.Infof("creating deployment: %s", deployment.Name)
+		log.FromContext(ctx).Info("creating deployment", "name", deployment.Name)
 		err = k8s.CreateDeployment(ctx, cli, deployment)
 		if err != nil {
 			return fmt.Errorf("create deployment error: %w", err)

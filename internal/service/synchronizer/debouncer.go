@@ -29,7 +29,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
+	ctrl "sigs.k8s.io/controller-runtime"
 )
 
 // defaultDebounceWindowMs is the default debounce window in milliseconds.
@@ -166,11 +166,11 @@ func (r *NsDebounceRegistry) Register(ns, midName string, triggerFn func()) {
 
 	if existing, ok := r.debouncers[key]; ok {
 		existing.Stop()
-		logger.Log.Debugf("debouncer replaced for %s", key)
+		ctrl.Log.WithName("synchronizer").V(1).Info("debouncer replaced", "key", key)
 		// Replaced existing Debouncer
 	}
 	r.debouncers[key] = NewDebouncer(triggerFn)
-	logger.Log.Debugf("debouncer registered for %s", key)
+	ctrl.Log.WithName("synchronizer").V(1).Info("debouncer registered", "key", key)
 	// Registered Debouncer for %s
 }
 
@@ -185,7 +185,7 @@ func (r *NsDebounceRegistry) Unregister(ns, midName string) {
 	if d, ok := r.debouncers[key]; ok {
 		d.Stop()
 		delete(r.debouncers, key)
-		logger.Log.Debugf("debouncer unregistered for %s", key)
+		ctrl.Log.WithName("synchronizer").V(1).Info("debouncer unregistered", "key", key)
 		// Unregistered Debouncer for %s
 	}
 }
@@ -216,7 +216,7 @@ func (r *NsDebounceRegistry) StopAll() {
 	for key, d := range r.debouncers {
 		d.Stop()
 		delete(r.debouncers, key)
-		logger.Log.Debugf("debouncer stopped for %s", key)
+		ctrl.Log.WithName("synchronizer").V(1).Info("debouncer stopped", "key", key)
 		// Stopped Debouncer for %s
 	}
 }

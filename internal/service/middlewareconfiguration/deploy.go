@@ -27,13 +27,13 @@ import (
 	"k8s.io/client-go/util/retry"
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/pkg/tools"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/yaml"
 )
 
@@ -113,25 +113,14 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 			if err != nil {
 				return err
 			}
-			logger.Log.Debugj(map[string]interface{}{
-				"amsg":      fmt.Sprintf("updated %s successfully", obj.GetKind()),
-				"name":      obj.GetName(),
-				"namespace": obj.GetNamespace(),
-			})
+			log.FromContext(ctx).V(1).Info(fmt.Sprintf("updated %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
 		} else {
 			err = k8s.CreateCustomResource(ctx, cli, obj)
 			if err != nil && !errors.IsAlreadyExists(err) {
-				logger.Log.Debugj(map[string]interface{}{
-					"amsg": fmt.Sprintf("failed to create %s", obj.GetKind()),
-					"obj":  obj,
-				})
+				log.FromContext(ctx).V(1).Info(fmt.Sprintf("failed to create %s", obj.GetKind()), "obj", obj)
 				return fmt.Errorf("failed to create CR: %w", err)
 			}
-			logger.Log.Debugj(map[string]interface{}{
-				"amsg":      fmt.Sprintf("created %s successfully", obj.GetKind()),
-				"name":      obj.GetName(),
-				"namespace": obj.GetNamespace(),
-			})
+			log.FromContext(ctx).V(1).Info(fmt.Sprintf("created %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
 			if err == nil {
 				return
 			}
@@ -145,18 +134,10 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 			obj.SetName(old.GetName())
 			err = k8s.DeleteCustomResource(ctx, cli, obj)
 			if err != nil && !errors.IsNotFound(err) {
-				logger.Log.Errorj(map[string]interface{}{
-					"amsg":      fmt.Sprintf("failed to delete %s", obj.GetKind()),
-					"name":      obj.GetName(),
-					"namespace": obj.GetNamespace(),
-				})
+				log.FromContext(ctx).Error(err, fmt.Sprintf("failed to delete %s", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
 				return fmt.Errorf("failed to delete CR: %w", err)
 			}
-			logger.Log.Debugj(map[string]interface{}{
-				"amsg":      fmt.Sprintf("deleted %s successfully", obj.GetKind()),
-				"name":      obj.GetName(),
-				"namespace": obj.GetNamespace(),
-			})
+			log.FromContext(ctx).V(1).Info(fmt.Sprintf("deleted %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
 		}
 	}
 	return nil
@@ -177,10 +158,7 @@ func UpdateStatus(ctx context.Context, cli client.Client, m *v1.MiddlewareConfig
 			return fmt.Errorf("get middleware configuration error: %w", err)
 		}
 
-		logger.Log.Debugj(map[string]interface{}{
-			"amsg":    "updating MiddlewareConfiguration status",
-			"version": now.ResourceVersion,
-		})
+		log.FromContext(ctx).V(1).Info("updating MiddlewareConfiguration status", "version", now.ResourceVersion)
 		now.Status = m.Status
 
 		// Retry updating the CR

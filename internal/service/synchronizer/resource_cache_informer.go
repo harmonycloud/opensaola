@@ -34,7 +34,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -85,7 +86,7 @@ func StartNsInformerManager(ctx context.Context, cfg *rest.Config) (*NsInformerM
 	m.rootCtx, m.rootCancel = context.WithCancel(ctx)
 	globalManager = m
 
-	logger.Log.Infof("NsInformerManager started")
+	log.FromContext(ctx).Info("NsInformerManager started")
 	return m, nil
 }
 
@@ -100,7 +101,7 @@ func StopNsInformerManager() {
 	}
 	globalManager.stopAll()
 	globalManager = nil
-	logger.Log.Infof("NsInformerManager stopped")
+	ctrl.Log.WithName("synchronizer").Info("NsInformerManager stopped")
 }
 
 // GetNsInformerManager returns the global singleton. Returns nil if not yet started.
@@ -181,7 +182,7 @@ func (m *NsInformerManager) Register(ctx context.Context, ns, midKey string) err
 		e := raw.(*nsEntry)
 		if _, loaded := e.midKeys.LoadOrStore(midKey, struct{}{}); !loaded {
 			e.refCount.Add(1)
-			logger.Log.Infof("NsInformerManager: ns=%s midKey=%s registered (refCount=%d)", ns, midKey, e.refCount.Load())
+			log.FromContext(ctx).Info("NsInformerManager: registered", "ns", ns, "midKey", midKey, "refCount", e.refCount.Load())
 		}
 		return nil
 	}
@@ -210,7 +211,7 @@ func (m *NsInformerManager) Register(ctx context.Context, ns, midKey string) err
 		e := actual.(*nsEntry)
 		if _, alreadyIn := e.midKeys.LoadOrStore(midKey, struct{}{}); !alreadyIn {
 			e.refCount.Add(1)
-			logger.Log.Infof("NsInformerManager: ns=%s midKey=%s registered (refCount=%d, raced)", ns, midKey, e.refCount.Load())
+			log.FromContext(ctx).Info("NsInformerManager: registered (raced)", "ns", ns, "midKey", midKey, "refCount", e.refCount.Load())
 		}
 		return nil
 	}
@@ -222,7 +223,7 @@ func (m *NsInformerManager) Register(ctx context.Context, ns, midKey string) err
 	// Start the factory and all registered informers.
 	factory.Start(nsCtx.Done())
 
-	logger.Log.Infof("NsInformerManager: ns=%s started informers, waiting for cache sync...", ns)
+	log.FromContext(ctx).Info("NsInformerManager: started informers, waiting for cache sync...", "ns", ns)
 
 	// WaitForCacheSync with timeout derived from ctx.
 	syncCtx, syncCancel := context.WithTimeout(ctx, 60*time.Second)
@@ -231,12 +232,12 @@ func (m *NsInformerManager) Register(ctx context.Context, ns, midKey string) err
 	synced := factory.WaitForCacheSync(syncCtx.Done())
 	for resType, ok := range synced {
 		if !ok {
-			logger.Log.Warnf("NsInformerManager: ns=%s informer %v not synced (ctx cancelled or timed out)", ns, resType)
+			log.FromContext(ctx).Info("NsInformerManager: informer not synced (ctx cancelled or timed out)", "warning", true, "ns", ns, "resType", resType)
 		}
 	}
 
 	entry.synced.Store(true)
-	logger.Log.Infof("NsInformerManager: ns=%s midKey=%s registered (refCount=1, cache synced)", ns, midKey)
+	log.FromContext(ctx).Info("NsInformerManager: registered (cache synced)", "ns", ns, "midKey", midKey, "refCount", 1)
 	return nil
 }
 
@@ -255,13 +256,13 @@ func (m *NsInformerManager) Unregister(ns, midKey string) {
 	}
 
 	remaining := e.refCount.Add(-1)
-	logger.Log.Infof("NsInformerManager: ns=%s midKey=%s unregistered (refCount=%d)", ns, midKey, remaining)
+	ctrl.Log.WithName("synchronizer").Info("NsInformerManager: unregistered", "ns", ns, "midKey", midKey, "refCount", remaining)
 
 	if remaining <= 0 {
 		// Stop informers and remove entry.
 		e.cancel()
 		m.entries.Delete(ns)
-		logger.Log.Infof("NsInformerManager: ns=%s all informers stopped and entry removed", ns)
+		ctrl.Log.WithName("synchronizer").Info("NsInformerManager: all informers stopped and entry removed", "ns", ns)
 	}
 }
 
@@ -312,7 +313,7 @@ func (m *NsInformerManager) registerHandlers(factory informers.SharedInformerFac
 	mustAdd := func(informer cache.SharedIndexInformer) {
 		if _, err := informer.AddEventHandler(handler); err != nil {
 			// Non-fatal: log and continue; cache still works without callback.
-			logger.Log.Warnf("NsInformerManager: AddEventHandler failed: %v", err)
+			ctrl.Log.WithName("synchronizer").Info("NsInformerManager: AddEventHandler failed", "warning", true, "error", err)
 		}
 	}
 
@@ -339,7 +340,7 @@ type nsCache struct {
 func (c *nsCache) ListStatefulSets(ns string) []appsv1.StatefulSet {
 	items, err := c.factory.Apps().V1().StatefulSets().Lister().StatefulSets(ns).List(labels.Everything())
 	if err != nil {
-		logger.Log.Warnf("nsCache.ListStatefulSets ns=%s: %v", ns, err)
+		ctrl.Log.WithName("synchronizer").Info("nsCache.ListStatefulSets error", "warning", true, "ns", ns, "error", err)
 		return nil
 	}
 	result := make([]appsv1.StatefulSet, 0, len(items))
@@ -353,7 +354,7 @@ func (c *nsCache) ListStatefulSets(ns string) []appsv1.StatefulSet {
 func (c *nsCache) ListDeployments(ns string) []appsv1.Deployment {
 	items, err := c.factory.Apps().V1().Deployments().Lister().Deployments(ns).List(labels.Everything())
 	if err != nil {
-		logger.Log.Warnf("nsCache.ListDeployments ns=%s: %v", ns, err)
+		ctrl.Log.WithName("synchronizer").Info("nsCache.ListDeployments error", "warning", true, "ns", ns, "error", err)
 		return nil
 	}
 	result := make([]appsv1.Deployment, 0, len(items))
@@ -367,7 +368,7 @@ func (c *nsCache) ListDeployments(ns string) []appsv1.Deployment {
 func (c *nsCache) ListDaemonSets(ns string) []appsv1.DaemonSet {
 	items, err := c.factory.Apps().V1().DaemonSets().Lister().DaemonSets(ns).List(labels.Everything())
 	if err != nil {
-		logger.Log.Warnf("nsCache.ListDaemonSets ns=%s: %v", ns, err)
+		ctrl.Log.WithName("synchronizer").Info("nsCache.ListDaemonSets error", "warning", true, "ns", ns, "error", err)
 		return nil
 	}
 	result := make([]appsv1.DaemonSet, 0, len(items))
@@ -381,7 +382,7 @@ func (c *nsCache) ListDaemonSets(ns string) []appsv1.DaemonSet {
 func (c *nsCache) ListReplicaSets(ns string) []appsv1.ReplicaSet {
 	items, err := c.factory.Apps().V1().ReplicaSets().Lister().ReplicaSets(ns).List(labels.Everything())
 	if err != nil {
-		logger.Log.Warnf("nsCache.ListReplicaSets ns=%s: %v", ns, err)
+		ctrl.Log.WithName("synchronizer").Info("nsCache.ListReplicaSets error", "warning", true, "ns", ns, "error", err)
 		return nil
 	}
 	result := make([]appsv1.ReplicaSet, 0, len(items))
@@ -395,7 +396,7 @@ func (c *nsCache) ListReplicaSets(ns string) []appsv1.ReplicaSet {
 func (c *nsCache) ListPods(ns string) []corev1.Pod {
 	items, err := c.factory.Core().V1().Pods().Lister().Pods(ns).List(labels.Everything())
 	if err != nil {
-		logger.Log.Warnf("nsCache.ListPods ns=%s: %v", ns, err)
+		ctrl.Log.WithName("synchronizer").Info("nsCache.ListPods error", "warning", true, "ns", ns, "error", err)
 		return nil
 	}
 	result := make([]corev1.Pod, 0, len(items))
@@ -409,7 +410,7 @@ func (c *nsCache) ListPods(ns string) []corev1.Pod {
 func (c *nsCache) ListServices(ns string) []corev1.Service {
 	items, err := c.factory.Core().V1().Services().Lister().Services(ns).List(labels.Everything())
 	if err != nil {
-		logger.Log.Warnf("nsCache.ListServices ns=%s: %v", ns, err)
+		ctrl.Log.WithName("synchronizer").Info("nsCache.ListServices error", "warning", true, "ns", ns, "error", err)
 		return nil
 	}
 	result := make([]corev1.Service, 0, len(items))
@@ -423,7 +424,7 @@ func (c *nsCache) ListServices(ns string) []corev1.Service {
 func (c *nsCache) ListPVCs(ns string) []corev1.PersistentVolumeClaim {
 	items, err := c.factory.Core().V1().PersistentVolumeClaims().Lister().PersistentVolumeClaims(ns).List(labels.Everything())
 	if err != nil {
-		logger.Log.Warnf("nsCache.ListPVCs ns=%s: %v", ns, err)
+		ctrl.Log.WithName("synchronizer").Info("nsCache.ListPVCs error", "warning", true, "ns", ns, "error", err)
 		return nil
 	}
 	result := make([]corev1.PersistentVolumeClaim, 0, len(items))

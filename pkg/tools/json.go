@@ -24,9 +24,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type StructMergeType string
@@ -96,6 +97,8 @@ func StructMerge(old, new any, typo StructMergeType) error {
 	return json.Unmarshal(resultBytes, new)
 }
 
+var jsonLog = ctrl.Log.WithName("tools").WithName("json")
+
 func MergeMap(old, new map[string]any) map[string]any {
 	var (
 		k string
@@ -104,7 +107,7 @@ func MergeMap(old, new map[string]any) map[string]any {
 
 	defer func() {
 		if r := recover(); r != nil {
-			logger.Log.Errorf("panic: %v key: %s value: %v", r, k, v)
+			jsonLog.Error(fmt.Errorf("panic: %v", r), "MergeMap panic", "key", k, "value", v)
 
 			buf := make([]byte, 1024)
 			n := runtime.Stack(buf, false) // false = print only the current goroutine's stack
@@ -234,9 +237,10 @@ func CompareJson(ctx context.Context, new, old any) (isSame bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("invalid old json format")
 	}
+	l := log.FromContext(ctx).WithName("json")
 	for k, v := range oldKeyMap {
 		if v != nil && newKeyMap[k] != v {
-			logger.Log.Warnf("json diff %s: old: %v new: %v", k, v, newKeyMap[k])
+			l.Info("json diff detected", "key", k, "old", v, "new", newKeyMap[k])
 			return false, nil
 		}
 	}

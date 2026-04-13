@@ -22,13 +22,13 @@ import (
 	"fmt"
 
 	"github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/pkg/tools"
 	"github.com/tidwall/gjson"
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 /*
@@ -83,11 +83,7 @@ func PatchDeployment(ctx context.Context, cli client.Client, deployment *appsv1.
 			return err
 		}
 
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":      "Patch Deployment succeeded",
-			"name":      deployment.Name,
-			"namespace": deployment.Namespace,
-		})
+		log.FromContext(ctx).Info("Patch Deployment succeeded", "name", deployment.Name, "namespace", deployment.Namespace)
 		return nil
 	})
 }
@@ -124,11 +120,7 @@ func UpdateDeployment(ctx context.Context, cli client.Client, deployment *appsv1
 		if err != nil {
 			return err
 		}
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":      "Update Deployment succeeded",
-			"name":      deployment.Name,
-			"namespace": deployment.Namespace,
-		})
+		log.FromContext(ctx).Info("Update Deployment succeeded", "name", deployment.Name, "namespace", deployment.Namespace)
 		return nil
 	})
 }

@@ -26,12 +26,12 @@ import (
 	v1 "github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/cache"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/pkg/tools"
 	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/klauspost/compress/zstd"
@@ -252,7 +252,7 @@ func GetConfigurations(ctx context.Context, cli client.Client, packageName strin
 			configuration := new(v1.MiddlewareConfiguration)
 			err = yaml.Unmarshal(v, &configuration)
 			if err != nil {
-				logger.Log.Error(fmt.Sprintf("unmarshal file failed: %s", err.Error()))
+				log.FromContext(ctx).Error(err, "unmarshal file failed")
 				return nil, err
 			}
 			configurations[configuration.Name] = configuration
@@ -273,7 +273,7 @@ func GetMiddlewareBaselines(ctx context.Context, cli client.Client, packageName 
 			baseline := new(v1.MiddlewareBaseline)
 			err = yaml.Unmarshal(v, baseline)
 			if err != nil {
-				logger.Log.Error(fmt.Sprintf("unmarshal file failed: %s", err.Error()))
+				log.FromContext(ctx).Error(err, "unmarshal file failed")
 				return nil, err
 			}
 			baselines = append(baselines, baseline)
@@ -294,7 +294,7 @@ func GetMiddlewareOperatorBaselines(ctx context.Context, cli client.Client, pack
 			baseline := new(v1.MiddlewareOperatorBaseline)
 			err = yaml.Unmarshal(v, baseline)
 			if err != nil {
-				logger.Log.Error(fmt.Sprintf("unmarshal file failed: %s", err.Error()))
+				log.FromContext(ctx).Error(err, "unmarshal file failed")
 				return nil, err
 			}
 			baselines = append(baselines, baseline)
@@ -315,7 +315,7 @@ func GetMiddlewareActionBaselines(ctx context.Context, cli client.Client, packag
 			baseline := new(v1.MiddlewareActionBaseline)
 			err = yaml.Unmarshal(v, baseline)
 			if err != nil {
-				logger.Log.Error(fmt.Sprintf("unmarshal file failed: %s", err.Error()))
+				log.FromContext(ctx).Error(err, "unmarshal file failed")
 				return nil, err
 			}
 			baselines = append(baselines, baseline)
@@ -338,7 +338,7 @@ func GetMiddlewareBaseline(ctx context.Context, cli client.Client, name, package
 		if bytes.Contains(v, []byte("kind: MiddlewareBaseline")) {
 			err = yaml.Unmarshal(v, md)
 			if err != nil {
-				logger.Log.Debug(fmt.Sprintf("unmarshal file failed: %s", err.Error()))
+				log.FromContext(ctx).V(1).Info("unmarshal file failed", "error", err.Error())
 				return nil, err
 			}
 			if md.Name == name {
@@ -368,7 +368,7 @@ func GetMiddlewareOperatorBaseline(ctx context.Context, cli client.Client, name,
 			bytes.Contains(v, []byte(fmt.Sprintf("name: %s", name))) {
 			err = yaml.Unmarshal(v, mod)
 			if err != nil {
-				logger.Log.Debug(fmt.Sprintf("unmarshal file failed: %s", err.Error()))
+				log.FromContext(ctx).V(1).Info("unmarshal file failed", "error", err.Error())
 				return nil, err
 			}
 			isExist = true
@@ -398,7 +398,7 @@ func GetMiddlewareOperatorBaseline(ctx context.Context, cli client.Client, name,
 //			strings.Contains(string(v), name) {
 //			err = yaml.Unmarshal(v, mad)
 //			if err != nil {
-//				logger.Log.Debug(fmt.Sprintf("unmarshal file failed: %s", err.Error()))
+//				log.FromContext(ctx).V(1).Info("unmarshal file failed", "error", err.Error())
 //				return nil, err
 //			}
 //			isExist = true

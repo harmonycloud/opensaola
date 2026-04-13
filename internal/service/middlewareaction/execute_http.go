@@ -28,12 +28,12 @@ import (
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/status"
 	"github.com/OpenSaola/opensaola/pkg/tools"
 	"github.com/OpenSaola/opensaola/pkg/tools/ctxkeys"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/yaml"
 )
 
@@ -76,7 +76,7 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 		if r := recover(); r != nil {
 			buf := make([]byte, 4096)
 			n := runtime.Stack(buf, false)
-			logger.Log.Errorf("panic recovered in action execution: %v\n%s", r, string(buf[:n]))
+			log.FromContext(*ctx).Error(fmt.Errorf("panic: %v", r), "panic recovered in action execution", "stack", string(buf[:n]))
 			err = fmt.Errorf("panic: %v", r)
 		}
 
@@ -86,7 +86,7 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 			conditionExecuteHttp.SuccessWithMsg(*ctx, msg, m.Generation)
 		}
 		if updateErr := k8s.UpdateMiddlewareActionStatus(*ctx, cli, m); updateErr != nil {
-			logger.Log.Errorf("update middleware action status error: %v", updateErr)
+			log.FromContext(*ctx).Error(updateErr, "update middleware action status error")
 			if err == nil {
 				err = updateErr
 			}

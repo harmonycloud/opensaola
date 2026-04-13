@@ -30,6 +30,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 /*
@@ -66,15 +67,16 @@ func InitActionsCleanupTimer(ctx context.Context, cli client.Client) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			l := log.FromContext(ctx)
 			actions, err := k8s.ListMiddlewareActions(ctx, cli, "", nil)
 			if err != nil {
-				logger.Log.Errorf("list middleware actions error: %v", err)
+				l.Error(err, "list middleware actions error")
 				continue
 			}
 			for _, action := range actions {
 				if -action.GetCreationTimestamp().Sub(time.Now()) > (time.Duration(viper.GetInt64("cache_cleanup_interval")) * time.Second) {
 					if err := k8s.DeleteMiddlewareAction(ctx, cli, &action); err != nil {
-						logger.Log.Warnf("failed to delete expired MiddlewareAction %s/%s: %v", action.Namespace, action.Name, err)
+						l.Error(err, "failed to delete expired MiddlewareAction", "namespace", action.Namespace, "name", action.Name)
 					}
 				}
 			}

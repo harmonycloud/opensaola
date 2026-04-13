@@ -21,11 +21,11 @@ import (
 	"fmt"
 
 	"github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func MiddlewareActionBaselineGroupVersionKind() schema.GroupVersionKind {
@@ -100,10 +100,7 @@ func UpdateMiddlewareActionBaselineStatus(ctx context.Context, cli client.Client
 			return fmt.Errorf("get middleware baseline error: %w", err)
 		}
 
-		logger.Log.Debugj(map[string]interface{}{
-			"amsg":    "Update MiddlewareActionBaseline status",
-			"version": now.ResourceVersion,
-		})
+		log.FromContext(ctx).V(1).Info("Update MiddlewareActionBaseline status", "version", now.ResourceVersion)
 		now.Status = m.Status
 
 		// Retry updating the CR

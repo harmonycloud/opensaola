@@ -22,19 +22,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"text/template"
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s/kubeclient"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/pkg/tools/ctxkeys"
 	"github.com/Masterminds/sprig/v3"
 	"github.com/google/uuid"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/discovery"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 type Quoter interface {
@@ -132,11 +132,12 @@ func TemplateParse(ctx context.Context, temp string, templateValues *TemplateVal
 	funcMap["tpl"] = tplFun(tpl, includedNames)
 
 	// Add the `required` function here so we can use lintMode
+	tplLog := log.FromContext(ctx).WithName("template")
 	funcMap["required"] = func(warn string, val interface{}) (interface{}, error) {
 		if val == nil {
 			if LintMode {
 				// Don't fail on missing required values when linting
-				logger.Log.Infof("Missing required value: %s", warn)
+				tplLog.Info("Missing required value", "warning", warn)
 				return "", nil
 			}
 			return val, errors.New(warn)
@@ -144,7 +145,7 @@ func TemplateParse(ctx context.Context, temp string, templateValues *TemplateVal
 			if val == "" {
 				if LintMode {
 					// Don't fail on missing required values when linting
-					logger.Log.Infof("Missing required value: %s", warn)
+					tplLog.Info("Missing required value", "warning", warn)
 					return "", nil
 				}
 				return val, errors.New(warn)
@@ -157,7 +158,7 @@ func TemplateParse(ctx context.Context, temp string, templateValues *TemplateVal
 	// Override sprig fail function for linting and wrapping message
 	funcMap["fail"] = func(msg string) (string, error) {
 		if LintMode {
-			logger.Log.Infof("Fail: %s", msg)
+			tplLog.Info("Fail", "message", msg)
 			return "", nil
 		}
 		return "", errors.New(msg)
@@ -227,6 +228,8 @@ func TemplateParse(ctx context.Context, temp string, templateValues *TemplateVal
 
 const TemplateValuesPreActionNameKey = "PreActionName"
 
+var toolsLog = ctrl.Log.WithName("tools")
+
 // buildAPIVersions retrieves all API versions and resources from the Discovery Client.
 func buildAPIVersions(disCli discovery.DiscoveryInterface) (*APIVersions, error) {
 	av := &APIVersions{
@@ -255,7 +258,7 @@ func buildAPIVersions(disCli discovery.DiscoveryInterface) (*APIVersions, error)
 			resourceList, err := disCli.ServerResourcesForGroupVersion(groupVersion)
 			if err != nil {
 				// Some group versions may not be accessible; log a warning but continue
-				log.Printf("Warning: failed to get resources for %s: %v", groupVersion, err)
+				toolsLog.Info("failed to get resources for group version", "groupVersion", groupVersion, "error", err)
 				continue
 			}
 
@@ -332,7 +335,7 @@ func GetTemplateValues(ctx context.Context, quoter Quoter) (*TemplateValues, err
 	apiVersions, err := buildAPIVersions(disCli)
 	if err != nil {
 		// If building API versions fails, log but don't block the overall flow
-		logger.Log.Warnf("Failed to build API versions: %v", err)
+		log.FromContext(ctx).Info("Failed to build API versions", "error", err)
 		// Create an empty APIVersions to avoid nil pointer
 		apiVersions = &APIVersions{
 			versions:  make(map[string]bool),

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -27,7 +28,6 @@ import (
 	v1 "github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
 	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/middlewarepackage"
 	corev1 "k8s.io/api/core/v1"
@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
@@ -71,25 +72,25 @@ func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		zeusmetrics.ObserveRequeue("middlewarepackage", result.Requeue, result.RequeueAfter)
 		zeusmetrics.ObserveAPIError("middlewarepackage", retErr)
 	}()
+
+	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
+	ctx = log.IntoContext(ctx, l)
+
 	if strings.HasPrefix(req.Name, secretRequestPrefix) {
 		secretName := strings.TrimPrefix(req.Name, secretRequestPrefix)
-		logger.Log.Debugj(map[string]interface{}{
-			"amsg": "start processing Secret",
-			"key":  types.NamespacedName{Namespace: req.Namespace, Name: secretName}.String(),
-		})
+		log.FromContext(ctx).V(1).Info("start processing Secret",
+			"key", types.NamespacedName{Namespace: req.Namespace, Name: secretName}.String(),
+		)
 		if err := r.HandleSecret(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: req.Namespace, Name: secretName}}); err != nil {
-			logger.Log.Errorf("failed to handle Secret %s: %v", secretName, err)
+			log.FromContext(ctx).Error(err, "failed to handle Secret", "secretName", secretName)
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		return ctrl.Result{}, nil
 	}
 
-	logger.Log.Debugj(map[string]interface{}{
-		"amsg": "start processing MiddlewarePackage",
-		"name": req.Name,
-	})
+	log.FromContext(ctx).V(1).Info("start processing MiddlewarePackage", "name", req.Name)
 	if err := r.HandlePackage(ctx, req); err != nil {
-		logger.Log.Errorf("failed to handle MiddlewarePackage %s: %v", req.Name, err)
+		log.FromContext(ctx).Error(err, "failed to handle MiddlewarePackage", "name", req.Name)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 

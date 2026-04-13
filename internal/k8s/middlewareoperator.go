@@ -23,13 +23,13 @@ import (
 
 	"github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/cache"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func MiddlewareOperatorGroupVersionKind() schema.GroupVersionKind {
@@ -182,10 +182,7 @@ func UpdateMiddlewareOperatorStatus(ctx context.Context, cli client.Client, m *v
 			m.Status.ObservedGeneration = now.Status.ObservedGeneration
 		}
 
-		logger.Log.Debugj(map[string]interface{}{
-			"amsg":    "Update MiddlewareOperator status",
-			"version": now.ResourceVersion,
-		})
+		log.FromContext(ctx).V(1).Info("Update MiddlewareOperator status", "version", now.ResourceVersion)
 
 		if equality.Semantic.DeepEqual(now.Status, m.Status) {
 			return nil

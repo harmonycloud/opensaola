@@ -24,11 +24,11 @@ import (
 
 	"github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/cache"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func MiddlewarePackageGroupVersionKind() schema.GroupVersionKind {
@@ -133,10 +133,7 @@ func UpdateMiddlewarePackageStatus(ctx context.Context, cli client.Client, m *v1
 		}
 		attempt++
 
-		logger.Log.Debugj(map[string]interface{}{
-			"amsg":    "Update MiddlewarePackage status",
-			"version": now.ResourceVersion,
-		})
+		log.FromContext(ctx).V(1).Info("Update MiddlewarePackage status", "version", now.ResourceVersion)
 		now.Status = m.Status
 
 		// Retry updating the CR

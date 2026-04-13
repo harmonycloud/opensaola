@@ -23,7 +23,6 @@ import (
 
 	"github.com/OpenSaola/opensaola/internal/concurrency"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	appsv1 "k8s.io/api/apps/v1"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
@@ -53,14 +53,14 @@ func (r *MiddlewareOperatorRuntimeReconciler) Reconcile(ctx context.Context, req
 
 	moName, err := middlewareOperatorNameFromDeployment(deployment)
 	if err != nil {
-		logger.Log.Errorf("Deployment %s/%s has invalid ownerReferences: %v", deployment.Namespace, deployment.Name, err)
+		log.FromContext(ctx).Error(err, "Deployment has invalid ownerReferences", "namespace", deployment.Namespace, "name", deployment.Name)
 		return ctrl.Result{}, err
 	}
 
 	mo, err := k8s.GetMiddlewareOperator(ctx, r.Client, moName, deployment.Namespace)
 	if err != nil {
 		if apiErrors.IsNotFound(err) {
-			logger.Log.Errorf("Deployment %s/%s corresponding MiddlewareOperator %s not found", deployment.Namespace, deployment.Name, moName)
+			log.FromContext(ctx).Error(err, "Deployment corresponding MiddlewareOperator not found", "namespace", deployment.Namespace, "deploymentName", deployment.Name, "moName", moName)
 		}
 		return ctrl.Result{}, err
 	}

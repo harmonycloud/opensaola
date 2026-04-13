@@ -29,26 +29,20 @@ import (
 	"cuelang.org/go/cue/cuecontext"
 	"github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/status"
 	"github.com/mohae/deepcopy"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // Check validates a MiddlewareActionBaseline
 func Check(ctx context.Context, cli client.Client, m *v1.MiddlewareActionBaseline) error {
 	defer func() {
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg": "finished validating MiddlewareActionBaseline",
-			"name": m.Name,
-		})
+		log.FromContext(ctx).Info("finished validating MiddlewareActionBaseline", "name", m.Name)
 	}()
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg": "validating MiddlewareActionBaseline",
-		"name": m.Name,
-	})
+	log.FromContext(ctx).Info("validating MiddlewareActionBaseline", "name", m.Name)
 
 	conditionChecked := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeChecked)
 	if conditionChecked.Status != metav1.ConditionTrue || conditionChecked.ObservedGeneration < m.Generation {

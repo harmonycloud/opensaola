@@ -24,9 +24,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -43,11 +43,7 @@ func CreateSecret(ctx context.Context, cli client.Client, s *corev1.Secret) erro
 		if err = cli.Create(ctx, s); err != nil {
 			return err
 		}
-		logger.Log.Infoj(map[string]interface{}{
-			"amsg":      fmt.Sprintf("Create %s succeeded", s.Kind),
-			"name":      s.GetName(),
-			"namespace": s.GetNamespace(),
-		})
+		log.FromContext(ctx).Info(fmt.Sprintf("Create %s succeeded", s.Kind), "name", s.GetName(), "namespace", s.GetNamespace())
 		return nil
 	} else if err != nil {
 		return fmt.Errorf("get %s error: %w", s.Kind, err)
@@ -73,11 +69,7 @@ func DeleteSecret(ctx context.Context, cli client.Client, name, namespace string
 	if err != nil {
 		return err
 	}
-	logger.Log.Infoj(map[string]interface{}{
-		"amsg":      fmt.Sprintf("Delete %s succeeded", existSecret.Kind),
-		"name":      existSecret.GetName(),
-		"namespace": existSecret.GetNamespace(),
-	})
+	log.FromContext(ctx).Info(fmt.Sprintf("Delete %s succeeded", existSecret.Kind), "name", existSecret.GetName(), "namespace", existSecret.GetNamespace())
 	return nil
 }
 

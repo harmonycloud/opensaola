@@ -17,28 +17,23 @@ limitations under the License.
 package middlewareoperator
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/status"
-	"github.com/rs/zerolog"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
-
-func init() {
-	logger.Initialize(zerolog.ErrorLevel)
-}
 
 func TestMarkPackageUnavailable_WithinTimeout(t *testing.T) {
 	conditions := []metav1.Condition{}
 	updating := status.GetCondition(nil, &conditions, v1.CondTypeUpdating)
 
-	err := markPackageUnavailable(updating, "v1", "not-found", 1)
+	err := markPackageUnavailable(context.Background(), updating, "v1", "not-found", 1)
 	if !errors.Is(err, consts.ErrPackageNotReady) {
 		t.Fatalf("expected ErrPackageNotReady, got %v", err)
 	}
@@ -57,7 +52,7 @@ func TestMarkPackageUnavailable_ExceedTimeout(t *testing.T) {
 	updating.LastTransitionTime = metav1.NewTime(time.Now().Add(-defaultUpgradePackageUnavailableTimeout - time.Second))
 	updating.Message = packageUnavailableMessage("v1", "not-found")
 
-	err := markPackageUnavailable(updating, "v1", "still-not-found", 1)
+	err := markPackageUnavailable(context.Background(), updating, "v1", "still-not-found", 1)
 	if !errors.Is(err, consts.ErrPackageUnavailableExceeded) {
 		t.Fatalf("expected ErrPackageUnavailableExceeded, got %v", err)
 	}
@@ -70,7 +65,7 @@ func TestMarkPackageUnavailable_ResetWindowOnVersionChange(t *testing.T) {
 	updating.LastTransitionTime = metav1.NewTime(time.Now().Add(-defaultUpgradePackageUnavailableTimeout - time.Second))
 	updating.Message = packageUnavailableMessage("old", "not-found")
 
-	err := markPackageUnavailable(updating, "new", "not-found", 1)
+	err := markPackageUnavailable(context.Background(), updating, "new", "not-found", 1)
 	if !errors.Is(err, consts.ErrPackageNotReady) {
 		t.Fatalf("expected ErrPackageNotReady after target version change, got %v", err)
 	}

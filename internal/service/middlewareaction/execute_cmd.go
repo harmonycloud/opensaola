@@ -100,7 +100,8 @@ func executeCmd(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 
 		if step.Output.Expose {
 			stepMap := ctxkeys.StepFrom(*ctx)
-			stepMap[step.Name] = make(map[string]interface{})
+			stepEntry := make(map[string]interface{})
+			stepMap[step.Name] = stepEntry
 
 			var outputMap = make(map[string]interface{})
 			switch step.Output.Type {
@@ -109,16 +110,16 @@ func executeCmd(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 				if err != nil {
 					return err
 				}
-				stepMap[step.Name].(map[string]interface{})["output"] = outputMap
+				stepEntry["output"] = outputMap
 			case "yaml":
 				err = yaml.Unmarshal(output, &outputMap)
 				if err != nil {
 					return err
 				}
-				stepMap[step.Name].(map[string]interface{})["output"] = outputMap
+				stepEntry["output"] = outputMap
 			case "string":
 				output = bytes.ReplaceAll(output, []byte("\n"), []byte(""))
-				stepMap[step.Name].(map[string]interface{})["output"] = string(output)
+				stepEntry["output"] = string(output)
 			}
 			*ctx = ctxkeys.WithStep(*ctx, stepMap)
 		}

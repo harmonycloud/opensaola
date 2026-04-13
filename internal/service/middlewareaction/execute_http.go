@@ -134,7 +134,8 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 
 		if step.Output.Expose {
 			stepMap := ctxkeys.StepFrom(*ctx)
-			stepMap[step.Name] = make(map[string]interface{})
+			stepEntry := make(map[string]interface{})
+			stepMap[step.Name] = stepEntry
 
 			var outputMap = make(map[string]interface{})
 			switch step.Output.Type {
@@ -143,15 +144,15 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 				if err != nil {
 					return err
 				}
-				stepMap[step.Name].(map[string]interface{})["output"] = outputMap
+				stepEntry["output"] = outputMap
 			case "yaml":
 				err = yaml.Unmarshal(output, &outputMap)
 				if err != nil {
 					return err
 				}
-				stepMap[step.Name].(map[string]interface{})["output"] = outputMap
+				stepEntry["output"] = outputMap
 			case "string":
-				stepMap[step.Name].(map[string]interface{})["output"] = string(output)
+				stepEntry["output"] = string(output)
 			}
 			*ctx = ctxkeys.WithStep(*ctx, stepMap)
 		}

@@ -19,10 +19,10 @@ package consts
 import "errors"
 
 var (
-	SameTypeMiddlewareExists         = errors.New("same type middleware exists")
-	SameTypeMiddlewareOperatorExists = errors.New("same type middleware operator exists")
-	NoOperator                       = errors.New("no operator")
-	ErrPackageNotReady               = errors.New("package not ready, need requeue")
-	ErrPackageInstallFailed          = errors.New("package install failed")
-	ErrPackageUnavailableExceeded    = errors.New("package unavailable exceeded retry limit")
+	SameTypeMiddlewareExists         = errors.New("a Middleware of the same type already exists in this namespace; only one instance per type is allowed — delete the existing one first or use a different type label")
+	SameTypeMiddlewareOperatorExists = errors.New("a MiddlewareOperator of the same type already exists; only one operator per middleware type is allowed — check existing MiddlewareOperators with 'kubectl get mo -A'")
+	NoOperator                       = errors.New("no matching MiddlewareOperator found for this middleware type; create a MiddlewareOperator with the correct middleware.cn/component label first")
+	ErrPackageNotReady               = errors.New("middleware package is not ready yet — the package Secret may still be installing; check package status with 'kubectl get mp'")
+	ErrPackageInstallFailed          = errors.New("middleware package installation failed — check the package Secret annotations for error details: kubectl get secret <name> -o jsonpath='{.metadata.annotations}'")
+	ErrPackageUnavailableExceeded    = errors.New("middleware package has been unavailable for too long — check if the package Secret exists and has valid content")
 )

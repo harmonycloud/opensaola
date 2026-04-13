@@ -26,6 +26,30 @@ OpenSaola organizes middleware management around a layered CRD model. At the cor
 
 The operator watches these CRDs and drives each resource through a state machine (Checking, Creating, Updating, Running, Failed, etc.), reporting progress via standard Kubernetes conditions.
 
+## How It Works
+
+OpenSaola is a **framework** -- it does not ship with any middleware out of the box. To deploy middleware (Redis, MySQL, Kafka, etc.), you first install a **middleware package** that teaches OpenSaola how to manage that specific type.
+
+The lifecycle flow looks like this:
+
+```
+MiddlewarePackage (Secret)
+    ├── MiddlewareBaseline (default spec template)
+    ├── MiddlewareOperatorBaseline (operator template)
+    ├── MiddlewareActionBaseline (lifecycle actions)
+    └── MiddlewareConfiguration (runtime config)
+         │
+         ▼
+MiddlewareOperator (deploys the operator for a middleware type)
+         │
+         ▼
+Middleware (actual middleware instance, e.g., Redis, MySQL)
+```
+
+**Package format:** Middleware packages are stored as Kubernetes Secrets with the label `middleware.cn/project: opensaola`. Each Secret contains a TAR archive holding baseline definitions, CUE/Go templates, and action scripts that define how to install, upgrade, configure, and delete a middleware type.
+
+Once a package is installed, you create a `MiddlewareOperator` to deploy the operator for that middleware type, then create `Middleware` resources to spin up actual instances. The operator drives each resource through a state machine (Checking → Creating → Running, etc.) and reports progress via Kubernetes conditions.
+
 ## CRD Overview
 
 | CRD | Short Name | Purpose |
@@ -61,6 +85,10 @@ Once installed, you can create middleware instances by applying Middleware custo
 ```bash
 kubectl apply -f config/samples/
 ```
+
+> **Note:** The sample CRs in `config/samples/` are placeholder templates.
+> To deploy actual middleware, you first need to install a middleware package.
+> See [How It Works](#how-it-works) for details.
 
 ## Development
 

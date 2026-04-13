@@ -1,0 +1,37 @@
+# OpenSaola Helm Chart Values
+# Override these values to customize your deployment
+
+# -- Container image configuration
+image:
+  # -- Image registry (leave empty for Docker Hub, e.g. "ghcr.io" or "registry.cn-hangzhou.aliyuncs.com")
+  registry: ""
+  # -- Image repository
+  repository: opensaola/opensaola
+  # -- Image tag (defaults to Chart appVersion if not set)
+  tag: "v1.5.0"
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+  # -- kubectl image tag used for CRD install/upgrade jobs
+  kubectlTag: "1.21"
+
+# -- kubectl job configuration for CRD management
+kubectl:
+  # -- Whether to install/upgrade CRDs via a kubectl Job during Helm install/upgrade
+  installCRDs: true
+  # -- Resource limits and requests for the kubectl CRD job
+  resources:
+    limits:
+      cpu: 200m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  # -- Node selector for the kubectl job pods
+  nodeSelector: {}
+  # -- Tolerations for the kubectl job pods
+  tolerations: []
+  # -- Affinity rules for the kubectl job pods
+  affinity: {}
+
+# -- Number of operator replicas
+replicas: 1

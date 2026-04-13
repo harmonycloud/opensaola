@@ -1,0 +1,12 @@
+data_namespace: "middleware-operator"
+log:
+  level: 1 # 0.debug 1.info 2.warn 3.error 4.fatal 5.panic 7.disable
+  file_path: logs/zeusopt.log # log file path
+  count: 10 # max historical backups
+  size: 50 # max file size in MB
+kube:
+  config: "/root/.kube/config"
+labels:
+  component: "middleware.cn/component"
+annotations:
+  component: "middleware.cn/component"

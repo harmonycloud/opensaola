@@ -1,0 +1,19 @@
+apiVersion: v1
+data:
+  config.yaml: |
+    data_namespace: "middleware-operator"
+    log:
+      level: 1 # 0.debug 1.info 2.warn 3.error 4.fatal 5.panic 7.disable
+      file_path: logs/zeusopt.log # 日志路径
+      count: 10 # 历史保留数
+      size: 50 # 单文件最大，单位 M
+    kube:
+      config: "$HOME/.kube/config"
+    labels:
+      component: "middleware.cn/component"
+    annotations:
+      component: "middleware.cn/component"
+      crsync: "middleware.cn/crsync"
+kind: ConfigMap
+metadata:
+  name: {{ include "opensaola.fullname" . }}

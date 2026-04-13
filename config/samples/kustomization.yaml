@@ -1,0 +1,11 @@
+## Append samples of your project ##
+resources:
+- v1_middlewareoperatorbaseline.yaml
+- v1_middleware.yaml
+- v1_middlewarebaseline.yaml
+- v1_middlewareoperator.yaml
+- v1_middlewareconfiguration.yaml
+- v1_middlewareactionbaseline.yaml
+- v1_middlewareaction.yaml
+- v1_middlewarepackage.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

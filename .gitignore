@@ -1,7 +1,7 @@
 # Binaries
 bin/
 main
-manager
+/manager
 *.exe
 *.exe~
 *.dll

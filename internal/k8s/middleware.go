@@ -19,9 +19,9 @@ package k8s
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/OpenSaola/opensaola/api/v1"
+	"github.com/OpenSaola/opensaola/internal/cache"
 	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -73,7 +73,7 @@ func UpdateMiddleware(ctx context.Context, cli client.Client, m *v1.Middleware) 
 	})
 }
 
-var MiddlewareCache sync.Map
+var MiddlewareCache = cache.New[string, v1.Middleware](0)
 
 func GetMiddleware(ctx context.Context, cli client.Client, name, namespace string) (*v1.Middleware, error) {
 	m := new(v1.Middleware)
@@ -85,7 +85,7 @@ func GetMiddleware(ctx context.Context, cli client.Client, name, namespace strin
 		return nil, err
 	}
 	// TODO: evaluate whether this cache is still needed
-	MiddlewareCache.Store(types.NamespacedName{Name: name, Namespace: namespace}.String(), m.DeepCopy())
+	MiddlewareCache.Set(types.NamespacedName{Name: name, Namespace: namespace}.String(), *m.DeepCopy())
 	return m, nil
 }
 

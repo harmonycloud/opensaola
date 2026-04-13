@@ -21,10 +21,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sync"
 	"time"
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
+	"github.com/OpenSaola/opensaola/internal/cache"
 	"github.com/OpenSaola/opensaola/internal/k8s"
 	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
@@ -72,7 +72,7 @@ type cacheEntry struct {
 	pkg             *Package
 }
 
-var packageCache sync.Map // map[string]*cacheEntry (key = Secret name)
+var packageCache = cache.New[string, *cacheEntry](0)
 
 var (
 	PackageCacheHitTotal = prometheus.NewCounter(prometheus.CounterOpts{
@@ -182,8 +182,7 @@ func Get(ctx context.Context, cli client.Client, name string) (*Package, error) 
 	}
 
 	// Use cache: skip decompress/parse if Secret resourceVersion is unchanged.
-	if entry, ok := packageCache.Load(name); ok {
-		ce := entry.(*cacheEntry)
+	if ce, ok := packageCache.Get(name); ok {
 		if ce.resourceVersion == s.ResourceVersion {
 			PackageCacheHitTotal.Inc()
 			return ce.pkg, nil
@@ -216,7 +215,7 @@ func Get(ctx context.Context, cli client.Client, name string) (*Package, error) 
 		Enabled:   s.Labels[v1.LabelEnabled] == "true",
 	}
 
-	packageCache.Store(name, &cacheEntry{
+	packageCache.Set(name, &cacheEntry{
 		resourceVersion: s.ResourceVersion,
 		pkg:             pkg,
 	})

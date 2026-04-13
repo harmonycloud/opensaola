@@ -20,9 +20,9 @@ import (
 	"context"
 	"fmt"
 	"k8s.io/apimachinery/pkg/api/equality"
-	"sync"
 
 	"github.com/OpenSaola/opensaola/api/v1"
+	"github.com/OpenSaola/opensaola/internal/cache"
 	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -74,7 +74,7 @@ func UpdateMiddlewareOperator(ctx context.Context, cli client.Client, m *v1.Midd
 	})
 }
 
-var MiddlewareOperatorCache sync.Map
+var MiddlewareOperatorCache = cache.New[string, v1.MiddlewareOperator](0)
 
 func GetMiddlewareOperator(ctx context.Context, cli client.Client, name, namespace string) (*v1.MiddlewareOperator, error) {
 	m := new(v1.MiddlewareOperator)
@@ -86,7 +86,7 @@ func GetMiddlewareOperator(ctx context.Context, cli client.Client, name, namespa
 		return nil, err
 	}
 	// TODO: evaluate whether this cache is still needed
-	MiddlewareOperatorCache.Store(types.NamespacedName{Name: name, Namespace: namespace}.String(), m.DeepCopy())
+	MiddlewareOperatorCache.Set(types.NamespacedName{Name: name, Namespace: namespace}.String(), *m.DeepCopy())
 	return m, nil
 }
 

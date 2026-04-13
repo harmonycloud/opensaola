@@ -20,8 +20,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 
+	"github.com/OpenSaola/opensaola/internal/cache"
 	"github.com/OpenSaola/opensaola/internal/service/packages"
 	"github.com/mohae/deepcopy"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -83,11 +83,9 @@ func Check(ctx context.Context, cli client.Client, m *v1.MiddlewareOperatorBasel
 	return nil
 }
 
-var Cache sync.Map
+var OperatorBaselineCache = cache.New[string, v1.MiddlewareOperatorBaseline](0)
 
 func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.MiddlewareOperatorBaseline, error) {
-	var result interface{}
-
 	key := fmt.Sprintf("%s/%s", pkgName, name)
 
 	baseline, err := k8s.GetMiddlewareOperatorBaseline(ctx, cli, name)
@@ -95,13 +93,13 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 		return v1.MiddlewareOperatorBaseline{}, err
 	}
 	if baseline != nil && baseline.GetLabels()[v1.LabelPackageName] == pkgName {
-		Cache.Store(key, *baseline)
+		OperatorBaselineCache.Set(key, *baseline)
 		return *baseline, nil
 	}
 
-	cache, ok := Cache.Load(key)
+	cached, ok := OperatorBaselineCache.Get(key)
 	if ok {
-		result = deepcopy.Copy(cache)
+		result := deepcopy.Copy(cached)
 		return result.(v1.MiddlewareOperatorBaseline), nil
 	} else {
 
@@ -122,8 +120,8 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 				lbs[v1.LabelPackageVersion] = metadata.Version
 				lbs[v1.LabelPackageName] = pkgName
 				middlewareOperatorBaseline.Labels = lbs
-				Cache.Store(key, *middlewareOperatorBaseline)
-				result = deepcopy.Copy(*middlewareOperatorBaseline)
+				OperatorBaselineCache.Set(key, *middlewareOperatorBaseline)
+				result := deepcopy.Copy(*middlewareOperatorBaseline)
 				return result.(v1.MiddlewareOperatorBaseline), nil
 			}
 		}

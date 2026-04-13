@@ -20,8 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sync"
 
+	"github.com/OpenSaola/opensaola/internal/cache"
 	"github.com/OpenSaola/opensaola/internal/service/packages"
 	"k8s.io/apimachinery/pkg/api/errors"
 
@@ -62,7 +62,7 @@ func Check(ctx context.Context, cli client.Client, m *v1.MiddlewareConfiguration
 	return nil
 }
 
-var Cache sync.Map
+var ConfigCache = cache.New[string, v1.MiddlewareConfiguration](0)
 
 func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.MiddlewareConfiguration, error) {
 	key := fmt.Sprintf("%s/%s", pkgName, name)
@@ -72,13 +72,13 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 		return v1.MiddlewareConfiguration{}, err
 	}
 	if configuration != nil && configuration.GetLabels()[v1.LabelPackageName] == pkgName {
-		Cache.Store(key, *configuration)
+		ConfigCache.Set(key, *configuration)
 		return *configuration, nil
 	}
 
-	cache, ok := Cache.Load(key)
+	cached, ok := ConfigCache.Get(key)
 	if ok {
-		return cache.(v1.MiddlewareConfiguration), nil
+		return cached, nil
 	} else {
 		var configurations map[string]*v1.MiddlewareConfiguration
 		configurations, err = packages.GetConfigurations(ctx, cli, pkgName)
@@ -96,7 +96,7 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 			lbs[v1.LabelPackageVersion] = metadata.Version
 			lbs[v1.LabelPackageName] = pkgName
 			configuration.Labels = lbs
-			Cache.Store(key, *configuration)
+			ConfigCache.Set(key, *configuration)
 			return *configuration, nil
 		}
 	}

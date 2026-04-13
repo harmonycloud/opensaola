@@ -19,12 +19,12 @@ package k8s
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/OpenSaola/opensaola/api/v1"
+	"github.com/OpenSaola/opensaola/internal/cache"
 	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -76,7 +76,7 @@ func UpdateMiddlewarePackage(ctx context.Context, cli client.Client, m *v1.Middl
 	})
 }
 
-var MiddlewarePackageCache sync.Map
+var MiddlewarePackageCache = cache.New[string, v1.MiddlewarePackage](0)
 
 // GetMiddlewarePackage retrieves a MiddlewarePackage.
 func GetMiddlewarePackage(ctx context.Context, cli client.Client, name string) (*v1.MiddlewarePackage, error) {
@@ -89,7 +89,7 @@ func GetMiddlewarePackage(ctx context.Context, cli client.Client, name string) (
 			return errors.Wrap(err, "get middleware package error")
 		}
 		// Cache the MiddlewarePackage
-		MiddlewarePackageCache.Store(types.NamespacedName{Name: name}, m)
+		MiddlewarePackageCache.Set(types.NamespacedName{Name: name}.String(), *m)
 		return nil
 	})
 }

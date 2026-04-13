@@ -73,7 +73,7 @@ func TestResolveDeleteContext_AllFieldsPresent(t *testing.T) {
 
 func TestResolveDeleteContext_MissingFields_CacheHit(t *testing.T) {
 	name, ns := "mo-2", "default"
-	k8s.MiddlewareOperatorCache.Store(middlewareOperatorCacheKey(name, ns), fullMiddlewareOperator(name, ns))
+	k8s.MiddlewareOperatorCache.Set(middlewareOperatorCacheKey(name, ns), *fullMiddlewareOperator(name, ns))
 	defer k8s.MiddlewareOperatorCache.Delete(middlewareOperatorCacheKey(name, ns))
 
 	m := emptyMiddlewareOperator(name, ns)
@@ -124,7 +124,7 @@ func TestResolveDeleteContext_MissingFields_CacheHitButStillIncomplete(t *testin
 		},
 		Spec: v1.MiddlewareOperatorSpec{},
 	}
-	k8s.MiddlewareOperatorCache.Store(middlewareOperatorCacheKey(name, ns), incomplete)
+	k8s.MiddlewareOperatorCache.Set(middlewareOperatorCacheKey(name, ns), *incomplete)
 	defer k8s.MiddlewareOperatorCache.Delete(middlewareOperatorCacheKey(name, ns))
 
 	m := emptyMiddlewareOperator(name, ns)

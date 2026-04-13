@@ -133,7 +133,7 @@ func TestResolveDeleteContext_NoOperatorFastPath(t *testing.T) {
 // TestResolveDeleteContext_MissingFields_CacheHit: slow path, cache provides missing fields.
 func TestResolveDeleteContext_MissingFields_CacheHit(t *testing.T) {
 	name, ns := "mid-2", "default"
-	k8s.MiddlewareCache.Store(middlewareCacheKey(name, ns), fullMiddleware(name, ns))
+	k8s.MiddlewareCache.Set(middlewareCacheKey(name, ns), *fullMiddleware(name, ns))
 	defer k8s.MiddlewareCache.Delete(middlewareCacheKey(name, ns))
 
 	m := emptyMiddleware(name, ns)
@@ -167,7 +167,7 @@ func TestResolveDeleteContext_MissingFields_CacheHit(t *testing.T) {
 
 func TestResolveDeleteContext_NoOperatorCacheHit(t *testing.T) {
 	name, ns := "mid-noop-2", "default"
-	k8s.MiddlewareCache.Store(middlewareCacheKey(name, ns), noOperatorMiddleware(name, ns))
+	k8s.MiddlewareCache.Set(middlewareCacheKey(name, ns), *noOperatorMiddleware(name, ns))
 	defer k8s.MiddlewareCache.Delete(middlewareCacheKey(name, ns))
 
 	m := emptyMiddleware(name, ns)
@@ -210,7 +210,7 @@ func TestResolveDeleteContext_MissingFields_CacheMiss(t *testing.T) {
 // TestResolveDeleteContext_MissingFields_CacheHitButStillIncomplete: cache entry still cannot resolve delete semantics.
 func TestResolveDeleteContext_MissingFields_CacheHitButStillIncomplete(t *testing.T) {
 	name, ns := "mid-4", "default"
-	k8s.MiddlewareCache.Store(middlewareCacheKey(name, ns), partialOperatorMiddleware(name, ns))
+	k8s.MiddlewareCache.Set(middlewareCacheKey(name, ns), *partialOperatorMiddleware(name, ns))
 	defer k8s.MiddlewareCache.Delete(middlewareCacheKey(name, ns))
 
 	m := emptyMiddleware(name, ns)

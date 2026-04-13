@@ -35,17 +35,16 @@ func TestPackageCache_HitMiss(t *testing.T) {
 		Enabled: true,
 		Files:   map[string][]byte{"a.yaml": []byte("hello")},
 	}
-	packageCache.Store("test-pkg", &cacheEntry{
+	packageCache.Set("test-pkg", &cacheEntry{
 		resourceVersion: "rv-100",
 		pkg:             pkg,
 	})
 
 	// Verify cache hit
-	entry, ok := packageCache.Load("test-pkg")
+	ce, ok := packageCache.Get("test-pkg")
 	if !ok {
 		t.Fatal("cache entry not found")
 	}
-	ce := entry.(*cacheEntry)
 	if ce.resourceVersion != "rv-100" {
 		t.Errorf("resourceVersion = %q, want %q", ce.resourceVersion, "rv-100")
 	}
@@ -55,7 +54,7 @@ func TestPackageCache_HitMiss(t *testing.T) {
 
 	// Verify Invalidate
 	InvalidatePackageCache("test-pkg")
-	if _, ok := packageCache.Load("test-pkg"); ok {
+	if _, ok := packageCache.Get("test-pkg"); ok {
 		t.Error("cache entry should be deleted after InvalidatePackageCache")
 	}
 }

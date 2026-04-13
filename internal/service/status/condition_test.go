@@ -25,6 +25,7 @@ import (
 )
 
 func TestConditionInit(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	cond := ConditionInit(ctx, "TestType", 5)
 
@@ -49,6 +50,7 @@ func TestConditionInit(t *testing.T) {
 }
 
 func TestCondition_Success(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conds := []metav1.Condition{}
 
@@ -70,6 +72,7 @@ func TestCondition_Success(t *testing.T) {
 }
 
 func TestCondition_Success_ApplyRBAC(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conds := []metav1.Condition{}
 
@@ -82,6 +85,7 @@ func TestCondition_Success_ApplyRBAC(t *testing.T) {
 }
 
 func TestCondition_Failed(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conds := []metav1.Condition{}
 
@@ -103,6 +107,7 @@ func TestCondition_Failed(t *testing.T) {
 }
 
 func TestCondition_Failed_ExecuteAction(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conds := []metav1.Condition{}
 
@@ -115,6 +120,7 @@ func TestCondition_Failed_ExecuteAction(t *testing.T) {
 }
 
 func TestCondition_Failed_StepPrefix(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conds := []metav1.Condition{}
 
@@ -127,6 +133,7 @@ func TestCondition_Failed_StepPrefix(t *testing.T) {
 }
 
 func TestCondition_SuccessWithMsg(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conds := []metav1.Condition{}
 
@@ -145,6 +152,7 @@ func TestCondition_SuccessWithMsg(t *testing.T) {
 }
 
 func TestCondition_SuccessWithMsg_StepPrefix(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conds := []metav1.Condition{}
 
@@ -157,6 +165,7 @@ func TestCondition_SuccessWithMsg_StepPrefix(t *testing.T) {
 }
 
 func TestGetCondition_Existing(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conds := []metav1.Condition{
 		{
@@ -178,6 +187,7 @@ func TestGetCondition_Existing(t *testing.T) {
 }
 
 func TestGetCondition_NotFound_Initializes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conds := []metav1.Condition{}
 
@@ -201,6 +211,7 @@ func TestGetCondition_NotFound_Initializes(t *testing.T) {
 }
 
 func TestGetCondition_MultipleCalls_SamePointer(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	conds := []metav1.Condition{}
 

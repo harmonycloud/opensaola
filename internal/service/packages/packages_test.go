@@ -20,41 +20,35 @@ import (
 	"context"
 	"testing"
 
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func TestList(t *testing.T) {
-	SetDataNamespace("lxt")
-	type args struct {
-		ctx context.Context
-		cli client.Client
-		opt Option
+func TestList_NilClient(t *testing.T) {
+	SetDataNamespace("test-ns")
+
+	_, err := List(context.Background(), nil, Option{})
+	if err == nil {
+		t.Fatal("expected error when calling List with nil client, got nil")
 	}
-	tests := []struct {
-		name    string
-		args    args
-		want    []*Package
-		wantErr bool
-	}{
-		{
-			name: "xx",
-			args: args{
-				ctx: context.Background(),
-				opt: Option{
-					// LabelComponent: "opensaola",
-					// LabelPackageVersion: "1.0.1",
-				},
-			},
-			want:    nil,
-			wantErr: false,
-		},
+}
+
+func TestList_EmptyResult(t *testing.T) {
+	SetDataNamespace("test-ns")
+
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	pkgs, err := List(context.Background(), cli, Option{})
+	if err != nil {
+		t.Fatalf("List() returned unexpected error: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := List(tt.args.ctx, tt.args.cli, tt.args.opt)
-			if err == nil {
-				t.Fatalf("List() expected error with nil client, got nil")
-			}
-		})
+	if len(pkgs) != 0 {
+		t.Errorf("expected 0 packages, got %d", len(pkgs))
 	}
 }

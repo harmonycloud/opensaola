@@ -20,36 +20,28 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // MiddlewareConfigurationSpec defines the desired state of MiddlewareConfiguration.
 type MiddlewareConfigurationSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
 	// +kubebuilder:pruning:PreserveUnknownFields
+	// Template is the CUE or Go template string used to generate Kubernetes resources from configuration values.
 	Template string `json:"template"`
 }
 
 // MiddlewareConfigurationStatus defines the observed state of MiddlewareConfiguration.
 type MiddlewareConfigurationStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
 	// The generation observed by the deployment controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty" protobuf:"varint,1,opt,name=observedGeneration"`
 
-	// Represents the latest available observations of a deployment's current state.
+	// Conditions represent the latest available observations of the configuration's current state.
 	// +patchMergeKey=type
 	// +patchStrategy=merge
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// Users is the list of consumers of this configuration.
+	// Users is the list of GroupVersionKind resources that consume this configuration.
 	Users []metav1.GroupVersionKind `json:"gvks,omitempty"`
 
-	// The state of the middleware.
+	// State is the high-level state of the configuration. Valid values: Available, Unavailable, Updating.
 	// +optional
 	State State `json:"state,omitempty"`
 }
@@ -63,6 +55,7 @@ type MiddlewareConfigurationStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // MiddlewareConfiguration is the Schema for the middlewareconfigurations API.
+// It is a cluster-scoped resource that holds templates for generating Kubernetes resources from configuration values.
 type MiddlewareConfiguration struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

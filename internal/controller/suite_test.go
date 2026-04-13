@@ -53,7 +53,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	middlewarecnv1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/pkg/resource/logger"
+	"github.com/OpenSaola/opensaola/internal/resource/logger"
 	// +kubebuilder:scaffold:imports
 )
 

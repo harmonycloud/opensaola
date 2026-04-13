@@ -21,10 +21,10 @@ import (
 	"time"
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/pkg/k8s"
+	"github.com/OpenSaola/opensaola/internal/k8s"
 	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
-	"github.com/OpenSaola/opensaola/pkg/resource/logger"
-	"github.com/OpenSaola/opensaola/pkg/service/middlewareoperatorbaseline"
+	"github.com/OpenSaola/opensaola/internal/resource/logger"
+	"github.com/OpenSaola/opensaola/internal/service/middlewareoperatorbaseline"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"

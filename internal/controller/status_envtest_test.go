@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	v1 "github.com/OpenSaola/opensaola/api/v1"
-	"github.com/OpenSaola/opensaola/pkg/k8s"
+	"github.com/OpenSaola/opensaola/internal/k8s"
 )
 
 var _ = Describe("Status Update Envtest", func() {

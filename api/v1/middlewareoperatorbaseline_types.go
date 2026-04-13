@@ -21,38 +21,37 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // MiddlewareOperatorBaselineSpec defines the desired state of MiddlewareOperatorBaseline.
+// It serves as the cluster-scoped default template for creating MiddlewareOperator instances.
 type MiddlewareOperatorBaselineSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	GVKs            []GVK                 `json:"gvks,omitempty"`
-	Globe           *runtime.RawExtension `json:"globe,omitempty"`
-	PreActions      []PreAction           `json:"preActions,omitempty"`
-	PermissionScope PermissionScope       `json:"permissionScope,omitempty"`
-	Permissions     []Permission          `json:"permissions,omitempty"`
-	Deployment      *runtime.RawExtension `json:"deployment,omitempty"`
-	Configurations  []Configuration       `json:"configurations,omitempty"`
+	// GVKs is the list of GroupVersionKind definitions for custom resources managed by this operator.
+	GVKs []GVK `json:"gvks,omitempty"`
+	// Globe holds optional global configuration (e.g., image repository) as raw JSON.
+	Globe *runtime.RawExtension `json:"globe,omitempty"`
+	// PreActions is the list of pre-actions to execute before the main operator reconciliation.
+	PreActions []PreAction `json:"preActions,omitempty"`
+	// PermissionScope defines whether RBAC resources are created at Cluster or Namespace scope.
+	PermissionScope PermissionScope `json:"permissionScope,omitempty"`
+	// Permissions is the list of default RBAC permission definitions for operator service accounts.
+	Permissions []Permission `json:"permissions,omitempty"`
+	// Deployment holds the default operator Deployment spec as raw JSON.
+	Deployment *runtime.RawExtension `json:"deployment,omitempty"`
+	// Configurations is the list of default configuration resources included in this baseline.
+	Configurations []Configuration `json:"configurations,omitempty"`
 }
 
 // MiddlewareOperatorBaselineStatus defines the observed state of MiddlewareOperatorBaseline.
 type MiddlewareOperatorBaselineStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
 	// The generation observed by the deployment controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty" protobuf:"varint,1,opt,name=observedGeneration"`
 
-	// Represents the latest available observations of a deployment's current state.
+	// Conditions represent the latest available observations of the baseline's current state.
 	// +patchMergeKey=type
 	// +patchStrategy=merge
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// The state of the middleware.
+	// State is the high-level state of the baseline. Valid values: Available, Unavailable, Updating.
 	// +optional
 	State State `json:"state,omitempty"`
 }
@@ -66,6 +65,7 @@ type MiddlewareOperatorBaselineStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // MiddlewareOperatorBaseline is the Schema for the middlewareoperatorbaselines API.
+// It is a cluster-scoped resource that provides default templates for MiddlewareOperator instances.
 type MiddlewareOperatorBaseline struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

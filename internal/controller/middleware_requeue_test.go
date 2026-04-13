@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/OpenSaola/opensaola/pkg/service/consts"
+	"github.com/OpenSaola/opensaola/internal/service/consts"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 

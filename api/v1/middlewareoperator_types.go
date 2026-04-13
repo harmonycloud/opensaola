@@ -22,48 +22,50 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // MiddlewareOperatorSpec defines the desired state of MiddlewareOperator.
 type MiddlewareOperatorSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	Baseline        string                `json:"baseline,omitempty"`
-	Globe           *runtime.RawExtension `json:"globe,omitempty"`
-	PreActions      []PreAction           `json:"preActions,omitempty"`
-	PermissionScope PermissionScope       `json:"permissionScope,omitempty"`
-	Permissions     []Permission          `json:"permissions,omitempty"`
-	Deployment      *runtime.RawExtension `json:"deployment,omitempty"`
-	Configurations  []Configuration       `json:"configurations,omitempty"`
+	// Baseline is the name of the MiddlewareOperatorBaseline to use as the default template.
+	Baseline string `json:"baseline,omitempty"`
+	// Globe holds optional global configuration (e.g., image repository) as raw JSON.
+	Globe *runtime.RawExtension `json:"globe,omitempty"`
+	// PreActions is the list of pre-actions to execute before the main operator reconciliation.
+	PreActions []PreAction `json:"preActions,omitempty"`
+	// PermissionScope defines whether RBAC resources are created at Cluster or Namespace scope.
+	PermissionScope PermissionScope `json:"permissionScope,omitempty"`
+	// Permissions is the list of RBAC permission definitions for the operator's service accounts.
+	Permissions []Permission `json:"permissions,omitempty"`
+	// Deployment holds the operator Deployment spec as raw JSON, merged with baseline defaults.
+	Deployment *runtime.RawExtension `json:"deployment,omitempty"`
+	// Configurations is the list of additional configuration resources to create alongside the operator.
+	Configurations []Configuration `json:"configurations,omitempty"`
 }
 
 // MiddlewareOperatorStatus defines the observed state of MiddlewareOperator.
 type MiddlewareOperatorStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
 	// The generation observed by the deployment controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty" protobuf:"varint,1,opt,name=observedGeneration"`
 
-	// Represents the latest available observations of a deployment's current state.
+	// Conditions represent the latest available observations of the operator's current state.
 	// +patchMergeKey=type
 	// +patchStrategy=merge
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// The status of the middlewareoperator.
+	// State is the high-level state of the operator. Valid values: Available, Unavailable, Updating.
 	// +optional
 	State State `json:"state,omitempty"`
 
-	OperatorStatus    map[string]appsv1.DeploymentStatus `json:"operators,omitempty"`
-	OperatorAvailable string                             `json:"operatorAvailable,omitempty"`
-	Reason            string                             `json:"reason,omitempty"`
+	// OperatorStatus holds the deployment status for each operator deployment managed by this resource.
+	OperatorStatus map[string]appsv1.DeploymentStatus `json:"operators,omitempty"`
+	// OperatorAvailable is a human-readable summary of operator availability (e.g., "1/1").
+	OperatorAvailable string `json:"operatorAvailable,omitempty"`
+	// Reason provides a human-readable explanation of the current state.
+	Reason string `json:"reason,omitempty"`
 
-	// Summary fields for kubectl get display (forward compatible)
+	// Ready indicates whether all operator deployments are available and healthy.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
+	// Runtime is an optional summary field for kubectl display (forward compatible).
 	// +optional
 	Runtime string `json:"runtime,omitempty"`
 }
@@ -83,6 +85,7 @@ type MiddlewareOperatorStatus struct {
 // +kubebuilder:printcolumn:name="ObsGen",type=integer,JSONPath=`.status.observedGeneration`,priority=1
 
 // MiddlewareOperator is the Schema for the middlewareoperators API.
+// It represents a deployed middleware operator (e.g., MySQL Operator) that manages Middleware instances.
 type MiddlewareOperator struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

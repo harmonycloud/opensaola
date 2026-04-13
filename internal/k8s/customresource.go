@@ -18,20 +18,39 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 
 	v1 "github.com/opensaola/opensaola/api/v1"
 	"github.com/opensaola/opensaola/internal/k8s/kubeclient"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// ErrGroupVersionNotFound indicates that the API group/version is not available in the cluster,
+// typically because the corresponding CRD is not installed.
+var ErrGroupVersionNotFound = fmt.Errorf("group version not found in cluster")
+
+// IsCRDNotInstalled checks if an error indicates that a CRD is not installed.
+func IsCRDNotInstalled(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrGroupVersionNotFound) {
+		return true
+	}
+	errMsg := err.Error()
+	return strings.Contains(errMsg, "the server could not find the requested resource") ||
+		strings.Contains(errMsg, "no matches for kind")
+}
+
 // CreateOrUpdateCustomResource creates or updates a CustomResource.
 func CreateOrUpdateCustomResource(ctx context.Context, cli client.Client, cr *unstructured.Unstructured) error {
 	old, err := GetCustomResource(ctx, cli, cr.GetName(), cr.GetNamespace(), cr.GroupVersionKind())
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	if old == nil {
@@ -43,7 +62,7 @@ func CreateOrUpdateCustomResource(ctx context.Context, cli client.Client, cr *un
 // CreateOrPatchCustomResource creates or patches a CustomResource.
 func CreateOrPatchCustomResource(ctx context.Context, cli client.Client, cr *unstructured.Unstructured) error {
 	old, err := GetCustomResource(ctx, cli, cr.GetName(), cr.GetNamespace(), cr.GroupVersionKind())
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	if old == nil {
@@ -57,7 +76,7 @@ func CreateCustomResource(ctx context.Context, cli client.Client, cr *unstructur
 	// First check if it already exists
 	_, err := GetCustomResource(ctx, cli, cr.GetName(), cr.GetNamespace(), cr.GroupVersionKind())
 	if err == nil {
-		return errors.NewAlreadyExists(schema.GroupResource{
+		return apierrors.NewAlreadyExists(schema.GroupResource{
 			Group:    cr.GroupVersionKind().Group,
 			Resource: cr.GroupVersionKind().Kind,
 		}, cr.GetName())
@@ -152,7 +171,7 @@ func IsNamespaced(obj *unstructured.Unstructured) (bool, error) {
 	// Query metadata for all resources
 	resourceList, err := discoveryClient.ServerResourcesForGroupVersion(gvk.GroupVersion().String())
 	if err != nil {
-		return false, fmt.Errorf("failed to get resource metadata: %w", err)
+		return false, fmt.Errorf("%w: %s: %v", ErrGroupVersionNotFound, gvk.GroupVersion().String(), err)
 	}
 
 	// Iterate through resources to find a match
@@ -162,7 +181,7 @@ func IsNamespaced(obj *unstructured.Unstructured) (bool, error) {
 		}
 	}
 
-	return false, fmt.Errorf("matching resource type not found: %v", gvk)
+	return false, fmt.Errorf("%w: kind %s not found in %s", ErrGroupVersionNotFound, gvk.Kind, gvk.GroupVersion().String())
 }
 
 // PatchCustomResource uses Server-Side Apply to update a CustomResource.

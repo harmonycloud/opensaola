@@ -1,0 +1,18 @@
+OpenSaola has been installed successfully!
+
+1. Verify the operator is running:
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "opensaola.name" . }}
+
+2. Check installed CRDs:
+   kubectl get crds | grep middleware.cn
+
+3. View operator logs:
+   kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "opensaola.name" . }} -f
+
+4. To deploy middleware, you need a middleware package first.
+   See: https://github.com/OpenSaola/opensaola#how-it-works
+
+{{- if .Values.serviceMonitor.enabled }}
+
+5. ServiceMonitor is enabled. Prometheus will auto-discover metrics.
+{{- end }}

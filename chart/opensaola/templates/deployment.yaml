@@ -3,22 +3,64 @@ kind: Deployment
 metadata:
   name: {{ include "opensaola.fullname" . }}
   labels:
-    app: {{ include "opensaola.fullname" . }}
+    {{- include "opensaola.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicas }}
   selector:
     matchLabels:
-      app: {{ include "opensaola.fullname" . }}
+      {{- include "opensaola.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        app: {{ include "opensaola.fullname" . }}
+        {{- include "opensaola.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "opensaola.fullname" . }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 60 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
       containers:
-        - name: {{ include "opensaola.fullname" . }}
+        - name: manager
           image: "{{ if .Values.image.registry }}{{ .Values.image.registry }}/{{ end }}{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 8443
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            failureThreshold: 30
+            periodSeconds: 10
           volumeMounts:
             - name: opensaola-config
               mountPath: /pkg/config/config.yaml
@@ -28,6 +70,18 @@ spec:
           env:
             - name: TZ
               value: Asia/Shanghai
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       volumes:
         - configMap:
             defaultMode: 420

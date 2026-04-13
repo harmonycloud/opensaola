@@ -19,8 +19,8 @@ package k8s
 import (
 	"context"
 	"fmt"
-	"sync"
 
+	"github.com/OpenSaola/opensaola/internal/cache"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 
@@ -104,7 +104,7 @@ func UpdateSecret(ctx context.Context, cli client.Client, s *corev1.Secret) erro
 	})
 }
 
-var SecretCache sync.Map
+var SecretCache = cache.New[string, corev1.Secret](0)
 
 // GetSecret retrieves a Secret resource.
 func GetSecret(ctx context.Context, cli client.Client, name, namespace string) (*corev1.Secret, error) {
@@ -116,7 +116,7 @@ func GetSecret(ctx context.Context, cli client.Client, name, namespace string) (
 	if err != nil {
 		return nil, err
 	}
-	SecretCache.Store(types.NamespacedName{Name: name, Namespace: namespace}.String(), s)
+	SecretCache.Set(types.NamespacedName{Name: name, Namespace: namespace}.String(), *s)
 	return s, nil
 }
 

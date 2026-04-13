@@ -98,15 +98,11 @@ func ResolveDeleteContext(_ context.Context, _ client.Client, m *v1.Middleware) 
 	}
 
 	cacheKey := types.NamespacedName{Name: cp.Name, Namespace: cp.Namespace}.String()
-	raw, hit := k8s.MiddlewareCache.Load(cacheKey)
+	cachedVal, hit := k8s.MiddlewareCache.Get(cacheKey)
 	if !hit {
 		return nil, true, reason, fmt.Errorf("delete context: cache miss for %s (%s)", cacheKey, reason)
 	}
-
-	cachedM, valid := raw.(*v1.Middleware)
-	if !valid || cachedM == nil {
-		return nil, true, reason, fmt.Errorf("delete context: invalid cache entry for %s", cacheKey)
-	}
+	cachedM := &cachedVal
 
 	// Fill only the missing fields from cache; never overwrite fields already set on the copy.
 	// This stays compatible with both delete modes:

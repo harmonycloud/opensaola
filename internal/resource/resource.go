@@ -50,25 +50,10 @@ func InitCacheCleanupTimer(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			middlewareconfiguration.Cache.Range(func(key, value any) bool {
-				middlewareconfiguration.Cache.Delete(key)
-				return true
-			})
-
-			middlewarebaseline.Cache.Range(func(key, value any) bool {
-				middlewarebaseline.Cache.Delete(key)
-				return true
-			})
-
-			middlewareoperatorbaseline.Cache.Range(func(key, value any) bool {
-				middlewareoperatorbaseline.Cache.Delete(key)
-				return true
-			})
-
-			middlewareactionbaseline.Cache.Range(func(key, value any) bool {
-				middlewareactionbaseline.Cache.Delete(key)
-				return true
-			})
+			middlewareconfiguration.ConfigCache.Clear()
+			middlewarebaseline.BaselineCache.Clear()
+			middlewareoperatorbaseline.OperatorBaselineCache.Clear()
+			middlewareactionbaseline.ActionBaselineCache.Clear()
 		}
 	}
 }

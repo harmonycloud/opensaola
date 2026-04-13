@@ -17,6 +17,9 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .spec.middlewareName
+      name: Middleware
+      type: string
     - jsonPath: .status.state
       name: Status
       type: string

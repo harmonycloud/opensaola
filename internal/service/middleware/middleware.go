@@ -131,8 +131,8 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 							delete(mo.Annotations, v1.LabelUpdate)
 						}
 						if updateErr := k8s.UpdateMiddleware(ctx, cli, mo); updateErr != nil {
-						log.FromContext(ctx).Info("failed to clear upgrade annotation on Middleware", "warning", true, "namespace", mo.Namespace, "name", mo.Name, "err", updateErr)
-					}
+							log.FromContext(ctx).Info("failed to clear upgrade annotation on Middleware", "warning", true, "namespace", mo.Namespace, "name", mo.Name, "err", updateErr)
+						}
 					}
 					if m.Annotations != nil {
 						delete(m.Annotations, v1.LabelUpdate)

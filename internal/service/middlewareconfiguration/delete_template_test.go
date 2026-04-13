@@ -88,8 +88,8 @@ spec:
 			wantNameExpr:   "{{ .Globe.Name }}-sts",
 		},
 		{
-			name: "empty template",
-			template: "",
+			name:           "empty template",
+			template:       "",
 			wantAPIVersion: "",
 			wantKind:       "",
 			wantNameExpr:   "",

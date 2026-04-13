@@ -21,12 +21,12 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/mohae/deepcopy"
 	"github.com/opensaola/opensaola/api/v1"
 	"github.com/opensaola/opensaola/internal/cache"
 	"github.com/opensaola/opensaola/internal/k8s"
 	"github.com/opensaola/opensaola/internal/service/packages"
 	"github.com/opensaola/opensaola/internal/service/status"
-	"github.com/mohae/deepcopy"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"

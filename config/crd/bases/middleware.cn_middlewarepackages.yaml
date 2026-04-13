@@ -17,6 +17,12 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
+    - jsonPath: .spec.version
+      name: Version
+      type: string
+    - jsonPath: .status.state
+      name: Status
+      type: string
     - jsonPath: .metadata.labels['middleware\.cn/component']
       name: Type
       type: string

@@ -51,6 +51,15 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
+.PHONY: generate-all
+generate-all: manifests generate sync-chart-crds ## Generate code, manifests, and sync CRDs to Helm chart.
+
+.PHONY: sync-chart-crds
+sync-chart-crds: ## Copy generated CRDs from config/crd/bases/ to chart/opensaola/crds/.
+	@echo "Syncing CRDs to Helm chart..."
+	@cp config/crd/bases/*.yaml chart/opensaola/crds/
+	@echo "Done. $$(ls config/crd/bases/*.yaml | wc -l | tr -d ' ') CRDs synced."
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...

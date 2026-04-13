@@ -25,3 +25,11 @@ CHANGELOG.md
 .golangci.yml
 .github/
 .gitignore
+Dockerfile
+.dockerignore
+*.swp
+*.swo
+*.log
+*.out
+tmp/
+.env*

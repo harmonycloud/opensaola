@@ -185,6 +185,12 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 		tmp.SetGroupVersionKind(gvk)
 		namespaced, isNSErr := k8s.IsNamespaced(tmp)
 		if isNSErr != nil {
+			if k8s.IsCRDNotInstalled(isNSErr) {
+				log.FromContext(ctx).Info("CRD not installed in cluster, skipping cleanup (resource cannot exist)",
+					"configuration", cfg.Name,
+				)
+				continue
+			}
 			errList = append(errList, fmt.Sprintf("configuration %s isNamespaced error: %v", cfg.Name, isNSErr))
 			continue
 		}

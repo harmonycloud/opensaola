@@ -49,7 +49,17 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		return nil
 	}
 
-	if ok, _ := k8s.IsNamespaced(obj); ok {
+	namespaced, nsErr := k8s.IsNamespaced(obj)
+	if nsErr != nil {
+		if k8s.IsCRDNotInstalled(nsErr) {
+			log.FromContext(ctx).Info("CRD not installed in cluster, skipping namespace/owner-ref setup",
+				"kind", obj.GetKind(),
+				"apiVersion", obj.GetAPIVersion(),
+			)
+		} else {
+			return fmt.Errorf("failed to check if resource is namespaced: %w", nsErr)
+		}
+	} else if namespaced {
 		if obj.GetNamespace() == "" {
 			obj.SetNamespace(owner.GetNamespace())
 		}

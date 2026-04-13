@@ -106,7 +106,9 @@ var updatingLocker sync.Mutex
 func clearUpgradeAnnotation(ctx context.Context, cli client.Client, live, current *v1.MiddlewareOperator) {
 	if live != nil && live.Annotations != nil {
 		delete(live.Annotations, v1.LabelUpdate)
-		_ = k8s.UpdateMiddlewareOperator(ctx, cli, live)
+		if err := k8s.UpdateMiddlewareOperator(ctx, cli, live); err != nil {
+			logger.Log.Warnf("failed to clear upgrade annotation on MiddlewareOperator %s/%s: %v", live.Namespace, live.Name, err)
+		}
 	}
 	if current != nil && current.Annotations != nil {
 		delete(current.Annotations, v1.LabelUpdate)
@@ -294,7 +296,10 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.MiddlewareOper
 				rollback()
 				return err
 			}
-			_, _ = k8s.GetMiddlewareOperator(ctx, cli, m.Name, m.Namespace)
+			// Refresh cache after successful upgrade
+			if _, err := k8s.GetMiddlewareOperator(ctx, cli, m.Name, m.Namespace); err != nil {
+				logger.Log.Warnf("failed to refresh MiddlewareOperator %s/%s cache: %v", m.Namespace, m.Name, err)
+			}
 		}
 	}
 	return nil

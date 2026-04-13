@@ -78,6 +78,7 @@ func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			"key":  types.NamespacedName{Namespace: req.Namespace, Name: secretName}.String(),
 		})
 		if err := r.HandleSecret(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: req.Namespace, Name: secretName}}); err != nil {
+			logger.Log.Errorf("failed to handle Secret %s: %v", secretName, err)
 			return ctrl.Result{}, client.IgnoreNotFound(err)
 		}
 		return ctrl.Result{}, nil
@@ -88,6 +89,7 @@ func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		"name": req.Name,
 	})
 	if err := r.HandlePackage(ctx, req); err != nil {
+		logger.Log.Errorf("failed to handle MiddlewarePackage %s: %v", req.Name, err)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 

@@ -73,7 +73,9 @@ func InitActionsCleanupTimer(ctx context.Context, cli client.Client) {
 			}
 			for _, action := range actions {
 				if -action.GetCreationTimestamp().Sub(time.Now()) > (time.Duration(viper.GetInt64("cache_cleanup_interval")) * time.Second) {
-					_ = k8s.DeleteMiddlewareAction(ctx, cli, &action)
+					if err := k8s.DeleteMiddlewareAction(ctx, cli, &action); err != nil {
+						logger.Log.Warnf("failed to delete expired MiddlewareAction %s/%s: %v", action.Namespace, action.Name, err)
+					}
 				}
 			}
 		}

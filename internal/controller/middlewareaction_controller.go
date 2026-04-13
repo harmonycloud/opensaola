@@ -99,14 +99,14 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		err = k8s.UpdateMiddlewareActionStatus(ctx, r.Client, middlewareAction)
 		stopStatus()
 		if err != nil {
-			logger.Log.Errorf("failed to update middleware status: %v", err)
+			logger.Log.Errorf("failed to update MiddlewareAction %s/%s status: %v", req.Namespace, req.Name, err)
 		}
 	}()
 
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err = middlewareaction.Check(ctx, r.Client, middlewareAction); err != nil {
 		stop()
-		logger.Log.Errorf("failed to validate MiddlewareAction: %v", err)
+		logger.Log.Errorf("failed to validate MiddlewareAction %s/%s: %v", req.Namespace, req.Name, err)
 		return ctrl.Result{}, err
 	}
 	stop()
@@ -116,7 +116,7 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	middlewareActionBaseline, err := middlewareactionbaseline.Get(ctx, r.Client, middlewareAction.Spec.Baseline, middlewareAction.Labels[v1.LabelPackageName])
 	stop()
 	if err != nil {
-		logger.Log.Errorf("failed to get MiddlewareActionBaseline: %v", err)
+		logger.Log.Errorf("failed to get MiddlewareActionBaseline for MiddlewareAction %s/%s: %v", req.Namespace, req.Name, err)
 		return ctrl.Result{}, err
 	}
 
@@ -124,7 +124,7 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
 		if err = middlewareaction.Execute(ctx, r.Client, middlewareAction); err != nil {
 			stop()
-			logger.Log.Errorf("failed to execute MiddlewareAction: %v", err)
+			logger.Log.Errorf("failed to execute MiddlewareAction %s/%s: %v", req.Namespace, req.Name, err)
 			return ctrl.Result{}, err
 		}
 		stop()

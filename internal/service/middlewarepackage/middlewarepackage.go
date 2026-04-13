@@ -377,7 +377,9 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 				// Rollback
 				for _, baselineDelete := range deployedMiddlewareBaseline {
 					logger.Log.Infof("start rolling back MiddlewareBaseline %s", baselineDelete.Name)
-					_ = k8s.DeleteMiddlewareBaseline(ctx, cli, baselineDelete)
+					if rbErr := k8s.DeleteMiddlewareBaseline(ctx, cli, baselineDelete); rbErr != nil {
+						logger.Log.Warnf("rollback: failed to delete MiddlewareBaseline %s: %v", baselineDelete.Name, rbErr)
+					}
 					logger.Log.Infof("finished rolling back MiddlewareBaseline %s", baselineDelete.Name)
 				}
 				return err
@@ -389,7 +391,9 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 			if err != nil && !apiErrors.IsAlreadyExists(err) {
 				for _, baseline := range middlewareBaseline {
 					logger.Log.Infof("start rolling back MiddlewareBaseline %s", baseline.Name)
-					_ = k8s.DeleteMiddlewareBaseline(ctx, cli, baseline)
+					if rbErr := k8s.DeleteMiddlewareBaseline(ctx, cli, baseline); rbErr != nil {
+						logger.Log.Warnf("rollback: failed to delete MiddlewareBaseline %s: %v", baseline.Name, rbErr)
+					}
 					logger.Log.Infof("finished rolling back MiddlewareBaseline %s", baseline.Name)
 				}
 			}
@@ -405,7 +409,9 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 				// Rollback
 				for _, operatorBaselineDelete := range deployedMiddlewareOperatorBaseline {
 					logger.Log.Infof("start rolling back MiddlewareOperatorBaseline %s", operatorBaselineDelete.Name)
-					_ = k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaselineDelete)
+					if rbErr := k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaselineDelete); rbErr != nil {
+						logger.Log.Warnf("rollback: failed to delete MiddlewareOperatorBaseline %s: %v", operatorBaselineDelete.Name, rbErr)
+					}
 					logger.Log.Infof("finished rolling back MiddlewareOperatorBaseline %s", operatorBaselineDelete.Name)
 				}
 				return err
@@ -417,7 +423,9 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 			if err != nil && !apiErrors.IsAlreadyExists(err) {
 				for _, operatorBaseline := range middlewareOperatorBaseline {
 					logger.Log.Infof("start rolling back MiddlewareOperatorBaseline %s", operatorBaseline.Name)
-					_ = k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaseline)
+					if rbErr := k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaseline); rbErr != nil {
+						logger.Log.Warnf("rollback: failed to delete MiddlewareOperatorBaseline %s: %v", operatorBaseline.Name, rbErr)
+					}
 					logger.Log.Infof("finished rolling back MiddlewareOperatorBaseline %s", operatorBaseline.Name)
 				}
 			}
@@ -433,7 +441,9 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 				// Rollback
 				for _, actionBaselineDelete := range deployedMiddlewareActionBaseline {
 					logger.Log.Infof("start rolling back MiddlewareActionBaseline %s", actionBaselineDelete.Name)
-					_ = k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaselineDelete)
+					if rbErr := k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaselineDelete); rbErr != nil {
+						logger.Log.Warnf("rollback: failed to delete MiddlewareActionBaseline %s: %v", actionBaselineDelete.Name, rbErr)
+					}
 					logger.Log.Infof("finished rolling back MiddlewareActionBaseline %s", actionBaselineDelete.Name)
 				}
 				return err
@@ -445,7 +455,9 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 			if err != nil && !apiErrors.IsAlreadyExists(err) {
 				for _, actionBaseline := range middlewareActionBaselines {
 					logger.Log.Infof("start rolling back MiddlewareActionBaseline %s", actionBaseline.Name)
-					_ = k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaseline)
+					if rbErr := k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaseline); rbErr != nil {
+						logger.Log.Warnf("rollback: failed to delete MiddlewareActionBaseline %s: %v", actionBaseline.Name, rbErr)
+					}
 					logger.Log.Infof("finished rolling back MiddlewareActionBaseline %s", actionBaseline.Name)
 				}
 			}
@@ -460,7 +472,9 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 				// Rollback
 				for _, configurationDelete := range deployedConfigurations {
 					logger.Log.Infof("start rolling back MiddlewareConfiguration %s", configurationDelete.Name)
-					_ = k8s.DeleteMiddlewareConfiguration(ctx, cli, configurationDelete)
+					if rbErr := k8s.DeleteMiddlewareConfiguration(ctx, cli, configurationDelete); rbErr != nil {
+						logger.Log.Warnf("rollback: failed to delete MiddlewareConfiguration %s: %v", configurationDelete.Name, rbErr)
+					}
 					logger.Log.Infof("finished rolling back MiddlewareConfiguration %s", configurationDelete.Name)
 				}
 				return err

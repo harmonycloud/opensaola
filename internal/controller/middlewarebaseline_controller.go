@@ -75,6 +75,7 @@ func (r *MiddlewareBaselineReconciler) Reconcile(ctx context.Context, req ctrl.R
 	stop = timer.Start(zeusmetrics.PhaseCompute)
 	if err := middlewarebaseline.Check(ctx, r.Client, middlewareBaseline); err != nil {
 		stop()
+		logger.Log.Errorf("failed to validate MiddlewareBaseline %s: %v", req.Name, err)
 		return ctrl.Result{}, err
 	}
 	stop()

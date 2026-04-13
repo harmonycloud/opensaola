@@ -174,7 +174,9 @@ func newInformerOptUnitImpl(ctx context.Context, cli client.Client, stopCh chan 
 
 func safeClose(ch chan struct{}) {
 	defer func() {
-		_ = recover()
+		if r := recover(); r != nil {
+			logger.Log.Errorf("panic recovered in informer safeClose: %v", r)
+		}
 	}()
 	close(ch)
 }

@@ -231,7 +231,9 @@ func CloseCRWatcher(ctx context.Context, obj *unstructured.Unstructured) {
 
 func safeClose(ch chan struct{}) {
 	defer func() {
-		_ = recover()
+		if r := recover(); r != nil {
+			logger.Log.Errorf("panic recovered in watcher safeClose: %v", r)
+		}
 	}()
 	close(ch)
 }

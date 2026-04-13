@@ -17,11 +17,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          version: v1.63.4
 
   test:
     name: Test
@@ -30,9 +30,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
       - name: Run tests
-        run: go test ./... -v -coverprofile=cover.out
+        run: make test
       - name: Upload coverage
         uses: actions/upload-artifact@v4
         with:
@@ -46,6 +46,32 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
       - name: Build
-        run: go build ./...
+        run: make build
+
+  verify:
+    name: Verify Generated Code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Check manifests and generated code
+        run: |
+          make manifests generate
+          git diff --exit-code || (echo "Generated code is out of date. Run 'make manifests generate' and commit." && exit 1)
+
+  license:
+    name: License Headers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Check license headers
+        run: |
+          go install github.com/google/addlicense@latest
+          addlicense -check -f hack/boilerplate.go.txt $(find cmd internal api pkg -name '*.go' ! -name 'zz_generated*')

@@ -41,7 +41,12 @@ type OperatorBaseline struct {
 type Configuration struct {
 	// Name is the unique name identifying this configuration entry.
 	Name string `json:"name,omitempty"`
-	// Values holds the raw configuration data as an unstructured JSON object.
+	// Values holds configuration values as raw JSON, rendered from CUE/Go templates.
+	// The structure depends on the Configuration name and target resource type.
+	// For ConfigMap targets, this typically contains key-value pairs; for RBAC targets,
+	// it contains role/binding specifications.
+	// Example (ConfigMap): {"my.cnf": "max_connections=200\ninnodb_buffer_pool_size=1G"}
+	// Example (ServiceAccount): {"automountServiceAccountToken": true}
 	Values runtime.RawExtension `json:"values,omitempty"`
 }
 
@@ -227,7 +232,9 @@ type PreAction struct {
 	Fixed bool `json:"fixed,omitempty"`
 	// Exposed indicates whether this pre-action's output is exposed to the parent resource.
 	Exposed bool `json:"exposed,omitempty"`
-	// Parameters holds the raw parameter data passed to the pre-action.
+	// Parameters holds input parameters for the pre-action as raw JSON.
+	// The schema is defined by the corresponding MiddlewareActionBaseline.
+	// Example: {"backupPath": "/data/backup", "compress": true}
 	Parameters runtime.RawExtension `json:"parameters,omitempty"`
 }
 

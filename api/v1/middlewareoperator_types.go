@@ -26,7 +26,10 @@ import (
 type MiddlewareOperatorSpec struct {
 	// Baseline is the name of the MiddlewareOperatorBaseline to use as the default template.
 	Baseline string `json:"baseline,omitempty"`
-	// Globe holds optional global configuration (e.g., image repository) as raw JSON.
+	// Globe holds global configuration for the operator as raw JSON.
+	// Typically includes image repository overrides and other cluster-wide settings.
+	// These values are available to all middleware instances managed by this operator.
+	// Example: {"repository": "registry.example.com/middleware"}
 	Globe *runtime.RawExtension `json:"globe,omitempty"`
 	// PreActions is the list of pre-actions to execute before the main operator reconciliation.
 	PreActions []PreAction `json:"preActions,omitempty"`
@@ -34,7 +37,10 @@ type MiddlewareOperatorSpec struct {
 	PermissionScope PermissionScope `json:"permissionScope,omitempty"`
 	// Permissions is the list of RBAC permission definitions for the operator's service accounts.
 	Permissions []Permission `json:"permissions,omitempty"`
-	// Deployment holds the operator Deployment spec as raw JSON, merged with baseline defaults.
+	// Deployment holds the operator Deployment specification as raw JSON.
+	// Values are merged with defaults from the MiddlewareOperatorBaseline during reconciliation.
+	// Common fields include image, replicas, resource limits, and environment variables.
+	// Example: {"image": "mysql-operator:0.6.3", "replicas": 1, "resources": {"limits": {"cpu": "500m"}}}
 	Deployment *runtime.RawExtension `json:"deployment,omitempty"`
 	// Configurations is the list of additional configuration resources to create alongside the operator.
 	Configurations []Configuration `json:"configurations,omitempty"`

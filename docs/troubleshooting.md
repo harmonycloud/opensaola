@@ -1,3 +1,5 @@
+**English** | [中文](troubleshooting_zh.md)
+
 # Troubleshooting Guide
 
 This guide helps diagnose and resolve common issues with OpenSaola middleware management. For detailed architecture and reconcile flow information, see the [Technical Documentation](opensaola-technical.md).

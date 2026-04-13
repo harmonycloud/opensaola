@@ -1,3 +1,5 @@
+**English** | [中文](upgrade-guide_zh.md)
+
 # Upgrade Guide
 
 This guide covers upgrading the OpenSaola operator and middleware packages. For detailed architecture information, see the [Technical Documentation](opensaola-technical.md).

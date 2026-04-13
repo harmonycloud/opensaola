@@ -23,22 +23,20 @@ Managing middleware on Kubernetes typically involves operator-per-middleware, ea
 OpenSaola is a **framework** -- it does not ship with any middleware out of the box. You teach it how to manage a middleware type by installing a **package**.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                 MiddlewarePackage                    │
-│            (Secret with TAR archive)                 │
-│                                                     │
-│  Contains: baselines, templates, actions, configs   │
-└──────────────────────┬──────────────────────────────┘
-                       │ install
-          ┌────────────┼────────────┬──────────────┐
-          ▼            ▼            ▼              ▼
-   Middleware    Operator      Action        Configuration
-    Baseline     Baseline     Baseline        (templates)
-          │            │
-          │            │
-          ▼            ▼
-     Middleware   MiddlewareOperator ──► Deployment
-     (instance)   (manages a type)      (operator pod)
+                    MiddlewarePackage
+              (Secret with TAR archive)
+   baselines / templates / actions / configs
+                         |
+                       install
+          +--------------+--------------+---------------+
+          |              |              |               |
+          v              v              v               v
+     Middleware     Operator       Action         Configuration
+      Baseline      Baseline      Baseline         (templates)
+          |              |
+          v              v
+      Middleware   MiddlewareOperator ---> Deployment
+      (instance)    (manages a type)      (operator pod)
 ```
 
 **The flow:**
@@ -168,8 +166,8 @@ Run `make help` to see all available targets.
 
 | Document | Description |
 |----------|-------------|
-| [Technical Documentation](docs/opensaola-technical.md) | Architecture, CRD reference, reconcile flows, state machine |
-| [Package Documentation](docs/opensaola-packaging.md) | Package format, baselines, actions, CUE templates, Redis case study |
+| [Technical Documentation](docs/opensaola-technical_en.md) | Architecture, CRD reference, reconcile flows, state machine |
+| [Package Documentation](docs/opensaola-packaging_en.md) | Package format, baselines, actions, CUE templates, Redis case study |
 | [Troubleshooting Guide](docs/troubleshooting.md) | Common issues, debugging commands, log configuration |
 | [Upgrade Guide](docs/upgrade-guide.md) | Version upgrade procedures and rollback |
 | [Contributing Guide](CONTRIBUTING.md) | Development setup, architecture, coding standards |

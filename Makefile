@@ -72,6 +72,10 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet ## Run tests.
 	go test $$(go list ./... | grep -v /e2e | grep -v /internal/controller) -coverprofile cover.out
 
+.PHONY: coverage
+coverage: test ## Open test coverage report in browser.
+	go tool cover -html=cover.out
+
 .PHONY: test-race
 test-race: manifests generate fmt vet ## Run tests with race detector.
 	go test -race $$(go list ./... | grep -v /e2e | grep -v /internal/controller) -count=1

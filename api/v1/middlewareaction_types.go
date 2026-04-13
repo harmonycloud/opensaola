@@ -53,6 +53,7 @@ type MiddlewareActionStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=ma
+// +kubebuilder:printcolumn:name="Middleware",type=string,JSONPath=`.spec.middlewareName`
 // +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.state`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="Reason",type=string,JSONPath=`.status.reason`

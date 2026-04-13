@@ -1,23 +1,6 @@
+# Feature gate environment variables have been removed.
+# All feature gates are now permanently enabled in Go code.
+# This file is kept as a placeholder for future feature gates.
 - op: add
   path: /spec/template/spec/containers/0/env
-  value:
-    - name: FG_FINALIZERS
-      value: "true"
-    - name: FG_REPLACEPACKAGE_REQUEUE
-      value: "true"
-    - name: FG_MO_FILTER_DEPLOYMENT_EVENTS
-      value: "true"
-    - name: FG_MO_FILTER_STATUS_EVENTS
-      value: "true"
-    - name: FG_MP_SECRET_ENQUEUE
-      value: "true"
-    - name: FG_CONTROLLER_CONCURRENCY_LIMITS
-      value: "true"
-    - name: FG_MA_STATUS_DEDUP
-      value: "true"
-    - name: FG_METRICS_RECONCILE_STEPS
-      value: "true"
-    - name: FG_METRICS_RECONCILE_TOTAL
-      value: "true"
-    - name: FG_PACKAGE_CACHE
-      value: "true"
+  value: []

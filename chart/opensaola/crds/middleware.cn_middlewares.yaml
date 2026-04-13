@@ -1,0 +1,368 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: middlewares.middleware.cn
+spec:
+  group: middleware.cn
+  names:
+    kind: Middleware
+    listKind: MiddlewareList
+    plural: middlewares
+    shortNames:
+    - mid
+    singular: middleware
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .metadata.labels['middleware\.cn/component']
+      name: Type
+      type: string
+    - jsonPath: .metadata.labels['middleware\.cn/packagename']
+      name: Package
+      type: string
+    - jsonPath: .spec.baseline
+      name: Baseline
+      type: string
+    - jsonPath: .status.state
+      name: Status
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Middleware is the Schema for the middlewares API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: MiddlewareSpec defines the desired state of Middleware.
+            properties:
+              baseline:
+                type: string
+              configurations:
+                items:
+                  description: Configuration 配置
+                  properties:
+                    name:
+                      type: string
+                    values:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                  type: object
+                type: array
+              necessary:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              operatorBaseline:
+                properties:
+                  gvkName:
+                    type: string
+                  name:
+                    type: string
+                type: object
+              parameters:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              preActions:
+                items:
+                  properties:
+                    exposed:
+                      type: boolean
+                    fixed:
+                      type: boolean
+                    name:
+                      type: string
+                    parameters:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                  type: object
+                type: array
+            type: object
+          status:
+            description: MiddlewareStatus defines the observed state of Middleware.
+            properties:
+              conditions:
+                description: Represents the latest available observations of a deployment's
+                  current state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              customResources:
+                properties:
+                  creationTimestamp:
+                    format: date-time
+                    type: string
+                  disaster:
+                    properties:
+                      data:
+                        properties:
+                          oppositeAddress:
+                            type: string
+                          oppositeClusterId:
+                            type: string
+                          oppositeClusterName:
+                            type: string
+                          oppositeClusterNamespace:
+                            type: string
+                          phase:
+                            type: string
+                          targetAddress:
+                            type: string
+                        type: object
+                      gossip:
+                        properties:
+                          advertiseAddress:
+                            type: string
+                          advertisePort:
+                            format: int64
+                            type: integer
+                          clusterPhase:
+                            type: string
+                          clusterRole:
+                            type: string
+                          gossipPhase:
+                            type: string
+                          phase:
+                            type: string
+                          role:
+                            type: string
+                        type: object
+                    type: object
+                  include:
+                    properties:
+                      daemonsets:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            source:
+                              type: string
+                            sourceName:
+                              type: string
+                            type:
+                              type: string
+                          type: object
+                        type: array
+                      deployments:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            source:
+                              type: string
+                            sourceName:
+                              type: string
+                            type:
+                              type: string
+                          type: object
+                        type: array
+                      pods:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            source:
+                              type: string
+                            sourceName:
+                              type: string
+                            type:
+                              type: string
+                          type: object
+                        type: array
+                      pvcs:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            source:
+                              type: string
+                            sourceName:
+                              type: string
+                            type:
+                              type: string
+                          type: object
+                        type: array
+                      services:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            source:
+                              type: string
+                            sourceName:
+                              type: string
+                            type:
+                              type: string
+                          type: object
+                        type: array
+                      statefulsets:
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            source:
+                              type: string
+                            sourceName:
+                              type: string
+                            type:
+                              type: string
+                          type: object
+                        type: array
+                    type: object
+                  phase:
+                    description: Phase 阶段
+                    type: string
+                  reason:
+                    type: string
+                  replicas:
+                    type: integer
+                  resources:
+                    description: ResourceRequirements describes the compute resource
+                      requirements.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This is an alpha field and requires enabling the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  type:
+                    type: string
+                type: object
+              observedGeneration:
+                description: The generation observed by the deployment controller.
+                format: int64
+                type: integer
+              reason:
+                type: string
+              state:
+                description: The state of the middleware.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

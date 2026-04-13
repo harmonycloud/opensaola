@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opensaola.fullname" . }}
+  labels:
+    app: {{ include "opensaola.fullname" . }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app: {{ include "opensaola.fullname" . }}
+  template:
+    metadata:
+      labels:
+        app: {{ include "opensaola.fullname" . }}
+    spec:
+      serviceAccountName: {{ include "opensaola.fullname" . }}
+      containers:
+        - name: {{ include "opensaola.fullname" . }}
+          image: "{{ .Values.image.repository }}/opensaola:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: Always
+          volumeMounts:
+            - name: opensaola-config
+              mountPath: /pkg/config/config.yaml
+              subPath: config.yaml
+            - name: kubectl
+              mountPath: /usr/bin/kubectl
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          env:
+            - name: TZ
+              value: Asia/Shanghai
+      volumes:
+        - configMap:
+            defaultMode: 420
+            items:
+              - key: config.yaml
+                path: config.yaml
+            name: {{ include "opensaola.fullname" . }}
+            optional: false
+          name: opensaola-config
+        - name: kubectl
+          hostPath:
+            path: /usr/bin/kubectl
+            type: File
+

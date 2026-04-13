@@ -1,0 +1,15 @@
+preferredDuringSchedulingIgnoredDuringExecution:
+- preference:
+    matchExpressions:
+    - key: kubernetes.io/hostname
+      operator: In
+      values:
+      - middlewarecluster-master0001.192.0.2.1
+  weight: 2
+- preference:
+    matchExpressions:
+    - key: kubernetes.io/hostname
+      operator: NotIn
+      values:
+      - middlewarecluster-node0001.192.0.2.2
+  weight: 1

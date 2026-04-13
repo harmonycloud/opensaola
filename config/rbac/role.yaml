@@ -1,0 +1,108 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - secrets/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - deployments/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - apps
+  resources:
+  - deployments/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - middleware.cn
+  resources:
+  - middlewareactionbaselines
+  - middlewareactions
+  - middlewarebaselines
+  - middlewareconfigurations
+  - middlewareoperatorbaselines
+  - middlewareoperators
+  - middlewarepackages
+  - middlewares
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - middleware.cn
+  resources:
+  - middlewareactionbaselines/finalizers
+  - middlewareactions/finalizers
+  - middlewarebaselines/finalizers
+  - middlewareconfigurations/finalizers
+  - middlewareoperatorbaselines/finalizers
+  - middlewareoperators/finalizers
+  - middlewarepackages/finalizers
+  - middlewares/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - middleware.cn
+  resources:
+  - middlewareactionbaselines/status
+  - middlewareactions/status
+  - middlewarebaselines/status
+  - middlewareconfigurations/status
+  - middlewareoperatorbaselines/status
+  - middlewareoperators/status
+  - middlewarepackages/status
+  - middlewares/status
+  verbs:
+  - get
+  - patch
+  - update

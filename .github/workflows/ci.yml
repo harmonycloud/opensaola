@@ -38,6 +38,25 @@ jobs:
         with:
           name: coverage
           path: cover.out
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(go tool cover -func=cover.out 2>/dev/null | grep total: | awk '{print substr($3, 1, length($3)-1)}')
+          echo "Total coverage: ${COVERAGE}%"
+          if [ -n "$COVERAGE" ] && [ "$(echo "$COVERAGE < 25" | bc -l 2>/dev/null || echo 0)" -eq 1 ]; then
+            echo "FAIL: Coverage ${COVERAGE}% is below 25% threshold"
+            exit 1
+          fi
+
+  test-race:
+    name: Race Detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run tests with race detector
+        run: make test-race
 
   envtest:
     name: Controller Integration Tests

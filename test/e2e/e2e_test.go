@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -289,6 +290,186 @@ var _ = Describe("Manager", Ordered, func() {
 		//    strings.ToLower(<Kind>),
 		// ))
 	})
+
+	Context("CRD Lifecycle", func() {
+		It("should set Available state for valid MiddlewareOperatorBaseline", func() {
+			mobName := "e2e-mob-valid"
+			mobYAML := fmt.Sprintf(`
+apiVersion: middleware.cn/v1
+kind: MiddlewareOperatorBaseline
+metadata:
+  name: %s
+spec:
+  gvks:
+    - name: v1
+      group: apps
+      version: v1
+      kind: Deployment
+`, mobName)
+
+			By("creating a valid MOB")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(mobYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "mob", mobName, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+
+			By("waiting for Available state")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mob", mobName,
+					"-o", "jsonpath={.status.state}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(string(output)).To(Equal("Available"))
+			}, 60*time.Second, 2*time.Second).Should(Succeed())
+
+			By("verifying Checked condition is True")
+			cmd = exec.Command("kubectl", "get", "mob", mobName,
+				"-o", `jsonpath={.status.conditions[?(@.type=="Checked")].status}`)
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(output)).To(Equal("True"))
+		})
+
+		It("should set Checked=False for MOB with empty GVKs", func() {
+			mobName := "e2e-mob-invalid"
+			mobYAML := fmt.Sprintf(`
+apiVersion: middleware.cn/v1
+kind: MiddlewareOperatorBaseline
+metadata:
+  name: %s
+spec:
+  gvks: []
+`, mobName)
+
+			By("creating MOB with empty GVKs")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(mobYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "mob", mobName, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+
+			By("waiting for Checked condition to be False")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mob", mobName,
+					"-o", `jsonpath={.status.conditions[?(@.type=="Checked")].status}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(string(output)).To(Equal("False"))
+			}, 60*time.Second, 2*time.Second).Should(Succeed())
+		})
+
+		It("should add finalizer and clean up on Middleware deletion", func() {
+			midName := "e2e-mid-delete"
+			midYAML := fmt.Sprintf(`
+apiVersion: middleware.cn/v1
+kind: Middleware
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+    middleware.cn/component: TestDelete
+spec:
+  baseline: nonexistent-baseline
+`, midName, namespace)
+
+			By("creating Middleware with nonexistent baseline")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(midYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for finalizer to be added")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mid", midName, "-n", namespace,
+					"-o", `jsonpath={.metadata.finalizers}`)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(string(output)).To(ContainSubstring("middleware.cn/middleware-cleanup"))
+			}, 60*time.Second, 2*time.Second).Should(Succeed())
+
+			By("deleting the Middleware")
+			cmd = exec.Command("kubectl", "delete", "mid", midName, "-n", namespace, "--timeout=60s")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying Middleware is fully deleted")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mid", midName, "-n", namespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred()) // should fail with NotFound
+			}, 120*time.Second, 2*time.Second).Should(Succeed())
+		})
+
+		It("should converge observedGeneration after spec update", func() {
+			mobName := "e2e-mob-converge"
+			mobYAML := fmt.Sprintf(`
+apiVersion: middleware.cn/v1
+kind: MiddlewareOperatorBaseline
+metadata:
+  name: %s
+spec:
+  gvks:
+    - name: v1
+      group: apps
+      version: v1
+      kind: Deployment
+`, mobName)
+
+			By("creating initial MOB")
+			cmd := exec.Command("kubectl", "apply", "-f", "-")
+			cmd.Stdin = strings.NewReader(mobYAML)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "mob", mobName, "--ignore-not-found")
+				_, _ = utils.Run(cmd)
+			})
+
+			By("waiting for initial Available")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mob", mobName,
+					"-o", "jsonpath={.status.state}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(string(output)).To(Equal("Available"))
+			}, 60*time.Second, 2*time.Second).Should(Succeed())
+
+			By("patching spec to trigger re-reconcile")
+			patchJSON := `{"spec":{"gvks":[{"name":"v1","group":"apps","version":"v1","kind":"Deployment"},{"name":"v2","group":"batch","version":"v1","kind":"Job"}]}}`
+			cmd = exec.Command("kubectl", "patch", "mob", mobName,
+				"--type=merge", "-p", patchJSON)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("waiting for observedGeneration to catch up")
+			Eventually(func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mob", mobName,
+					"-o", "jsonpath={.metadata.generation}:{.status.observedGeneration}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				parts := strings.Split(string(output), ":")
+				g.Expect(parts).To(HaveLen(2))
+				g.Expect(parts[0]).To(Equal(parts[1]))
+			}, 60*time.Second, 2*time.Second).Should(Succeed())
+
+			By("verifying state is still Available")
+			cmd = exec.Command("kubectl", "get", "mob", mobName,
+				"-o", "jsonpath={.status.state}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(output)).To(Equal("Available"))
+		})
+	}) // end Context("CRD Lifecycle")
 })
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.

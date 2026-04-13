@@ -27,7 +27,7 @@ import (
 	"github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/concurrency"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
+	metrics "github.com/OpenSaola/opensaola/pkg/metrics"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareaction"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -60,13 +60,13 @@ type MiddlewareActionReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.2/pkg/reconcile
 func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	startTime := time.Now()
-	_, timer := zeusmetrics.NewReconcileTimer(ctx, "middlewareaction")
+	_, timer := metrics.NewReconcileTimer(ctx, "middlewareaction")
 	defer func() {
-		zeusmetrics.ObserveReconcile("middlewareaction", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := zeusmetrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
+		metrics.ObserveReconcile("middlewareaction", startTime, result.Requeue, result.RequeueAfter, retErr)
+		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
 		timer.Observe(res)
-		zeusmetrics.ObserveRequeue("middlewareaction", result.Requeue, result.RequeueAfter)
-		zeusmetrics.ObserveAPIError("middlewareaction", retErr)
+		metrics.ObserveRequeue("middlewareaction", result.Requeue, result.RequeueAfter)
+		metrics.ObserveAPIError("middlewareaction", retErr)
 	}()
 
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
@@ -75,7 +75,7 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	log.FromContext(ctx).V(1).Info("start processing MiddlewareAction", "name", req.NamespacedName)
 
 	// Get MiddlewareAction
-	stop := timer.Start(zeusmetrics.PhaseAPIRead)
+	stop := timer.Start(metrics.PhaseAPIRead)
 	middlewareAction, err := k8s.GetMiddlewareAction(ctx, r.Client, req.Name, req.Namespace)
 	stop()
 	if err != nil {
@@ -101,7 +101,7 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			}
 		}
 
-		stopStatus := timer.Start(zeusmetrics.PhaseStatusWrite)
+		stopStatus := timer.Start(metrics.PhaseStatusWrite)
 		err = k8s.UpdateMiddlewareActionStatus(ctx, r.Client, middlewareAction)
 		stopStatus()
 		if err != nil {
@@ -109,7 +109,7 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}()
 
-	stop = timer.Start(zeusmetrics.PhaseCompute)
+	stop = timer.Start(metrics.PhaseCompute)
 	if err = middlewareaction.Check(ctx, r.Client, middlewareAction); err != nil {
 		stop()
 		r.Recorder.Event(middlewareAction, "Warning", "ValidationFailed", err.Error())
@@ -119,7 +119,7 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	stop()
 
 	// Get the operatorbaseline from the package
-	stop = timer.Start(zeusmetrics.PhaseAPIRead)
+	stop = timer.Start(metrics.PhaseAPIRead)
 	middlewareActionBaseline, err := middlewareactionbaseline.Get(ctx, r.Client, middlewareAction.Spec.Baseline, middlewareAction.Labels[v1.LabelPackageName])
 	stop()
 	if err != nil {
@@ -128,7 +128,7 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	if middlewareActionBaseline.Spec.BaselineType != v1.WorkflowPreAction {
-		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
+		stop = timer.Start(metrics.PhaseAPIWrite)
 		if err = middlewareaction.Execute(ctx, r.Client, middlewareAction); err != nil {
 			stop()
 			r.Recorder.Event(middlewareAction, "Warning", "ExecutionFailed", err.Error())

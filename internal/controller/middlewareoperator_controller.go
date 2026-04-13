@@ -25,7 +25,7 @@ import (
 	"github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/concurrency"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
+	metrics "github.com/OpenSaola/opensaola/pkg/metrics"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareoperator"
 	"github.com/OpenSaola/opensaola/internal/service/status"
@@ -71,13 +71,13 @@ var errMiddlewareOperatorFinalizerAdded = errors.New("middlewareoperator finaliz
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.2/pkg/reconcile
 func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	startTime := time.Now()
-	ctx, timer := zeusmetrics.NewReconcileTimer(ctx, "middlewareoperator")
+	ctx, timer := metrics.NewReconcileTimer(ctx, "middlewareoperator")
 	defer func() {
-		zeusmetrics.ObserveReconcile("middlewareoperator", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := zeusmetrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
+		metrics.ObserveReconcile("middlewareoperator", startTime, result.Requeue, result.RequeueAfter, retErr)
+		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
 		timer.Observe(res)
-		zeusmetrics.ObserveRequeue("middlewareoperator", result.Requeue, result.RequeueAfter)
-		zeusmetrics.ObserveAPIError("middlewareoperator", retErr)
+		metrics.ObserveRequeue("middlewareoperator", result.Requeue, result.RequeueAfter)
+		metrics.ObserveAPIError("middlewareoperator", retErr)
 	}()
 
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
@@ -121,10 +121,10 @@ func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.R
 // handleMiddlewareOperator handles the middlewareOperator reconcile logic.
 // Uses named return value retErr so the deferred status-write logic can detect and propagate errors.
 func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Context, req ctrl.Request) (retErr error) {
-	timer := zeusmetrics.TimerFromContext(ctx)
+	timer := metrics.TimerFromContext(ctx)
 
 	// Get middlewareOperator
-	stop := timer.Start(zeusmetrics.PhaseAPIRead)
+	stop := timer.Start(metrics.PhaseAPIRead)
 	mo, err := k8s.GetMiddlewareOperator(ctx, r.Client, req.Name, req.Namespace)
 	stop()
 	if err != nil {
@@ -143,7 +143,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 			}
 			if resolveErr != nil {
 				if usedLegacy {
-					zeusmetrics.ObserveLegacyDelete("middlewareoperator", "error", start)
+					metrics.ObserveLegacyDelete("middlewareoperator", "error", start)
 				}
 				log.FromContext(ctx).Error(resolveErr, "MiddlewareOperator delete context resolution failed",
 					"name", mo.Name,
@@ -157,7 +157,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 			}
 			if cleanErr := middlewareoperator.HandleResource(ctx, r.Client, consts.HandleActionDelete, resolved); cleanErr != nil {
 				if usedLegacy {
-					zeusmetrics.ObserveLegacyDelete("middlewareoperator", "error", start)
+					metrics.ObserveLegacyDelete("middlewareoperator", "error", start)
 				}
 				log.FromContext(ctx).Error(cleanErr, "MiddlewareOperator cleanup failed",
 					"name", mo.Name,
@@ -178,12 +178,12 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 				return r.Update(ctx, latest)
 			}); updateErr != nil {
 				if usedLegacy {
-					zeusmetrics.ObserveLegacyDelete("middlewareoperator", "error", start)
+					metrics.ObserveLegacyDelete("middlewareoperator", "error", start)
 				}
 				return updateErr
 			}
 			if usedLegacy {
-				zeusmetrics.ObserveLegacyDelete("middlewareoperator", "success", start)
+				metrics.ObserveLegacyDelete("middlewareoperator", "success", start)
 			}
 			k8s.MiddlewareOperatorCache.Delete(req.NamespacedName.String())
 			r.Recorder.Event(mo, "Normal", "Deleted", "MiddlewareOperator cleanup completed")
@@ -215,7 +215,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 			log.FromContext(ctx).Error(updateErr, "failed to add finalizer for MiddlewareOperator", "namespace", mo.Namespace, "name", mo.Name)
 			return updateErr
 		}
-		zeusmetrics.ObserveFinalizerBackfill("middlewareoperator", "success")
+		metrics.ObserveFinalizerBackfill("middlewareoperator", "success")
 		log.FromContext(ctx).Info("MiddlewareOperator finalizer added",
 			"name", mo.Name,
 			"namespace", mo.Namespace,
@@ -297,7 +297,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 			}
 		}
 
-		stopStatus := timer.Start(zeusmetrics.PhaseStatusWrite)
+		stopStatus := timer.Start(metrics.PhaseStatusWrite)
 		statusErr := k8s.UpdateMiddlewareOperatorStatus(ctx, r.Client, mo)
 		stopStatus()
 		if statusErr != nil {
@@ -309,7 +309,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 		}
 	}()
 
-	stop = timer.Start(zeusmetrics.PhaseCompute)
+	stop = timer.Start(metrics.PhaseCompute)
 	if err = middlewareoperator.Check(ctx, r.Client, mo); err != nil {
 		stop()
 		r.Recorder.Event(mo, "Warning", "ValidationFailed", err.Error())
@@ -317,7 +317,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 		return fmt.Errorf("failed to validate middlewareOperatorBaseline: %w", err)
 	}
 	stop()
-	stop = timer.Start(zeusmetrics.PhaseCompute)
+	stop = timer.Start(metrics.PhaseCompute)
 	if err = middlewareoperator.ReplacePackage(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, mo); err != nil {
 		stop()
 		log.FromContext(ctx).Error(err, "failed to replace package for MiddlewareOperator", "namespace", mo.Namespace, "name", mo.Name)
@@ -331,7 +331,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 	// observedGeneration == 0 means initial publish
 	// generation > observedGeneration or State == Updating means update is needed
 	if observedGeneration == 0 {
-		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
+		stop = timer.Start(metrics.PhaseAPIWrite)
 		if err = middlewareoperator.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionPublish, mo); err != nil {
 			stop()
 			return fmt.Errorf("failed to generate resources: %w", err)
@@ -339,7 +339,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 		stop()
 		r.Recorder.Event(mo, "Normal", "Published", "MiddlewareOperator published successfully")
 	} else if generation > observedGeneration || mo.Status.State == v1.StateUpdating { // actual > observed means update needed
-		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
+		stop = timer.Start(metrics.PhaseAPIWrite)
 		if err = middlewareoperator.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionUpdate, mo); err != nil {
 			stop()
 			return fmt.Errorf("failed to update resources: %w", err)
@@ -353,9 +353,9 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 
 // handleDeployment handles the deployment reconcile logic.
 func (r *MiddlewareOperatorReconciler) handleDeployment(ctx context.Context, req ctrl.Request) error {
-	timer := zeusmetrics.TimerFromContext(ctx)
+	timer := metrics.TimerFromContext(ctx)
 
-	stop := timer.Start(zeusmetrics.PhaseAPIRead)
+	stop := timer.Start(metrics.PhaseAPIRead)
 	mo, err := k8s.GetMiddlewareOperator(ctx, r.Client, req.Name, req.Namespace)
 	stop()
 	if err != nil {
@@ -366,12 +366,12 @@ func (r *MiddlewareOperatorReconciler) handleDeployment(ctx context.Context, req
 		return nil
 	}
 	// Get deployment
-	stop = timer.Start(zeusmetrics.PhaseAPIRead)
+	stop = timer.Start(metrics.PhaseAPIRead)
 	deployment, err := k8s.GetDeployment(ctx, r.Client, req.Name, req.Namespace)
 	stop()
 	if err == nil {
 		// Compare the actual deployment against the published deployment for diffs
-		stop = timer.Start(zeusmetrics.PhaseCompute)
+		stop = timer.Start(metrics.PhaseCompute)
 		err = middlewareoperator.CompareDeployment(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, deployment, mo)
 		stop()
 		if err != nil {
@@ -381,7 +381,7 @@ func (r *MiddlewareOperatorReconciler) handleDeployment(ctx context.Context, req
 		conditionApplyOperator := status.GetCondition(ctx, new(mo.Status.Conditions), v1.CondTypeApplyOperator)
 		if conditionApplyOperator.Status == metav1.ConditionTrue {
 			// Regenerate resources
-			stop = timer.Start(zeusmetrics.PhaseAPIWrite)
+			stop = timer.Start(metrics.PhaseAPIWrite)
 			if err = middlewareoperator.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionPublish, mo); err != nil {
 				stop()
 				r.Recorder.Event(mo, "Warning", "BuildResource", err.Error())

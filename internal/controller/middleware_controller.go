@@ -28,7 +28,7 @@ import (
 	"github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/concurrency"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
+	metrics "github.com/OpenSaola/opensaola/pkg/metrics"
 	"github.com/OpenSaola/opensaola/internal/service/consts"
 	"github.com/OpenSaola/opensaola/internal/service/middleware"
 	"github.com/OpenSaola/opensaola/pkg/tools/ctxkeys"
@@ -66,13 +66,13 @@ type MiddlewareReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.2/pkg/reconcile
 func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	startTime := time.Now()
-	ctx, timer := zeusmetrics.NewReconcileTimer(ctx, "middleware")
+	ctx, timer := metrics.NewReconcileTimer(ctx, "middleware")
 	defer func() {
-		zeusmetrics.ObserveReconcile("middleware", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := zeusmetrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
+		metrics.ObserveReconcile("middleware", startTime, result.Requeue, result.RequeueAfter, retErr)
+		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
 		timer.Observe(res)
-		zeusmetrics.ObserveRequeue("middleware", result.Requeue, result.RequeueAfter)
-		zeusmetrics.ObserveAPIError("middleware", retErr)
+		metrics.ObserveRequeue("middleware", result.Requeue, result.RequeueAfter)
+		metrics.ObserveAPIError("middleware", retErr)
 	}()
 
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
@@ -83,7 +83,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	var err error
 	// Get middleware
 	mid := new(v1.Middleware)
-	stop := timer.Start(zeusmetrics.PhaseAPIRead)
+	stop := timer.Start(metrics.PhaseAPIRead)
 	if mid, err = k8s.GetMiddleware(ctx, r.Client, req.Name, req.Namespace); err != nil {
 		stop()
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -108,7 +108,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 			if resolveErr != nil {
 				if usedLegacy {
-					zeusmetrics.ObserveLegacyDelete("middleware", "error", start)
+					metrics.ObserveLegacyDelete("middleware", "error", start)
 				}
 				log.FromContext(ctx).Error(resolveErr, "Middleware delete context resolution failed",
 					"name", mid.Name,
@@ -122,7 +122,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 			if cleanErr := middleware.HandleResource(ctx, r.Client, consts.HandleActionDelete, resolved); cleanErr != nil {
 				if usedLegacy {
-					zeusmetrics.ObserveLegacyDelete("middleware", "error", start)
+					metrics.ObserveLegacyDelete("middleware", "error", start)
 				}
 				log.FromContext(ctx).Error(cleanErr, "Middleware cleanup failed",
 					"name", mid.Name,
@@ -144,13 +144,13 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}); updateErr != nil {
 				if !apiErrors.IsNotFound(updateErr) {
 					if usedLegacy {
-						zeusmetrics.ObserveLegacyDelete("middleware", "error", start)
+						metrics.ObserveLegacyDelete("middleware", "error", start)
 					}
 					return ctrl.Result{}, updateErr
 				}
 			}
 			if usedLegacy {
-				zeusmetrics.ObserveLegacyDelete("middleware", "success", start)
+				metrics.ObserveLegacyDelete("middleware", "success", start)
 			}
 			r.Recorder.Event(mid, "Normal", "Deleted", "Middleware cleanup completed")
 			log.FromContext(ctx).Info("Middleware deletion cleanup completed",
@@ -180,7 +180,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			log.FromContext(ctx).Error(updateErr, "failed to add finalizer for middleware", "namespace", mid.Namespace, "name", mid.Name)
 			return ctrl.Result{}, updateErr
 		}
-		zeusmetrics.ObserveFinalizerBackfill("middleware", "success")
+		metrics.ObserveFinalizerBackfill("middleware", "success")
 		log.FromContext(ctx).Info("Middleware finalizer added",
 			"name", mid.Name,
 			"namespace", mid.Namespace,
@@ -261,7 +261,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 		}
 
-		stopStatus := timer.Start(zeusmetrics.PhaseStatusWrite)
+		stopStatus := timer.Start(metrics.PhaseStatusWrite)
 		err = k8s.UpdateMiddlewareStatus(ctx, r.Client, mid)
 		stopStatus()
 		if err != nil {
@@ -269,7 +269,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}()
 
-	stop = timer.Start(zeusmetrics.PhaseCompute)
+	stop = timer.Start(metrics.PhaseCompute)
 	if err = middleware.Check(ctx, r.Client, mid); err != nil {
 		stop()
 		r.Recorder.Event(mid, "Warning", "ValidationFailed", err.Error())
@@ -278,7 +278,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	stop()
 
-	stop = timer.Start(zeusmetrics.PhaseCompute)
+	stop = timer.Start(metrics.PhaseCompute)
 	if err = middleware.ReplacePackage(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, mid); err != nil {
 		stop()
 		if errors.Is(err, consts.ErrPackageNotReady) {
@@ -299,7 +299,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// observedGeneration == 0 means initial publish
 	// generation > observedGeneration or State == Updating means update is needed
 	if observedGeneration == 0 {
-		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
+		stop = timer.Start(metrics.PhaseAPIWrite)
 		if err = middleware.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionPublish, mid); err != nil {
 			stop()
 			log.FromContext(ctx).Error(err, "middleware build failed", "namespace", mid.Namespace, "name", mid.Name)
@@ -308,7 +308,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		stop()
 		r.Recorder.Event(mid, "Normal", "Published", "Middleware published successfully")
 	} else if generation > observedGeneration || mid.Status.State == v1.StateUpdating {
-		stop = timer.Start(zeusmetrics.PhaseAPIWrite)
+		stop = timer.Start(metrics.PhaseAPIWrite)
 		if err = middleware.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionUpdate, mid); err != nil {
 			stop()
 			log.FromContext(ctx).Error(err, "middleware update failed", "namespace", mid.Namespace, "name", mid.Name)

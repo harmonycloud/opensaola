@@ -23,7 +23,7 @@ import (
 
 	"github.com/OpenSaola/opensaola/api/v1"
 	"github.com/OpenSaola/opensaola/internal/k8s"
-	zeusmetrics "github.com/OpenSaola/opensaola/pkg/metrics"
+	metrics "github.com/OpenSaola/opensaola/pkg/metrics"
 	"github.com/OpenSaola/opensaola/internal/service/middlewareactionbaseline"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -56,13 +56,13 @@ type MiddlewareActionBaselineReconciler struct {
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.2/pkg/reconcile
 func (r *MiddlewareActionBaselineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
 	startTime := time.Now()
-	_, timer := zeusmetrics.NewReconcileTimer(ctx, "middlewareactionbaseline")
+	_, timer := metrics.NewReconcileTimer(ctx, "middlewareactionbaseline")
 	defer func() {
-		zeusmetrics.ObserveReconcile("middlewareactionbaseline", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := zeusmetrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
+		metrics.ObserveReconcile("middlewareactionbaseline", startTime, result.Requeue, result.RequeueAfter, retErr)
+		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
 		timer.Observe(res)
-		zeusmetrics.ObserveRequeue("middlewareactionbaseline", result.Requeue, result.RequeueAfter)
-		zeusmetrics.ObserveAPIError("middlewareactionbaseline", retErr)
+		metrics.ObserveRequeue("middlewareactionbaseline", result.Requeue, result.RequeueAfter)
+		metrics.ObserveAPIError("middlewareactionbaseline", retErr)
 	}()
 
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
@@ -71,7 +71,7 @@ func (r *MiddlewareActionBaselineReconciler) Reconcile(ctx context.Context, req 
 	log.FromContext(ctx).V(1).Info("start processing middlewareActionBaseline", "req", req)
 
 	// Get MiddlewareActionBaseline
-	stop := timer.Start(zeusmetrics.PhaseAPIRead)
+	stop := timer.Start(metrics.PhaseAPIRead)
 	middlewareActionBaseline, err := k8s.GetMiddlewareActionBaseline(ctx, r.Client, req.Name)
 	stop()
 	if err != nil {
@@ -79,7 +79,7 @@ func (r *MiddlewareActionBaselineReconciler) Reconcile(ctx context.Context, req 
 	}
 
 	// Validate middlewareActionBaseline
-	stop = timer.Start(zeusmetrics.PhaseCompute)
+	stop = timer.Start(metrics.PhaseCompute)
 	if err = middlewareactionbaseline.Check(ctx, r.Client, middlewareActionBaseline); err != nil {
 		stop()
 		r.Recorder.Event(middlewareActionBaseline, "Warning", "ValidationFailed", err.Error())

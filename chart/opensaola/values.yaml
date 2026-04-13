@@ -1,37 +1,59 @@
 # OpenSaola Helm Chart Values
-# Override these values to customize your deployment
 
 # -- Container image configuration
 image:
-  # -- Image registry (leave empty for Docker Hub, e.g. "ghcr.io" or "registry.cn-hangzhou.aliyuncs.com")
+  # -- Image registry (leave empty for Docker Hub)
   registry: ""
   # -- Image repository
   repository: opensaola/opensaola
-  # -- Image tag (defaults to Chart appVersion if not set)
-  tag: "v1.5.0"
+  # -- Image tag (defaults to Chart appVersion)
+  tag: ""
   # -- Image pull policy
   pullPolicy: IfNotPresent
-  # -- kubectl image tag used for CRD install/upgrade jobs
+  # -- kubectl image tag for CRD upgrade jobs
   kubectlTag: "1.21"
-
-# -- kubectl job configuration for CRD management
-kubectl:
-  # -- Whether to install/upgrade CRDs via a kubectl Job during Helm install/upgrade
-  installCRDs: true
-  # -- Resource limits and requests for the kubectl CRD job
-  resources:
-    limits:
-      cpu: 200m
-      memory: 512Mi
-    requests:
-      cpu: 100m
-      memory: 256Mi
-  # -- Node selector for the kubectl job pods
-  nodeSelector: {}
-  # -- Tolerations for the kubectl job pods
-  tolerations: []
-  # -- Affinity rules for the kubectl job pods
-  affinity: {}
 
 # -- Number of operator replicas
 replicas: 1
+
+# -- CRD installation via kubectl job
+kubectl:
+  # -- Whether to install/upgrade CRDs via pre-install hook
+  installCRDs: true
+
+# -- Operator configuration
+config:
+  # -- Namespace where middleware package Secrets are stored
+  dataNamespace: "middleware-operator"
+  # -- Log level (0=debug, 1=info, 2=warn, 3=error)
+  logLevel: 0
+  # -- Log format: "console" (human-readable) or "json" (structured)
+  logFormat: "console"
+  # -- Log file path (empty disables file logging)
+  logFilePath: ""
+  # -- Cache cleanup interval in seconds
+  cacheCleanupInterval: 600
+  # -- Labels configuration
+  labels:
+    component: "middleware.cn/component"
+  # -- Annotations configuration
+  annotations:
+    component: "middleware.cn/component"
+
+# -- Pod resource requirements
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# -- Node selector for pod scheduling
+nodeSelector: {}
+
+# -- Tolerations for pod scheduling
+tolerations: []
+
+# -- Affinity rules for pod scheduling
+affinity: {}

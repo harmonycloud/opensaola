@@ -177,7 +177,8 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 			output := stdout.Bytes()
 			if step.Output.Expose {
 				stepMap := ctxkeys.StepFrom(*ctx)
-				stepMap[step.Name] = make(map[string]interface{})
+				stepEntry := make(map[string]interface{})
+				stepMap[step.Name] = stepEntry
 
 				var outputMap = make(map[string]interface{})
 				switch step.Output.Type {
@@ -186,15 +187,15 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 					if err != nil {
 						return err
 					}
-					stepMap[step.Name].(map[string]interface{})["output"] = outputMap
+					stepEntry["output"] = outputMap
 				case "yaml":
 					err = yaml.Unmarshal(output, &outputMap)
 					if err != nil {
 						return err
 					}
-					stepMap[step.Name].(map[string]interface{})["output"] = outputMap
+					stepEntry["output"] = outputMap
 				case "string":
-					stepMap[step.Name].(map[string]interface{})["output"] = string(output)
+					stepEntry["output"] = string(output)
 				}
 				*ctx = ctxkeys.WithStep(*ctx, stepMap)
 			}
@@ -241,7 +242,8 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 
 			if step.Output.Expose {
 				stepMap := ctxkeys.StepFrom(*ctx)
-				stepMap[step.Name] = make(map[string]interface{})
+				stepEntry := make(map[string]interface{})
+				stepMap[step.Name] = stepEntry
 
 				var outputMap = make(map[string]interface{})
 				switch step.Output.Type {
@@ -255,7 +257,7 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 					if err != nil {
 						return err
 					}
-					stepMap[step.Name].(map[string]interface{})["output"] = outputMap
+					stepEntry["output"] = outputMap
 				case "yaml":
 					var output []byte
 					output, err = yaml.Marshal(obj)
@@ -266,7 +268,7 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 					if err != nil {
 						return err
 					}
-					stepMap[step.Name].(map[string]interface{})["output"] = outputMap
+					stepEntry["output"] = outputMap
 				case "string":
 
 				}
@@ -367,7 +369,8 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 				}
 				// TODO: some resources have no spec, need to handle
 				// Skip creation if spec is empty or has no keys
-				if obj.Object["spec"] == nil || len(obj.Object["spec"].(map[string]interface{})) == 0 {
+				specMap, ok := obj.Object["spec"].(map[string]interface{})
+				if !ok || len(specMap) == 0 {
 					return nil
 				}
 

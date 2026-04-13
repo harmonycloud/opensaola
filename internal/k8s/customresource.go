@@ -79,7 +79,9 @@ func UpdateCustomResource(ctx context.Context, cli client.Client, cr *unstructur
 
 	cr.SetResourceVersion("")
 	cr.SetManagedFields(nil)
-	delete(cr.Object["metadata"].(map[string]interface{}), "creationTimestamp")
+	if metadata, ok := cr.Object["metadata"].(map[string]interface{}); ok {
+		delete(metadata, "creationTimestamp")
+	}
 
 	return cli.Patch(ctx, cr, client.Apply, client.FieldOwner(v1.FieldOwner), client.ForceOwnership)
 }
@@ -176,7 +178,9 @@ func PatchCustomResource(ctx context.Context, cli client.Client, cr *unstructure
 	// (see English comment above)
 	cr.SetResourceVersion("")
 	cr.SetManagedFields(nil)
-	delete(cr.Object["metadata"].(map[string]interface{}), "creationTimestamp")
+	if metadata, ok := cr.Object["metadata"].(map[string]interface{}); ok {
+		delete(metadata, "creationTimestamp")
+	}
 
 	return cli.Patch(ctx, cr, client.Apply, client.FieldOwner(v1.FieldOwner), client.ForceOwnership)
 }

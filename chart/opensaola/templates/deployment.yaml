@@ -17,18 +17,14 @@ spec:
       serviceAccountName: {{ include "opensaola.fullname" . }}
       containers:
         - name: {{ include "opensaola.fullname" . }}
-          image: "{{ .Values.image.repository }}/opensaola:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: Always
+          image: "{{ if .Values.image.registry }}{{ .Values.image.registry }}/{{ end }}{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           volumeMounts:
             - name: opensaola-config
               mountPath: /pkg/config/config.yaml
               subPath: config.yaml
-            - name: kubectl
-              mountPath: /usr/bin/kubectl
           resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
+            {{- toYaml .Values.resources | nindent 12 }}
           env:
             - name: TZ
               value: Asia/Shanghai
@@ -41,8 +37,3 @@ spec:
             name: {{ include "opensaola.fullname" . }}
             optional: false
           name: opensaola-config
-        - name: kubectl
-          hostPath:
-            path: /usr/bin/kubectl
-            type: File
-

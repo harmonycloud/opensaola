@@ -1,0 +1,14 @@
+{{- if and .Values.pdb.enabled (gt (int .Values.replicas) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "opensaola.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensaola.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "opensaola.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -1,0 +1,35 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opensaola.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensaola.labels" . | nindent 4 }}
+spec:
+  ports:
+    - name: metrics
+      port: 8443
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "opensaola.selectorLabels" . | nindent 4 }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "opensaola.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensaola.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "opensaola.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: metrics
+      scheme: https
+      tlsConfig:
+        insecureSkipVerify: true
+      interval: {{ .Values.serviceMonitor.interval | default "30s" }}
+{{- end }}

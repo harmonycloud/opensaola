@@ -140,6 +140,36 @@ This script covers: package install → baseline queries → operator deployment
 
 Sample YAML files for ClickHouse are available at `saola-cli/docs/e2e-samples/`.
 
+## Lifecycle Test Scenarios
+
+These manual test scenarios verify the operator's behavior across the full resource lifecycle. Run them after deploying the operator (see "Build and Deploy for Testing").
+
+### Delete Lifecycle
+1. Create a Middleware: `kubectl apply -f <middleware.yaml>`
+2. Wait for Available: `kubectl get mid -n <ns> -w`
+3. Delete: `kubectl delete mid <name> -n <ns>`
+4. Verify finalizer runs: `kubectl get mid <name> -n <ns>` (should show Terminating briefly)
+5. Verify pods terminate: `kubectl get pods -n <ns>` (middleware pods should disappear)
+6. Verify child CRs removed: `kubectl get chi -n <ns>` (ClickHouseInstallation should be gone)
+
+### Upgrade Lifecycle
+1. Create Middleware with version 24.8
+2. Annotate to trigger upgrade: `kubectl annotate mid <name> -n <ns> middleware.cn/update=true`
+3. Verify state transitions: Available → Updating → Available
+4. Verify pods updated with new configuration
+
+### Error Recovery
+1. Create Middleware with non-existent baseline: `spec.baseline: "nonexistent-baseline"`
+2. Verify Unavailable state with error condition: `kubectl get mid <name> -n <ns> -o jsonpath='{.status}'`
+3. Fix the baseline reference: `kubectl edit mid <name> -n <ns>`
+4. Verify auto-recovery to Available
+
+### Operator Restart Recovery
+1. Create Middleware, wait for Available
+2. Kill operator pod: `kubectl delete pod -n opensaola-system -l control-plane=controller-manager`
+3. Wait for new pod: `kubectl get pods -n opensaola-system -w`
+4. Verify Middleware state unchanged: `kubectl get mid -n <ns>`
+
 ## CI Checks (run locally before pushing)
 
 ```bash

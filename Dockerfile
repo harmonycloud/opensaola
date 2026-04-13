@@ -46,7 +46,7 @@ LABEL org.opencontainers.image.source="https://github.com/opensaola/opensaola" \
 
 # Install runtime dependencies and create non-root user in a single layer
 RUN sed -i 's#https\?://dl-cdn.alpinelinux.org/alpine#https://mirrors.tuna.tsinghua.edu.cn/alpine#g' /etc/apk/repositories \
-    && apk add --no-cache tzdata jq \
+    && apk add --no-cache tzdata curl jq \
     && rm -rf /var/cache/apk/* \
     && addgroup -g 65532 -S nonroot \
     && adduser -u 65532 -S -G nonroot nonroot

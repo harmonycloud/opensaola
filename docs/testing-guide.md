@@ -96,6 +96,8 @@ A convenience script that builds, deploys, and validates the operator end-to-end
 IMG=opensaola:dev ./scripts/e2e-full-test.sh
 ```
 
+> **Note:** The E2E script (`scripts/e2e-full-test.sh`) automatically rebuilds the operator image and redeploys it as the first step, ensuring tests run against the latest code.
+
 ## Code Coverage
 
 ```bash

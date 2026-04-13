@@ -96,6 +96,8 @@ make kind-delete
 IMG=opensaola:dev ./scripts/e2e-full-test.sh
 ```
 
+> **注意：** E2E 脚本（`scripts/e2e-full-test.sh`）会自动重新构建 operator 镜像并重新部署，确保测试使用最新代码。
+
 ## 代码覆盖率
 
 ```bash

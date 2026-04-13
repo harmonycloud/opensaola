@@ -136,10 +136,10 @@ func TestLabelConstants_ContainDomain(t *testing.T) {
 func TestAnnotationConstants_ContainDomain(t *testing.T) {
 	t.Parallel()
 	annotations := map[string]string{
-		"AnnotationInstallDigest":    AnnotationInstallDigest,
-		"AnnotationInstallError":     AnnotationInstallError,
-		"AnnotationDisasterSyncer":   AnnotationDisasterSyncer,
-		"AnnotationDataSyncer":       AnnotationDataSyncer,
+		"AnnotationInstallDigest":     AnnotationInstallDigest,
+		"AnnotationInstallError":      AnnotationInstallError,
+		"AnnotationDisasterSyncer":    AnnotationDisasterSyncer,
+		"AnnotationDataSyncer":        AnnotationDataSyncer,
 		"AnnotationOppositeClusterId": AnnotationOppositeClusterId,
 	}
 	for name, a := range annotations {

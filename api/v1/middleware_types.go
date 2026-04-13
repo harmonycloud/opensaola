@@ -28,12 +28,18 @@ type MiddlewareSpec struct {
 	OperatorBaseline OperatorBaseline `json:"operatorBaseline,omitempty"`
 	// Baseline is the name of the MiddlewareBaseline to use as the default template.
 	Baseline string `json:"baseline,omitempty"`
-	// Necessary holds required parameters (e.g., image) that must be provided for the middleware to function.
+	// Necessary holds required parameters for the middleware instance as raw JSON.
+	// The exact schema depends on the middleware type defined in the MiddlewareBaseline.
+	// Common fields include image, replicas, storage, and resource requirements.
+	// Example: {"image": "redis:7.2", "replicas": 3, "storage": "10Gi"}
 	Necessary runtime.RawExtension `json:"necessary,omitempty"`
 	// PreActions is the list of pre-actions to execute before the main reconciliation workflow.
 	PreActions []PreAction `json:"preActions,omitempty"`
 	// +kubebuilder:pruning:PreserveUnknownFields
-	// Parameters holds optional user-defined parameters merged with baseline defaults.
+	// Parameters holds user-configurable parameters for the middleware instance as raw JSON.
+	// These values are merged with defaults from the MiddlewareBaseline during reconciliation.
+	// The schema varies by middleware type; common fields include port, password, and tuning knobs.
+	// Example: {"port": 6379, "maxmemory": "256mb", "databases": 16}
 	Parameters runtime.RawExtension `json:"parameters,omitempty"`
 	// Configurations is the list of additional configuration resources to create alongside the middleware.
 	Configurations []Configuration `json:"configurations,omitempty"`

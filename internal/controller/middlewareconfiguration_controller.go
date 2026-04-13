@@ -23,8 +23,8 @@ import (
 
 	middlewarecnv1 "github.com/opensaola/opensaola/api/v1"
 	"github.com/opensaola/opensaola/internal/k8s"
-	metrics "github.com/opensaola/opensaola/pkg/metrics"
 	"github.com/opensaola/opensaola/internal/service/middlewareconfiguration"
+	metrics "github.com/opensaola/opensaola/pkg/metrics"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"

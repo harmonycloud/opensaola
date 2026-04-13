@@ -21,9 +21,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mohae/deepcopy"
 	"github.com/opensaola/opensaola/internal/cache"
 	"github.com/opensaola/opensaola/internal/service/packages"
-	"github.com/mohae/deepcopy"
 	"k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 

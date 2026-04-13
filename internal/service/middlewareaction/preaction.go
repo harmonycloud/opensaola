@@ -267,4 +267,3 @@ func executePreActionCue(ctx context.Context, cueString string, obj *unstructure
 
 	return nil
 }
-

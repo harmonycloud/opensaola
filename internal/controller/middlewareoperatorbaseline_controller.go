@@ -23,8 +23,8 @@ import (
 
 	v1 "github.com/opensaola/opensaola/api/v1"
 	"github.com/opensaola/opensaola/internal/k8s"
-	metrics "github.com/opensaola/opensaola/pkg/metrics"
 	"github.com/opensaola/opensaola/internal/service/middlewareoperatorbaseline"
+	metrics "github.com/opensaola/opensaola/pkg/metrics"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"

@@ -25,11 +25,11 @@ import (
 	"strings"
 	"text/template"
 
+	"github.com/Masterminds/sprig/v3"
+	"github.com/google/uuid"
 	v1 "github.com/opensaola/opensaola/api/v1"
 	"github.com/opensaola/opensaola/internal/k8s/kubeclient"
 	"github.com/opensaola/opensaola/pkg/tools/ctxkeys"
-	"github.com/Masterminds/sprig/v3"
-	"github.com/google/uuid"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/discovery"

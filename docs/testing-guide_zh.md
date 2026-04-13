@@ -140,6 +140,36 @@ PKG_DIR=../dataservice-baseline/clickhouse ./scripts/e2e-test.sh
 
 ClickHouse 的示例 YAML 文件位于 `saola-cli/docs/e2e-samples/`。
 
+## 生命周期测试场景
+
+以下手动测试场景用于验证 operator 在完整资源生命周期中的行为。请在部署 operator 之后运行（参见"构建和部署进行手动测试"）。
+
+### 删除生命周期
+1. 创建 Middleware：`kubectl apply -f <middleware.yaml>`
+2. 等待 Available 状态：`kubectl get mid -n <ns> -w`
+3. 删除：`kubectl delete mid <name> -n <ns>`
+4. 验证 finalizer 执行：`kubectl get mid <name> -n <ns>`（应短暂显示 Terminating）
+5. 验证 Pod 终止：`kubectl get pods -n <ns>`（Middleware Pod 应消失）
+6. 验证子 CR 被清除：`kubectl get chi -n <ns>`（ClickHouseInstallation 应已删除）
+
+### 升级生命周期
+1. 创建版本为 24.8 的 Middleware
+2. 添加注解触发升级：`kubectl annotate mid <name> -n <ns> middleware.cn/update=true`
+3. 验证状态流转：Available → Updating → Available
+4. 验证 Pod 已使用新配置更新
+
+### 错误恢复
+1. 创建引用不存在 Baseline 的 Middleware：`spec.baseline: "nonexistent-baseline"`
+2. 验证 Unavailable 状态及错误条件：`kubectl get mid <name> -n <ns> -o jsonpath='{.status}'`
+3. 修复 Baseline 引用：`kubectl edit mid <name> -n <ns>`
+4. 验证自动恢复至 Available
+
+### Operator 重启恢复
+1. 创建 Middleware，等待 Available
+2. 杀掉 operator Pod：`kubectl delete pod -n opensaola-system -l control-plane=controller-manager`
+3. 等待新 Pod 启动：`kubectl get pods -n opensaola-system -w`
+4. 验证 Middleware 状态不变：`kubectl get mid -n <ns>`
+
 ## CI 检查（推送前在本地运行）
 
 ```bash

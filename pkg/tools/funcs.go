@@ -26,7 +26,6 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/Masterminds/sprig/v3"
-	"github.com/pkg/errors"
 	"sigs.k8s.io/yaml"
 )
 
@@ -255,7 +254,7 @@ func includeFun(t *template.Template, includedNames map[string]int) func(string,
 		var buf strings.Builder
 		if v, ok := includedNames[name]; ok {
 			if v > recursionMaxNums {
-				return "", errors.Wrapf(fmt.Errorf("unable to execute template"), "rendering template has a nested reference name: %s", name)
+				return "", fmt.Errorf("rendering template has a nested reference name: %s: %w", name, fmt.Errorf("unable to execute template"))
 			}
 			includedNames[name]++
 		} else {
@@ -273,7 +272,7 @@ func tplFun(parent *template.Template, includedNames map[string]int) func(string
 	return func(tpl string, vals interface{}) (string, error) {
 		t, err := parent.Clone()
 		if err != nil {
-			return "", errors.Wrapf(err, "cannot clone template")
+			return "", fmt.Errorf("cannot clone template: %w", err)
 		}
 
 		// Re-inject 'include' so that it can close over our clone of t;
@@ -291,12 +290,12 @@ func tplFun(parent *template.Template, includedNames map[string]int) func(string
 		// text string. (Maybe we could use a hash appended to the name?)
 		t, err = t.New(parent.Name()).Parse(tpl)
 		if err != nil {
-			return "", errors.Wrapf(err, "cannot parse template %q", tpl)
+			return "", fmt.Errorf("cannot parse template %q: %w", tpl, err)
 		}
 
 		var buf strings.Builder
 		if err := t.Execute(&buf, vals); err != nil {
-			return "", errors.Wrapf(err, "error during tpl function execution for %q", tpl)
+			return "", fmt.Errorf("error during tpl function execution for %q: %w", tpl, err)
 		}
 
 		// See comment in renderWithReferences explaining the <no value> hack.

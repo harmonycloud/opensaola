@@ -21,8 +21,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/opensaola/opensaola/api/v1"
-	"github.com/opensaola/opensaola/pkg/tools"
+	"github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/pkg/tools"
 	"github.com/tidwall/gjson"
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

@@ -27,9 +27,9 @@ import (
 
 	"github.com/Masterminds/sprig/v3"
 	"github.com/google/uuid"
-	v1 "github.com/opensaola/opensaola/api/v1"
-	"github.com/opensaola/opensaola/internal/k8s/kubeclient"
-	"github.com/opensaola/opensaola/pkg/tools/ctxkeys"
+	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/k8s/kubeclient"
+	"github.com/harmonycloud/opensaola/pkg/tools/ctxkeys"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/discovery"

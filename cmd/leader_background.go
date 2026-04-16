@@ -19,10 +19,10 @@ package main
 import (
 	"context"
 
-	"github.com/opensaola/opensaola/internal/resource"
-	"github.com/opensaola/opensaola/internal/service/synchronizer"
-	"github.com/opensaola/opensaola/internal/service/watcher"
-	"github.com/opensaola/opensaola/pkg/tools/ctxkeys"
+	"github.com/harmonycloud/opensaola/internal/resource"
+	"github.com/harmonycloud/opensaola/internal/service/synchronizer"
+	"github.com/harmonycloud/opensaola/internal/service/watcher"
+	"github.com/harmonycloud/opensaola/pkg/tools/ctxkeys"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"

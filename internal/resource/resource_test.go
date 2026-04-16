@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/opensaola/opensaola/internal/resource/logger"
+	"github.com/harmonycloud/opensaola/internal/resource/logger"
 	"github.com/spf13/viper"
 )
 

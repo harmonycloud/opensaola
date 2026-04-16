@@ -35,8 +35,8 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	middlewarecnv1 "github.com/opensaola/opensaola/api/v1"
-	"github.com/opensaola/opensaola/internal/resource/logger"
+	middlewarecnv1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/resource/logger"
 	// +kubebuilder:scaffold:imports
 )
 

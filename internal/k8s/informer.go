@@ -22,7 +22,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/opensaola/opensaola/internal/k8s/kubeclient"
+	"github.com/harmonycloud/opensaola/internal/k8s/kubeclient"
 	"k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"

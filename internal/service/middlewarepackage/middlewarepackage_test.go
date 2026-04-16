@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/opensaola/opensaola/internal/service/packages"
+	"github.com/harmonycloud/opensaola/internal/service/packages"
 	corev1 "k8s.io/api/core/v1"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"

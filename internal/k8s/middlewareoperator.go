@@ -21,8 +21,8 @@ import (
 	"fmt"
 	"k8s.io/apimachinery/pkg/api/equality"
 
-	"github.com/opensaola/opensaola/api/v1"
-	"github.com/opensaola/opensaola/internal/cache"
+	"github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/cache"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"

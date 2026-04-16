@@ -21,11 +21,11 @@ import (
 	"encoding/json"
 	"fmt"
 
-	v1 "github.com/opensaola/opensaola/api/v1"
-	"github.com/opensaola/opensaola/internal/k8s"
-	"github.com/opensaola/opensaola/internal/service/middlewareactionbaseline"
-	"github.com/opensaola/opensaola/internal/service/status"
-	"github.com/opensaola/opensaola/pkg/tools"
+	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/k8s"
+	"github.com/harmonycloud/opensaola/internal/service/middlewareactionbaseline"
+	"github.com/harmonycloud/opensaola/internal/service/status"
+	"github.com/harmonycloud/opensaola/pkg/tools"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )

@@ -22,17 +22,17 @@ import (
 	"strings"
 
 	"github.com/mohae/deepcopy"
-	"github.com/opensaola/opensaola/internal/cache"
-	"github.com/opensaola/opensaola/internal/service/packages"
+	"github.com/harmonycloud/opensaola/internal/cache"
+	"github.com/harmonycloud/opensaola/internal/service/packages"
 	"k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/opensaola/opensaola/internal/k8s"
+	"github.com/harmonycloud/opensaola/internal/k8s"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
 
-	"github.com/opensaola/opensaola/api/v1"
-	"github.com/opensaola/opensaola/internal/service/status"
+	"github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/service/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"

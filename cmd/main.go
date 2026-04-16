@@ -26,14 +26,14 @@ import (
 	"path/filepath"
 	"time"
 
-	v1 "github.com/opensaola/opensaola/api/v1"
-	"github.com/opensaola/opensaola/internal/controller"
-	"github.com/opensaola/opensaola/internal/k8s"
-	"github.com/opensaola/opensaola/internal/resource"
-	"github.com/opensaola/opensaola/internal/resource/logger"
-	"github.com/opensaola/opensaola/internal/service/consts"
-	"github.com/opensaola/opensaola/internal/service/packages"
-	"github.com/opensaola/opensaola/pkg/config"
+	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/controller"
+	"github.com/harmonycloud/opensaola/internal/k8s"
+	"github.com/harmonycloud/opensaola/internal/resource"
+	"github.com/harmonycloud/opensaola/internal/resource/logger"
+	"github.com/harmonycloud/opensaola/internal/service/consts"
+	"github.com/harmonycloud/opensaola/internal/service/packages"
+	"github.com/harmonycloud/opensaola/pkg/config"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"

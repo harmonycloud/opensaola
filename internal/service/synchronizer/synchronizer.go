@@ -17,7 +17,7 @@ limitations under the License.
 package synchronizer
 
 import (
-	v1 "github.com/opensaola/opensaola/api/v1"
+	v1 "github.com/harmonycloud/opensaola/api/v1"
 )
 
 var AdaptationLabelKeys = map[string][]string{

@@ -25,14 +25,14 @@ import (
 
 	"sigs.k8s.io/yaml"
 
-	"github.com/opensaola/opensaola/internal/service/middlewarebaseline"
-	"github.com/opensaola/opensaola/internal/service/packages"
-	"github.com/opensaola/opensaola/pkg/tools"
+	"github.com/harmonycloud/opensaola/internal/service/middlewarebaseline"
+	"github.com/harmonycloud/opensaola/internal/service/packages"
+	"github.com/harmonycloud/opensaola/pkg/tools"
 
-	v1 "github.com/opensaola/opensaola/api/v1"
-	"github.com/opensaola/opensaola/internal/k8s"
-	"github.com/opensaola/opensaola/internal/service/consts"
-	"github.com/opensaola/opensaola/internal/service/status"
+	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/k8s"
+	"github.com/harmonycloud/opensaola/internal/service/consts"
+	"github.com/harmonycloud/opensaola/internal/service/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"

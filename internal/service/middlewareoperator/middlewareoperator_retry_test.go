@@ -23,9 +23,9 @@ import (
 	"testing"
 	"time"
 
-	v1 "github.com/opensaola/opensaola/api/v1"
-	"github.com/opensaola/opensaola/internal/service/consts"
-	"github.com/opensaola/opensaola/internal/service/status"
+	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/service/consts"
+	"github.com/harmonycloud/opensaola/internal/service/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

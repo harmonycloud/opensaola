@@ -44,7 +44,7 @@ ARG VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG BUILD_DATE=unknown
 
-LABEL org.opencontainers.image.source="https://github.com/opensaola/opensaola" \
+LABEL org.opencontainers.image.source="https://github.com/harmonycloud/opensaola" \
       org.opencontainers.image.title="opensaola" \
       org.opencontainers.image.description="OpenSaola - Kubernetes Middleware Lifecycle Operator" \
       org.opencontainers.image.licenses="Apache-2.0" \

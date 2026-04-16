@@ -22,13 +22,13 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 
-	"github.com/opensaola/opensaola/internal/k8s"
+	"github.com/harmonycloud/opensaola/internal/k8s"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
 
-	v1 "github.com/opensaola/opensaola/api/v1"
-	"github.com/opensaola/opensaola/internal/service/consts"
-	"github.com/opensaola/opensaola/pkg/tools"
+	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/service/consts"
+	"github.com/harmonycloud/opensaola/pkg/tools"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	ctrl "sigs.k8s.io/controller-runtime"

@@ -22,7 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	v1 "github.com/opensaola/opensaola/api/v1"
+	v1 "github.com/harmonycloud/opensaola/api/v1"
 )
 
 // TestFinalizerAddRemove_Middleware verifies finalizer add and remove for Middleware objects

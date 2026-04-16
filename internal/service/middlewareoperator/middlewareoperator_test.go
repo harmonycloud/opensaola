@@ -19,8 +19,8 @@ package middlewareoperator
 import (
 	"testing"
 
-	v1 "github.com/opensaola/opensaola/api/v1"
-	"github.com/opensaola/opensaola/internal/service/consts"
+	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/service/consts"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

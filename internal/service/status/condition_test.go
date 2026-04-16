@@ -20,7 +20,7 @@ import (
 	"context"
 	"testing"
 
-	v1 "github.com/opensaola/opensaola/api/v1"
+	v1 "github.com/harmonycloud/opensaola/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 

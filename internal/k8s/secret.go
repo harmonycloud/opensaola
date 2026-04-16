@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/opensaola/opensaola/internal/cache"
+	"github.com/harmonycloud/opensaola/internal/cache"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 

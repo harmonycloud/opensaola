@@ -18,10 +18,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # Bumped from v1.63.4 (built with Go 1.23) because go.mod targets Go 1.26.1 and the old
+      # binary fails with: "the Go language version (go1.23) used to build golangci-lint is lower
+      # than the targeted Go version (1.26.1)".
+      #
+      # FOLLOW-UPS (cannot be done in this job-only change):
+      #   1. .golangci.yml is v1-schema; golangci-lint v2 requires `version: "2"`. Migrate the
+      #      config file in a separate PR (see https://golangci-lint.run/docs/product/migration-guide).
+      #   2. No released golangci-lint binary is currently built with Go 1.26+ (v2.11.4 latest is
+      #      built with go1.25). Until upstream ships a go1.26-built release, this step may still
+      #      fail the same way on Go 1.26.1 targets. Options: lower go.mod to go 1.25.x, or build
+      #      golangci-lint from source in CI with the repo's Go toolchain.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v7
         with:
-          version: v1.63.4
+          version: v2.5.0
 
   test:
     name: Test

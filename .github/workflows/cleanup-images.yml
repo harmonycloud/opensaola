@@ -1,0 +1,56 @@
+name: Cleanup Old Dev Images
+
+# Keep at most 10 most-recent `sha-*` images; always preserve semver (`v*`),
+# and floating tags (`dev`, `main`). Also sweep week-old orphan manifests
+# left by multi-arch builds.
+# 保留最新 10 个 sha-* 镜像；永远保留 semver（v*）与浮动 tag（dev、main）；
+# 顺带清理一周以上的 multi-arch 孤儿 manifest。
+
+on:
+  # Trigger right after Docker workflow finishes so newly-pushed shas get
+  # factored into the 10-keep window immediately.
+  # Docker workflow 跑完立即触发，新 sha 第一时间参与 10 个保留窗口计算。
+  workflow_run:
+    workflows: ["Docker"]
+    types: [completed]
+  # Safety net: daily cron in case a workflow_run event is dropped.
+  # 兜底：每天凌晨 3 点跑一次，防止 workflow_run 事件丢失。
+  schedule:
+    - cron: '0 3 * * *'
+  # Manual button.
+  # 手动触发按钮。
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      # Delete old sha-* tagged images, keep the 10 most recent.
+      # 清理旧的 sha-* tag，保留最新 10 个。
+      - name: Delete old sha-* images (keep latest 10)
+        uses: snok/container-retention-policy@v3
+        with:
+          account: ${{ github.repository_owner }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          image-names: opensaola
+          image-tags: "sha-*"
+          tag-selection: tagged
+          cut-off: 1s
+          keep-n-most-recent: 10
+
+      # Delete orphan untagged manifests left behind by multi-arch builds.
+      # Wait 1 week so we never delete a layer still referenced by a fresh
+      # manifest list.
+      # 清理 multi-arch 构建残留的 untagged 孤儿 manifest；
+      # 保留 1 周是为了避免误删仍被新 manifest list 引用的层。
+      - name: Delete old untagged manifests
+        uses: snok/container-retention-policy@v3
+        with:
+          account: ${{ github.repository_owner }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          image-names: opensaola
+          tag-selection: untagged
+          cut-off: 1w

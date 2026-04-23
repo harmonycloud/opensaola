@@ -33,9 +33,13 @@ func CalcPanicBackoff(attempt int) time.Duration {
 	if attempt <= 0 {
 		attempt = 1
 	}
-	d := time.Duration(float64(panicBackoffBase) * math.Pow(panicBackoffFactor, float64(attempt-1)))
-	if d > panicBackoffMax {
-		d = panicBackoffMax
+	// Compute the exponent directly on the float and guard against overflow
+	// before converting to time.Duration, so behaviour does not depend on the
+	// platform/Go version's float-to-int conversion semantics for huge values.
+	maxF := float64(panicBackoffMax)
+	d := float64(panicBackoffBase) * math.Pow(panicBackoffFactor, float64(attempt-1))
+	if math.IsNaN(d) || d >= maxF {
+		return panicBackoffMax
 	}
-	return d
+	return time.Duration(d)
 }

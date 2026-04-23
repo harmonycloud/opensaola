@@ -27,10 +27,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"cuelang.org/go/cue/cuecontext"
-	"github.com/mohae/deepcopy"
 	"github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/status"
+	"github.com/mohae/deepcopy"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"

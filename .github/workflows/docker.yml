@@ -3,14 +3,14 @@ name: Docker
 on:
   push:
     tags: ['v*']
-    branches: [main, dev]
+    branches: [master, dev]
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
       - 'chart/**'
       - '.github/ISSUE_TEMPLATE/**'
   pull_request:
-    branches: [main, dev]
+    branches: [master, dev]
     paths-ignore:
       - '**/*.md'
       - 'docs/**'

@@ -11,8 +11,3 @@ OpenSaola has been installed successfully!
 
 4. To deploy middleware, you need a middleware package first.
    See: https://github.com/OpenSaola/opensaola#how-it-works
-
-{{- if .Values.serviceMonitor.enabled }}
-
-5. ServiceMonitor is enabled. Prometheus will auto-discover metrics.
-{{- end }}

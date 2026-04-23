@@ -28,7 +28,6 @@ import (
 	"github.com/harmonycloud/opensaola/internal/concurrency"
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/middlewareaction"
-	metrics "github.com/harmonycloud/opensaola/pkg/metrics"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -52,25 +51,13 @@ type MiddlewareActionReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
-	startTime := time.Now()
-	_, timer := metrics.NewReconcileTimer(ctx, "middlewareaction")
-	defer func() {
-		metrics.ObserveReconcile("middlewareaction", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
-		timer.Observe(res)
-		metrics.ObserveRequeue("middlewareaction", result.Requeue, result.RequeueAfter)
-		metrics.ObserveAPIError("middlewareaction", retErr)
-	}()
-
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
 	ctx = log.IntoContext(ctx, l)
 
 	log.FromContext(ctx).V(1).Info("start processing MiddlewareAction", "name", req.NamespacedName)
 
 	// Get MiddlewareAction
-	stop := timer.Start(metrics.PhaseAPIRead)
 	middlewareAction, err := k8s.GetMiddlewareAction(ctx, r.Client, req.Name, req.Namespace)
-	stop()
 	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -94,41 +81,31 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			}
 		}
 
-		stopStatus := timer.Start(metrics.PhaseStatusWrite)
 		err = k8s.UpdateMiddlewareActionStatus(ctx, r.Client, middlewareAction)
-		stopStatus()
 		if err != nil {
 			log.FromContext(ctx).Error(err, "failed to update MiddlewareAction status", "namespace", req.Namespace, "name", req.Name)
 		}
 	}()
 
-	stop = timer.Start(metrics.PhaseCompute)
 	if err = middlewareaction.Check(ctx, r.Client, middlewareAction); err != nil {
-		stop()
 		r.Recorder.Event(middlewareAction, "Warning", "ValidationFailed", err.Error())
 		log.FromContext(ctx).Error(err, "failed to validate MiddlewareAction", "namespace", req.Namespace, "name", req.Name)
 		return ctrl.Result{}, err
 	}
-	stop()
 
 	// Get the operatorbaseline from the package
-	stop = timer.Start(metrics.PhaseAPIRead)
 	middlewareActionBaseline, err := middlewareactionbaseline.Get(ctx, r.Client, middlewareAction.Spec.Baseline, middlewareAction.Labels[v1.LabelPackageName])
-	stop()
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to get MiddlewareActionBaseline for MiddlewareAction", "namespace", req.Namespace, "name", req.Name)
 		return ctrl.Result{}, err
 	}
 
 	if middlewareActionBaseline.Spec.BaselineType != v1.WorkflowPreAction {
-		stop = timer.Start(metrics.PhaseAPIWrite)
 		if err = middlewareaction.Execute(ctx, r.Client, middlewareAction); err != nil {
-			stop()
 			r.Recorder.Event(middlewareAction, "Warning", "ExecutionFailed", err.Error())
 			log.FromContext(ctx).Error(err, "failed to execute MiddlewareAction", "namespace", req.Namespace, "name", req.Name)
 			return ctrl.Result{}, err
 		}
-		stop()
 		r.Recorder.Event(middlewareAction, "Normal", "Executed", "Action executed successfully")
 	}
 

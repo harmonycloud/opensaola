@@ -28,11 +28,9 @@ import (
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
 	"github.com/harmonycloud/opensaola/pkg/tools"
-	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/klauspost/compress/zstd"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
@@ -55,10 +53,6 @@ const (
 	// DefaultLabelsFmt = "%s=%s,%s=%s"
 )
 
-func init() {
-	metrics.Registry.MustRegister(PackageCacheHitTotal, PackageCacheMissTotal)
-}
-
 // SetAPIReader sets the direct API reader, bypassing the informer cache.
 // Must be called after manager creation.
 func SetAPIReader(r client.Reader) {
@@ -73,17 +67,6 @@ type cacheEntry struct {
 }
 
 var packageCache = cache.New[string, *cacheEntry](0)
-
-var (
-	PackageCacheHitTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "opensaola_package_cache_hit_total",
-		Help: "Total number of package parse cache hits.",
-	})
-	PackageCacheMissTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "opensaola_package_cache_miss_total",
-		Help: "Total number of package parse cache misses.",
-	})
-)
 
 // InvalidatePackageCache removes the cache entry for the specified package.
 func InvalidatePackageCache(name string) {
@@ -184,11 +167,9 @@ func Get(ctx context.Context, cli client.Client, name string) (*Package, error) 
 	// Use cache: skip decompress/parse if Secret resourceVersion is unchanged.
 	if ce, ok := packageCache.Get(name); ok {
 		if ce.resourceVersion == s.ResourceVersion {
-			PackageCacheHitTotal.Inc()
 			return ce.pkg, nil
 		}
 	}
-	PackageCacheMissTotal.Inc()
 
 	// Decompress data
 	decompressData, err := DeCompress(s.Data[Release])

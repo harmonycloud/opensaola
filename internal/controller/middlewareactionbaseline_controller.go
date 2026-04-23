@@ -24,7 +24,6 @@ import (
 	"github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/middlewareactionbaseline"
-	metrics "github.com/harmonycloud/opensaola/pkg/metrics"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -48,38 +47,23 @@ type MiddlewareActionBaselineReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *MiddlewareActionBaselineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
-	startTime := time.Now()
-	_, timer := metrics.NewReconcileTimer(ctx, "middlewareactionbaseline")
-	defer func() {
-		metrics.ObserveReconcile("middlewareactionbaseline", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
-		timer.Observe(res)
-		metrics.ObserveRequeue("middlewareactionbaseline", result.Requeue, result.RequeueAfter)
-		metrics.ObserveAPIError("middlewareactionbaseline", retErr)
-	}()
-
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
 	ctx = log.IntoContext(ctx, l)
 
 	log.FromContext(ctx).V(1).Info("start processing middlewareActionBaseline", "req", req)
 
 	// Get MiddlewareActionBaseline
-	stop := timer.Start(metrics.PhaseAPIRead)
 	middlewareActionBaseline, err := k8s.GetMiddlewareActionBaseline(ctx, r.Client, req.Name)
-	stop()
 	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	// Validate middlewareActionBaseline
-	stop = timer.Start(metrics.PhaseCompute)
 	if err = middlewareactionbaseline.Check(ctx, r.Client, middlewareActionBaseline); err != nil {
-		stop()
 		r.Recorder.Event(middlewareActionBaseline, "Warning", "ValidationFailed", err.Error())
 		log.FromContext(ctx).Error(err, "failed to validate MiddlewareActionBaseline", "name", req.Name)
 		return ctrl.Result{}, err
 	}
-	stop()
 	return ctrl.Result{}, nil
 }
 

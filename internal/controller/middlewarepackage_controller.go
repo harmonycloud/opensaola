@@ -29,7 +29,6 @@ import (
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
 	"github.com/harmonycloud/opensaola/internal/service/middlewarepackage"
-	metrics "github.com/harmonycloud/opensaola/pkg/metrics"
 	corev1 "k8s.io/api/core/v1"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -65,16 +64,6 @@ const secretRequestPrefix = "__secret__/"
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
-	startTime := time.Now()
-	ctx, timer := metrics.NewReconcileTimer(ctx, "middlewarepackage")
-	defer func() {
-		metrics.ObserveReconcile("middlewarepackage", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
-		timer.Observe(res)
-		metrics.ObserveRequeue("middlewarepackage", result.Requeue, result.RequeueAfter)
-		metrics.ObserveAPIError("middlewarepackage", retErr)
-	}()
-
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
 	ctx = log.IntoContext(ctx, l)
 
@@ -102,24 +91,17 @@ func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Re
 }
 
 func (r *MiddlewarePackageReconciler) HandlePackage(ctx context.Context, req ctrl.Request) error {
-	timer := metrics.TimerFromContext(ctx)
-
 	// Get MiddlewarePackage
-	stop := timer.Start(metrics.PhaseAPIRead)
 	mp, err := k8s.GetMiddlewarePackage(ctx, r.Client, req.Name)
-	stop()
 	if err != nil {
 		return err
 	}
 
 	// Validate MiddlewarePackage
-	stop = timer.Start(metrics.PhaseCompute)
 	if err = middlewarepackage.Check(ctx, r.Client, mp); err != nil {
-		stop()
 		r.Recorder.Event(mp, "Warning", "ValidationFailed", err.Error())
 		return err
 	}
-	stop()
 
 	r.Recorder.Eventf(mp, "Normal", "Validated", "Package %s validated successfully", mp.Name)
 
@@ -140,33 +122,23 @@ func (r *MiddlewarePackageReconciler) getPackageForEvent(ctx context.Context, na
 }
 
 func (r *MiddlewarePackageReconciler) HandleSecret(ctx context.Context, req ctrl.Request) error {
-	timer := metrics.TimerFromContext(ctx)
-
-	stop := timer.Start(metrics.PhaseAPIRead)
 	secret, err := k8s.GetSecret(ctx, r.Client, req.Name, req.Namespace)
-	stop()
 	if err != nil && !apiErrors.IsNotFound(err) {
 		return err
 	}
 	if secret != nil {
-		stop = timer.Start(metrics.PhaseAPIWrite)
 		if err = middlewarepackage.HandleSecret(ctx, r.Client, secret, consts.HandleActionPublish); err != nil {
-			stop()
 			return err
 		}
-		stop()
 	} else {
-		stop = timer.Start(metrics.PhaseAPIWrite)
 		if err = middlewarepackage.HandleSecret(ctx, r.Client, &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      req.Name,
 				Namespace: req.Namespace,
 			},
 		}, consts.HandleActionDelete); err != nil {
-			stop()
 			return err
 		}
-		stop()
 	}
 	return nil
 }

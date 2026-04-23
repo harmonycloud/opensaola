@@ -18,14 +18,9 @@ package packages
 
 import (
 	"testing"
-
-	dto "github.com/prometheus/client_model/go"
 )
 
 func TestPackageCache_HitMiss(t *testing.T) {
-	PackageCacheHitTotal.Add(0)  // ensure initialized
-	PackageCacheMissTotal.Add(0) // ensure initialized
-
 	// Clear cache
 	packageCache.Delete("test-pkg")
 
@@ -56,27 +51,5 @@ func TestPackageCache_HitMiss(t *testing.T) {
 	InvalidatePackageCache("test-pkg")
 	if _, ok := packageCache.Get("test-pkg"); ok {
 		t.Error("cache entry should be deleted after InvalidatePackageCache")
-	}
-}
-
-func TestPackageCache_MetricsRegistered(t *testing.T) {
-	// Verify counter can be written without panic
-	PackageCacheHitTotal.Inc()
-	PackageCacheMissTotal.Inc()
-
-	m := &dto.Metric{}
-	if err := PackageCacheHitTotal.Write(m); err != nil {
-		t.Fatalf("write hit metric: %v", err)
-	}
-	if v := m.GetCounter().GetValue(); v < 1 {
-		t.Errorf("hit counter = %v, want >= 1", v)
-	}
-
-	mm := &dto.Metric{}
-	if err := PackageCacheMissTotal.Write(mm); err != nil {
-		t.Fatalf("write miss metric: %v", err)
-	}
-	if v := mm.GetCounter().GetValue(); v < 1 {
-		t.Errorf("miss counter = %v, want >= 1", v)
 	}
 }

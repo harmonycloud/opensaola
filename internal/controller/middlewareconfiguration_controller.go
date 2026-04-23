@@ -24,7 +24,6 @@ import (
 	middlewarecnv1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/middlewareconfiguration"
-	metrics "github.com/harmonycloud/opensaola/pkg/metrics"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -48,37 +47,22 @@ type MiddlewareConfigurationReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *MiddlewareConfigurationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
-	startTime := time.Now()
-	_, timer := metrics.NewReconcileTimer(ctx, "middlewareconfiguration")
-	defer func() {
-		metrics.ObserveReconcile("middlewareconfiguration", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
-		timer.Observe(res)
-		metrics.ObserveRequeue("middlewareconfiguration", result.Requeue, result.RequeueAfter)
-		metrics.ObserveAPIError("middlewareconfiguration", retErr)
-	}()
-
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
 	ctx = log.IntoContext(ctx, l)
 
 	log.FromContext(ctx).V(1).Info("start processing middlewareConfiguration", "req", req)
 
 	// Get middlewareConfiguration
-	stop := timer.Start(metrics.PhaseAPIRead)
 	middlewareConfiguration, err := k8s.GetMiddlewareConfiguration(ctx, r.Client, req.Name)
-	stop()
 	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	stop = timer.Start(metrics.PhaseCompute)
 	if err = middlewareconfiguration.Check(ctx, r.Client, middlewareConfiguration); err != nil {
-		stop()
 		r.Recorder.Event(middlewareConfiguration, "Warning", "ValidationFailed", err.Error())
 		log.FromContext(ctx).Error(err, "failed to validate MiddlewareConfiguration", "name", req.Name)
 		return ctrl.Result{}, err
 	}
-	stop()
 	return ctrl.Result{}, nil
 }
 

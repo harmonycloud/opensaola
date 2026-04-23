@@ -67,13 +67,6 @@ tolerations: []
 # -- Affinity rules for pod scheduling
 affinity: {}
 
-# -- ServiceMonitor for Prometheus auto-discovery
-serviceMonitor:
-  # -- Enable ServiceMonitor creation
-  enabled: false
-  # -- Scrape interval
-  interval: "30s"
-
 # -- PodDisruptionBudget (only effective when replicas > 1)
 pdb:
   # -- Enable PDB creation

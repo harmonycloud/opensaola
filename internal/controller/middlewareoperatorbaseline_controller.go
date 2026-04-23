@@ -24,7 +24,6 @@ import (
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/middlewareoperatorbaseline"
-	metrics "github.com/harmonycloud/opensaola/pkg/metrics"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
@@ -49,25 +48,13 @@ type MiddlewareOperatorBaselineReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *MiddlewareOperatorBaselineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
-	startTime := time.Now()
-	_, timer := metrics.NewReconcileTimer(ctx, "middlewareoperatorbaseline")
-	defer func() {
-		metrics.ObserveReconcile("middlewareoperatorbaseline", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
-		timer.Observe(res)
-		metrics.ObserveRequeue("middlewareoperatorbaseline", result.Requeue, result.RequeueAfter)
-		metrics.ObserveAPIError("middlewareoperatorbaseline", retErr)
-	}()
-
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
 	ctx = log.IntoContext(ctx, l)
 
 	log.FromContext(ctx).V(1).Info("start processing middlewareOperatorBaseline", "req", req)
 
 	// Get middlewareOperatorBaseline
-	stop := timer.Start(metrics.PhaseAPIRead)
 	middlewareOperatorBaseline, err := k8s.GetMiddlewareOperatorBaseline(ctx, r.Client, req.Name)
-	stop()
 	if err != nil {
 		if !errors.IsNotFound(err) {
 			log.FromContext(ctx).Error(err, "failed to get middlewareOperatorBaseline")
@@ -75,14 +62,11 @@ func (r *MiddlewareOperatorBaselineReconciler) Reconcile(ctx context.Context, re
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	stop = timer.Start(metrics.PhaseCompute)
 	if err := middlewareoperatorbaseline.Check(ctx, r.Client, middlewareOperatorBaseline); err != nil {
-		stop()
 		r.Recorder.Event(middlewareOperatorBaseline, "Warning", "ValidationFailed", err.Error())
 		log.FromContext(ctx).Error(err, "failed to validate middlewareOperatorBaseline")
 		return ctrl.Result{}, err
 	}
-	stop()
 
 	return ctrl.Result{}, nil
 }

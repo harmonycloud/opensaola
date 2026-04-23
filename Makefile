@@ -148,7 +148,7 @@ test-e2e-smoke: manifests generate fmt vet ## Run e2e on a temporary Kind cluste
 		$(MAKE) kind-create KIND_CLUSTER='$(KIND_CLUSTER)'; \
 	fi; \
 	set +e; \
-	KIND_CLUSTER='$(KIND_CLUSTER)' CERT_MANAGER_INSTALL_SKIP=true go test ./test/e2e/ -v -ginkgo.v; \
+	KIND_CLUSTER='$(KIND_CLUSTER)' CERT_MANAGER_INSTALL_SKIP=true go test -tags=e2e ./test/e2e/ -v -ginkgo.v; \
 	status=$$?; \
 	set -e; \
 	if [ $$created -eq 1 ]; then \

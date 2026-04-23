@@ -1,3 +1,9 @@
+###############################################################################
+# ClusterRole: cluster-wide resources the operator must reconcile.
+# NOTE: Secrets access is intentionally NOT here — see the namespace-scoped
+# Role below. This shrinks the secret blast radius from every namespace in
+# the cluster to just spec.config.dataNamespace.
+###############################################################################
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -12,28 +18,6 @@ rules:
   verbs:
   - create
   - patch
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - ""
-  resources:
-  - secrets/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - ""
-  resources:
-  - secrets/status
-  verbs:
-  - get
-  - patch
-  - update
 - apiGroups:
   - apps
   resources:
@@ -121,4 +105,100 @@ subjects:
 roleRef:
   kind: ClusterRole
   name: {{ include "opensaola.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io
+---
+###############################################################################
+# Role (Release namespace): leader election lease.
+# controller-runtime uses coordination.k8s.io/Lease for leader election; the
+# operator crashes at startup without these verbs. See cmd/main.go manager
+# options (LeaderElection + ReleaseOnCancel).
+###############################################################################
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "opensaola.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensaola.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "opensaola.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "opensaola.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "opensaola.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "opensaola.fullname" . }}-leader-election
+  apiGroup: rbac.authorization.k8s.io
+---
+###############################################################################
+# Role (data namespace): MiddlewarePackage Secret reconciliation.
+# Operator only reads and manages Secrets in .Values.config.dataNamespace,
+# never cluster-wide. If dataNamespace != Release.Namespace the operator is
+# installed in, that namespace must already exist before helm install.
+###############################################################################
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "opensaola.fullname" . }}-packages
+  namespace: {{ .Values.config.dataNamespace }}
+  labels:
+    {{- include "opensaola.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - secrets/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - secrets/status
+  verbs:
+  - get
+  - patch
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "opensaola.fullname" . }}-packages
+  namespace: {{ .Values.config.dataNamespace }}
+  labels:
+    {{- include "opensaola.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "opensaola.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "opensaola.fullname" . }}-packages
   apiGroup: rbac.authorization.k8s.io

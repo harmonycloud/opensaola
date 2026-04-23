@@ -68,7 +68,7 @@ metadata:
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 data:
-{{ (.Files.Glob "crds/*").AsConfig | indent 2 }}
+{{ (.Files.Glob "files/crds/*").AsConfig | indent 2 }}
 
 ---
 apiVersion: batch/v1

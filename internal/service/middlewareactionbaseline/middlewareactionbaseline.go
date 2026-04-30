@@ -21,18 +21,16 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/harmonycloud/opensaola/internal/cache"
-	"github.com/harmonycloud/opensaola/internal/service/packages"
-	"k8s.io/apimachinery/pkg/api/errors"
-	ctrl "sigs.k8s.io/controller-runtime"
-
-	"cuelang.org/go/cue/cuecontext"
 	"github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/cache"
 	"github.com/harmonycloud/opensaola/internal/k8s"
+	"github.com/harmonycloud/opensaola/internal/service/packages"
 	"github.com/harmonycloud/opensaola/internal/service/status"
 	"github.com/mohae/deepcopy"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -91,7 +89,11 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 	cached, ok := ActionBaselineCache.Get(key)
 	if ok {
 		result := deepcopy.Copy(cached)
-		return result.(v1.MiddlewareActionBaseline), nil
+		actionBaseline, ok := result.(v1.MiddlewareActionBaseline)
+		if !ok {
+			return v1.MiddlewareActionBaseline{}, fmt.Errorf("cached middlewareactionbaseline %s has unexpected type %T", name, result)
+		}
+		return actionBaseline, nil
 	} else {
 
 		var baselines []*v1.MiddlewareActionBaseline
@@ -113,7 +115,11 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 				actionBaseline.Labels = lbs
 				ActionBaselineCache.Set(key, *actionBaseline)
 				result := deepcopy.Copy(*actionBaseline)
-				return result.(v1.MiddlewareActionBaseline), nil
+				copied, ok := result.(v1.MiddlewareActionBaseline)
+				if !ok {
+					return v1.MiddlewareActionBaseline{}, fmt.Errorf("middlewareactionbaseline %s copy has unexpected type %T", name, result)
+				}
+				return copied, nil
 			}
 		}
 	}
@@ -126,40 +132,6 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 func checkStep(ctx context.Context, step v1.Step, m *v1.MiddlewareActionBaseline) error {
 	if step.Name == "" {
 		return fmt.Errorf("name must not be empty")
-	} else {
-		if step.CUE != "" {
-			// check cue
-			// err := checkCUE(ctx, step.CUE, m)
-			// if err != nil {
-			// 	return fmt.Errorf("failed to validate CUE: %w", err)
-			// }
-		}
-	}
-	return nil
-}
-
-// checkCUE validates a CUE template
-func checkCUE(ctx context.Context, cueString string, m *v1.MiddlewareActionBaseline) error {
-	cueCompiler := cuecontext.New().CompileString(cueString)
-	if cueCompiler.Err() != nil {
-		return fmt.Errorf("failed to compile CUE: %w", cueCompiler.Err())
-	}
-	fields, err := cueCompiler.Fields()
-	if err != nil {
-		return fmt.Errorf("failed to get CUE fields: %w", err)
-	}
-	fieldsMap := make(map[string]struct{})
-	for fields.Next() {
-		fieldsMap[fields.Label()] = struct{}{}
-	}
-	if _, ok := fieldsMap["output"]; !ok {
-		return fmt.Errorf("output must not be empty")
-	}
-	if _, ok := fieldsMap["resource"]; !ok {
-		return fmt.Errorf("resource must not be empty")
-	}
-	if _, ok := fieldsMap["parameter"]; !ok {
-		return fmt.Errorf("parameter must not be empty")
 	}
 	return nil
 }

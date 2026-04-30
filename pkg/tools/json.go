@@ -120,13 +120,25 @@ func MergeMap(old, new map[string]any) map[string]any {
 			if old[k] == nil {
 				old[k] = v
 			} else {
-				old[k] = MergeMap(old[k].(map[string]any), v.(map[string]any))
+				oldMap, oldOK := old[k].(map[string]any)
+				newMap, newOK := v.(map[string]any)
+				if !oldOK || !newOK {
+					old[k] = v
+				} else {
+					old[k] = MergeMap(oldMap, newMap)
+				}
 			}
 		case []any:
 			if old[k] == nil {
 				old[k] = v
 			} else {
-				old[k] = MergeArray(old[k].([]any), v.([]any))
+				oldArray, oldOK := old[k].([]any)
+				newArray, newOK := v.([]any)
+				if !oldOK || !newOK {
+					old[k] = v
+				} else {
+					old[k] = MergeArray(oldArray, newArray)
+				}
 			}
 		default:
 			old[k] = v
@@ -177,7 +189,12 @@ func MergeArray(old, new []any) []any {
 				}
 				if !keyFound {
 					if len(old) >= newIdx+1 {
-						old[newIdx] = MergeMap(old[newIdx].(map[string]any), v)
+						oldMap, ok := old[newIdx].(map[string]any)
+						if !ok {
+							old[newIdx] = v
+						} else {
+							old[newIdx] = MergeMap(oldMap, v)
+						}
 					} else {
 						old = append(old, v)
 					}

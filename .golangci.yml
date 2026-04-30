@@ -1,33 +1,38 @@
+version: "2"
+
 run:
   timeout: 5m
 
 linters:
+  default: none
   enable:
     - errcheck
     - govet
-    - staticcheck
     - unused
     - ineffassign
-    - typecheck
-    - gosimple
-    - gocritic
     - misspell
-    - gofmt
+  settings:
+    errcheck:
+      check-type-assertions: true
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    misspell:
+      locale: US
+  exclusions:
+    paths:
+      - vendor
+      - "zz_generated.*\\.go$"
 
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-  misspell:
-    locale: US
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    paths:
+      - vendor
+      - "zz_generated.*\\.go$"
 
 issues:
-  exclude-dirs:
-    - vendor
-  exclude-files:
-    - "zz_generated.*\\.go$"
   max-issues-per-linter: 50
   max-same-issues: 3

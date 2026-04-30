@@ -136,11 +136,15 @@ func TestPatch(t *testing.T) {
 	}
 
 	// Verify specific fields
-	if patchedDeployment.(*appsv1.Deployment).Spec.Replicas == nil || *patchedDeployment.(*appsv1.Deployment).Spec.Replicas != 2 {
-		t.Errorf("Expected replicas to be 2, got %v", patchedDeployment.(*appsv1.Deployment).Spec.Replicas)
+	deployment, ok := patchedDeployment.(*appsv1.Deployment)
+	if !ok {
+		t.Fatalf("Expected patched object to be Deployment, got %T", patchedDeployment)
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 2 {
+		t.Errorf("Expected replicas to be 2, got %v", deployment.Spec.Replicas)
 	}
 
-	containers := patchedDeployment.(*appsv1.Deployment).Spec.Template.Spec.Containers
+	containers := deployment.Spec.Template.Spec.Containers
 	if len(containers) != 1 {
 		t.Errorf("Expected 1 container, got %d", len(containers))
 	}

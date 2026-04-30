@@ -62,10 +62,9 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	log.FromContext(ctx).V(1).Info("start processing middleware", "req", req)
 
-	var err error
 	// Get middleware
-	mid := new(v1.Middleware)
-	if mid, err = k8s.GetMiddleware(ctx, r.Client, req.Name, req.Namespace); err != nil {
+	mid, err := k8s.GetMiddleware(ctx, r.Client, req.Name, req.Namespace)
+	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -84,27 +83,53 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			if usedLegacy {
 				path = "legacy"
 			}
+			cleanupResult := "success"
 			if resolveErr != nil {
-				log.FromContext(ctx).Error(resolveErr, "Middleware delete context resolution failed",
+				if !middleware.CanSkipDeleteCleanup(mid) {
+					log.FromContext(ctx).Error(resolveErr, "Middleware delete context resolution failed",
+						"name", mid.Name,
+						"namespace", mid.Namespace,
+						"path", path,
+						"finalizer_action", "keep",
+						"legacy_reason", legacyReason,
+						"cleanup_result", "error",
+					)
+					return ctrl.Result{}, resolveErr
+				}
+				cleanupResult = "skipped"
+				log.FromContext(ctx).Info("Middleware delete cleanup skipped because no managed resources were created",
+					"warning", true,
 					"name", mid.Name,
 					"namespace", mid.Namespace,
 					"path", path,
-					"finalizer_action", "keep",
+					"finalizer_action", "remove",
 					"legacy_reason", legacyReason,
-					"cleanup_result", "error",
+					"cleanup_result", cleanupResult,
+					"resolve_error", resolveErr.Error(),
 				)
-				return ctrl.Result{}, resolveErr
-			}
-			if cleanErr := middleware.HandleResource(ctx, r.Client, consts.HandleActionDelete, resolved); cleanErr != nil {
-				log.FromContext(ctx).Error(cleanErr, "Middleware cleanup failed",
+			} else if cleanErr := middleware.HandleResource(ctx, r.Client, consts.HandleActionDelete, resolved); cleanErr != nil {
+				if !middleware.CanSkipDeleteCleanup(resolved) {
+					log.FromContext(ctx).Error(cleanErr, "Middleware cleanup failed",
+						"name", mid.Name,
+						"namespace", mid.Namespace,
+						"path", path,
+						"finalizer_action", "keep",
+						"legacy_reason", legacyReason,
+						"cleanup_result", "error",
+					)
+					return ctrl.Result{}, cleanErr
+				}
+				cleanupResult = "skipped"
+				log.FromContext(ctx).Info("Middleware delete cleanup skipped after cleanup error because no managed resources were created",
+					"warning", true,
 					"name", mid.Name,
 					"namespace", mid.Namespace,
 					"path", path,
-					"finalizer_action", "keep",
+					"finalizer_action", "remove",
 					"legacy_reason", legacyReason,
-					"cleanup_result", "error",
+					"cleanup_result", cleanupResult,
+					"cleanup_error", cleanErr.Error(),
 				)
-				return ctrl.Result{}, cleanErr
 			}
 			if updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 				latest, getErr := k8s.GetMiddleware(ctx, r.Client, req.Name, req.Namespace)
@@ -125,7 +150,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				"path", path,
 				"finalizer_action", "remove",
 				"legacy_reason", legacyReason,
-				"cleanup_result", "success",
+				"cleanup_result", cleanupResult,
 			)
 		} else {
 			log.FromContext(ctx).Info("Middleware has no finalizer on deletion, skipping cleanup",
@@ -277,8 +302,14 @@ func (r *MiddlewareReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	pred := predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
 			// Skip status-only update events
-			oldObj := e.ObjectOld.(*v1.Middleware)
-			newObj := e.ObjectNew.(*v1.Middleware)
+			oldObj, ok := e.ObjectOld.(*v1.Middleware)
+			if !ok {
+				return true
+			}
+			newObj, ok := e.ObjectNew.(*v1.Middleware)
+			if !ok {
+				return true
+			}
 
 			// Compare whether status has changed
 			if !equality.Semantic.DeepEqual(oldObj.Status, newObj.Status) {

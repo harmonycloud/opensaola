@@ -76,6 +76,10 @@ func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Handle middlewareOperator
 	if err := r.handleMiddlewareOperator(ctx, req); err != nil {
+		if apiErrors.IsNotFound(err) {
+			log.FromContext(ctx).V(1).Info("MiddlewareOperator not found, skipping", "namespace", req.Namespace, "name", req.Name)
+			return ctrl.Result{}, nil
+		}
 		if errors.Is(err, errMiddlewareOperatorFinalizerAdded) {
 			return ctrl.Result{Requeue: true}, nil
 		}
@@ -95,13 +99,17 @@ func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.R
 			return ctrl.Result{}, nil
 		}
 		log.FromContext(ctx).Error(err, "failed to handle MiddlewareOperator", "namespace", req.Namespace, "name", req.Name)
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return ctrl.Result{}, err
 	}
 
 	// Handle deployment
 	if err := r.handleDeployment(ctx, req); err != nil {
+		if apiErrors.IsNotFound(err) {
+			log.FromContext(ctx).V(1).Info("MiddlewareOperator deployment target not found, skipping", "namespace", req.Namespace, "name", req.Name)
+			return ctrl.Result{}, nil
+		}
 		log.FromContext(ctx).Error(err, "failed to handle deployment for MiddlewareOperator", "namespace", req.Namespace, "name", req.Name)
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
@@ -352,8 +360,14 @@ func (r *MiddlewareOperatorReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	// Consistent with the Middleware controller filtering strategy.
 	moPred := predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			oldObj := e.ObjectOld.(*v1.MiddlewareOperator)
-			newObj := e.ObjectNew.(*v1.MiddlewareOperator)
+			oldObj, ok := e.ObjectOld.(*v1.MiddlewareOperator)
+			if !ok {
+				return true
+			}
+			newObj, ok := e.ObjectNew.(*v1.MiddlewareOperator)
+			if !ok {
+				return true
+			}
 			if !equality.Semantic.DeepEqual(oldObj.Status, newObj.Status) {
 				return false
 			}

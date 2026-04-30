@@ -223,7 +223,7 @@ func TestReadTarInfo_PathTraversal(t *testing.T) {
 	// For "../../../etc/passwd" the split produces ["..","..","..","etc","passwd"],
 	// stripping the first element yields "../../etc/passwd".
 	//
-	// NOTE: ReadTarInfo does NOT sanitise path-traversal sequences — it includes
+	// NOTE: ReadTarInfo does NOT sanitize path-traversal sequences — it includes
 	// the entry as-is (minus the first component). Callers must validate paths
 	// if they write files to disk.
 	expectedKey := "../../etc/passwd"

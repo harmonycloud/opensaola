@@ -47,7 +47,11 @@ func (s *Store[K, V]) Get(key K) (V, bool) {
 		var zero V
 		return zero, false
 	}
-	e := raw.(entry[V])
+	e, ok := raw.(entry[V])
+	if !ok {
+		var zero V
+		return zero, false
+	}
 	if !e.expiresAt.IsZero() && time.Now().After(e.expiresAt) {
 		s.data.Delete(key)
 		var zero V
@@ -81,11 +85,18 @@ func (s *Store[K, V]) Clear() {
 // Range iterates over all non-expired entries. The callback returns false to stop iteration.
 func (s *Store[K, V]) Range(fn func(key K, val V) bool) {
 	s.data.Range(func(k, v any) bool {
-		e := v.(entry[V])
+		key, ok := k.(K)
+		if !ok {
+			return true
+		}
+		e, ok := v.(entry[V])
+		if !ok {
+			return true
+		}
 		if !e.expiresAt.IsZero() && time.Now().After(e.expiresAt) {
 			s.data.Delete(k)
 			return true // skip expired, continue iteration
 		}
-		return fn(k.(K), e.value)
+		return fn(key, e.value)
 	})
 }

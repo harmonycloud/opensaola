@@ -121,7 +121,9 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 
 		var output []byte
 		output, err = io.ReadAll(resp.Body)

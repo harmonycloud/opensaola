@@ -401,10 +401,12 @@ func Compress(data []byte) ([]byte, int, error) {
 	}
 	num, err := w.Write(data)
 	if err != nil {
-		w.Close()
+		_ = w.Close()
 		return nil, 0, err
 	}
-	w.Close()
+	if err := w.Close(); err != nil {
+		return nil, 0, err
+	}
 	return buf.Bytes(), num, nil
 }
 

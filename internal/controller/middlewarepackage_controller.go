@@ -82,9 +82,13 @@ func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Re
 
 	log.FromContext(ctx).V(1).Info("start processing MiddlewarePackage", "name", req.Name)
 	if err := r.HandlePackage(ctx, req); err != nil {
+		if apiErrors.IsNotFound(err) {
+			log.FromContext(ctx).V(1).Info("MiddlewarePackage not found, skipping", "name", req.Name)
+			return ctrl.Result{}, nil
+		}
 		r.Recorder.Eventf(r.getPackageForEvent(ctx, req.Name), "Warning", "HandlePackageFailed", "Failed to handle package %s: %v", req.Name, err)
 		log.FromContext(ctx).Error(err, "failed to handle MiddlewarePackage", "name", req.Name)
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil

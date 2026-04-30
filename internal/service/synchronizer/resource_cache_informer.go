@@ -63,7 +63,7 @@ var globalManager *NsInformerManager
 // globalManagerMu guards init/stop of globalManager.
 var globalManagerMu sync.Mutex
 
-// StartNsInformerManager initialises the global NsInformerManager with the provided
+// StartNsInformerManager initializes the global NsInformerManager with the provided
 // rest.Config and starts its internal goroutines. It is idempotent: calling it
 // more than once returns the existing instance without error.
 func StartNsInformerManager(ctx context.Context, cfg *rest.Config) (*NsInformerManager, error) {
@@ -175,11 +175,14 @@ func (m *NsInformerManager) notifyNamespace(ns string) {
 
 // Register ensures informers for ns are running and increments the reference count
 // for midKey. If this is the first registration for ns, it starts 7 typed informers
-// and blocks until their caches are synced or ctx is cancelled.
+// and blocks until their caches are synced or ctx is canceled.
 func (m *NsInformerManager) Register(ctx context.Context, ns, midKey string) error {
 	// Fast path: entry already exists.
 	if raw, ok := m.entries.Load(ns); ok {
-		e := raw.(*nsEntry)
+		e, ok := raw.(*nsEntry)
+		if !ok {
+			return fmt.Errorf("NsInformerManager: entry %s has unexpected type %T", ns, raw)
+		}
 		if _, loaded := e.midKeys.LoadOrStore(midKey, struct{}{}); !loaded {
 			e.refCount.Add(1)
 			log.FromContext(ctx).Info("NsInformerManager: registered", "ns", ns, "midKey", midKey, "refCount", e.refCount.Load())
@@ -208,7 +211,10 @@ func (m *NsInformerManager) Register(ctx context.Context, ns, midKey string) err
 	actual, loaded := m.entries.LoadOrStore(ns, entry)
 	if loaded {
 		nsCancel() // discard our factory
-		e := actual.(*nsEntry)
+		e, ok := actual.(*nsEntry)
+		if !ok {
+			return fmt.Errorf("NsInformerManager: raced entry %s has unexpected type %T", ns, actual)
+		}
 		if _, alreadyIn := e.midKeys.LoadOrStore(midKey, struct{}{}); !alreadyIn {
 			e.refCount.Add(1)
 			log.FromContext(ctx).Info("NsInformerManager: registered (raced)", "ns", ns, "midKey", midKey, "refCount", e.refCount.Load())
@@ -232,7 +238,7 @@ func (m *NsInformerManager) Register(ctx context.Context, ns, midKey string) err
 	synced := factory.WaitForCacheSync(syncCtx.Done())
 	for resType, ok := range synced {
 		if !ok {
-			log.FromContext(ctx).Info("NsInformerManager: informer not synced (ctx cancelled or timed out)", "warning", true, "ns", ns, "resType", resType)
+			log.FromContext(ctx).Info("NsInformerManager: informer not synced (ctx canceled or timed out)", "warning", true, "ns", ns, "resType", resType)
 		}
 	}
 
@@ -248,7 +254,10 @@ func (m *NsInformerManager) Unregister(ns, midKey string) {
 	if !ok {
 		return
 	}
-	e := raw.(*nsEntry)
+	e, ok := raw.(*nsEntry)
+	if !ok {
+		return
+	}
 
 	if _, existed := e.midKeys.LoadAndDelete(midKey); !existed {
 		// midKey was never registered; nothing to do.
@@ -273,7 +282,10 @@ func (m *NsInformerManager) GetCache(ns string) NsResourceCache {
 	if !ok {
 		return nil
 	}
-	e := raw.(*nsEntry)
+	e, ok := raw.(*nsEntry)
+	if !ok {
+		return nil
+	}
 	if !e.synced.Load() {
 		return nil
 	}
@@ -283,8 +295,9 @@ func (m *NsInformerManager) GetCache(ns string) NsResourceCache {
 // stopAll cancels all namespace contexts and clears the entries map.
 func (m *NsInformerManager) stopAll() {
 	m.entries.Range(func(key, value any) bool {
-		e := value.(*nsEntry)
-		e.cancel()
+		if e, ok := value.(*nsEntry); ok {
+			e.cancel()
+		}
 		m.entries.Delete(key)
 		return true
 	})

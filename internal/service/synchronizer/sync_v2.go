@@ -535,7 +535,7 @@ func SyncCustomResourceV2(ctx context.Context, cli client.Client, cr *unstructur
 		return fmt.Errorf("NsInformerManager not started")
 	}
 
-	// 2. Register namespace informers; blocks until cache is synced or ctx cancelled.
+	// 2. Register namespace informers; blocks until cache is synced or ctx canceled.
 	if err := mgr.Register(ctx, ns, midKey); err != nil {
 		return fmt.Errorf("register informer for ns %s: %w", ns, err)
 	}
@@ -559,7 +559,10 @@ func SyncCustomResourceV2(ctx context.Context, cli client.Client, cr *unstructur
 		log.FromContext(ctx).Info("SyncCustomResourceV2 already running", "key", key)
 		return nil
 	}
-	stopChan = actual.(chan struct{})
+	stopChan, ok := actual.(chan struct{})
+	if !ok {
+		return fmt.Errorf("SyncCustomResourceV2 stop channel %s has unexpected type %T", key, actual)
+	}
 
 	defer func() {
 		SyncCustomResourceStopChanMap.Delete(key)
@@ -567,7 +570,7 @@ func SyncCustomResourceV2(ctx context.Context, cli client.Client, cr *unstructur
 		mgr.Unregister(ns, midKey)
 	}()
 
-	// 6. Block until context is cancelled or stop is signalled externally.
+	// 6. Block until context is canceled or stop is signaled externally.
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

@@ -96,7 +96,9 @@ func Check(ctx context.Context, cli client.Client, mp *v1.MiddlewarePackage) err
 func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret, act consts.HandleAction) error {
 	// 1. Get MiddlewarePackage
 	mp, err := k8s.GetMiddlewarePackage(ctx, cli, secret.Name)
-	if err != nil && !apiErrors.IsNotFound(err) {
+	if apiErrors.IsNotFound(err) {
+		mp = nil
+	} else if err != nil {
 		return err
 	}
 	switch act {

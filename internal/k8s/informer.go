@@ -144,7 +144,7 @@ func newInformerOptUnitImpl(ctx context.Context, cli client.Client, stopCh chan 
 
 	logger.Info("Start watching", "gvk", gvk.String(), "ns", ns)
 
-	// Ensure the informer exits when ctx is cancelled, preventing goroutine leaks during leader switch or manager stop.
+	// Ensure the informer exits when ctx is canceled, preventing goroutine leaks during leader switch or manager stop.
 	go func() {
 		select {
 		case <-ctx.Done():

@@ -295,7 +295,11 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 			// If the watcher does not exist, create a new one
 			log.FromContext(ctx).Info("create watcher", "gvk", cr.GroupVersionKind(), "namespace", cr.GetNamespace())
 			watcher.CustomResourceWatcherMap.Store(cw.GetKey(), cw)
-			go k8s.NewInformerOptUnit(ctx, cli, cw.StopChan, cw.GVK, cw.Namespace, watcher.NewResourceEventHandlerFuncs(ctx, cli, m.Name, m.Namespace))
+			go func() {
+				if informerErr := k8s.NewInformerOptUnit(ctx, cli, cw.StopChan, cw.GVK, cw.Namespace, watcher.NewResourceEventHandlerFuncs(ctx, cli, m.Name, m.Namespace)); informerErr != nil {
+					log.FromContext(ctx).Error(informerErr, "custom resource informer exited with error", "gvk", cw.GVK, "namespace", cw.Namespace)
+				}
+			}()
 		} else {
 			crList, err := k8s.ListCustomResources(ctx, cli, cr.GetNamespace(), cr.GroupVersionKind(), client.MatchingLabels{
 				v1.LabelComponent: cr.GetLabels()[v1.LabelComponent],
@@ -303,14 +307,21 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 			if err != nil {
 				return err
 			}
-			cw = cwCache.(*watcher.CustomResourceWatcher)
+			cw, ok = cwCache.(*watcher.CustomResourceWatcher)
+			if !ok {
+				return fmt.Errorf("custom resource watcher %s has unexpected type %T", cw.GetKey(), cwCache)
+			}
 			cw.Counter.Store(int32(len(crList)))
 
 			// If the watcher exists, re-query CR count and calibrate the counter
 			log.FromContext(ctx).Info("sync watcher counter", "gvk", cr.GroupVersionKind(), "namespace", cr.GetNamespace(), "counter", cw.Counter.Load())
 		}
 
-		go synchronizer.SyncCustomResourceV2(ctx, cli, cr, m)
+		go func() {
+			if syncErr := synchronizer.SyncCustomResourceV2(ctx, cli, cr, m); syncErr != nil {
+				log.FromContext(ctx).Error(syncErr, "custom resource sync exited with error", "gvk", cr.GroupVersionKind(), "namespace", cr.GetNamespace(), "name", cr.GetName())
+			}
+		}()
 	case consts.HandleActionDelete:
 		// Stop watching/syncing: after middleware deletion, CR delete events may not be received (or may be filtered by label).
 		// This is a fallback to close the in-process watcher & sync goroutines.
@@ -323,7 +334,10 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 		if resourceStop, ok := synchronizer.SyncCustomResourceStopChanMap.Load(stopKey); ok {
 			func() {
 				defer func() { _ = recover() }()
-				close(resourceStop.(chan struct{}))
+				stopChan, ok := resourceStop.(chan struct{})
+				if ok {
+					close(stopChan)
+				}
 			}()
 			synchronizer.SyncCustomResourceStopChanMap.Delete(stopKey)
 		}

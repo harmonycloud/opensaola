@@ -23,6 +23,7 @@ import (
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/k8s"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -60,6 +61,27 @@ func hardRequirementsMet(m *v1.Middleware) (bool, []string) {
 		}
 	}
 	return len(missing) == 0, missing
+}
+
+func middlewareConditionIsTrue(m *v1.Middleware, conditionType string) bool {
+	for _, condition := range m.Status.Conditions {
+		if condition.Type == conditionType {
+			return condition.Status == metav1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// CanSkipDeleteCleanup reports whether finalizer removal can proceed without
+// rendering/deleting owned resources. If neither extra resources nor the main
+// custom resource were ever successfully applied, there is nothing for the
+// Middleware delete handler to clean up.
+func CanSkipDeleteCleanup(m *v1.Middleware) bool {
+	if m == nil {
+		return true
+	}
+	return !middlewareConditionIsTrue(m, v1.CondTypeBuildExtraResource) &&
+		!middlewareConditionIsTrue(m, v1.CondTypeApplyCluster)
 }
 
 // ShouldUseLegacyDeleteFallback reports whether the middleware is missing any hard

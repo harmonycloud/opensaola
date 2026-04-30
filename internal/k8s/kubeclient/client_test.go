@@ -17,7 +17,6 @@ limitations under the License.
 package kubeclient
 
 import (
-	"os"
 	"sync"
 	"testing"
 )
@@ -28,11 +27,9 @@ import (
 func TestGetDynClient_NoKubeconfig(t *testing.T) {
 	// Ensure no kubeconfig is available by clearing relevant env vars.
 	// 通过清除相关环境变量确保没有可用的 kubeconfig。
-	origKubeconfig := os.Getenv("KUBECONFIG")
-	origHome := os.Getenv("HOME")
+	t.Setenv("KUBECONFIG", "/nonexistent/kubeconfig")
+	t.Setenv("HOME", "/nonexistent/home")
 	t.Cleanup(func() {
-		os.Setenv("KUBECONFIG", origKubeconfig)
-		os.Setenv("HOME", origHome)
 		// Reset sync.Once state for other tests by resetting the package vars.
 		// 重置 sync.Once 状态以便其他测试使用。
 		dynOnce = syncOnceNew()
@@ -42,9 +39,6 @@ func TestGetDynClient_NoKubeconfig(t *testing.T) {
 		cfg = nil
 		cfgErr = nil
 	})
-
-	os.Setenv("KUBECONFIG", "/nonexistent/kubeconfig")
-	os.Setenv("HOME", "/nonexistent/home")
 
 	client, err := GetDynClient()
 	if err == nil {
@@ -59,11 +53,9 @@ func TestGetDynClient_NoKubeconfig(t *testing.T) {
 // a non-nil error when no kubeconfig is available.
 // 验证在没有 kubeconfig 的情况下，GetDiscoveryClient 返回非 nil 的错误。
 func TestGetDiscoveryClient_NoKubeconfig(t *testing.T) {
-	origKubeconfig := os.Getenv("KUBECONFIG")
-	origHome := os.Getenv("HOME")
+	t.Setenv("KUBECONFIG", "/nonexistent/kubeconfig")
+	t.Setenv("HOME", "/nonexistent/home")
 	t.Cleanup(func() {
-		os.Setenv("KUBECONFIG", origKubeconfig)
-		os.Setenv("HOME", origHome)
 		dcOnce = syncOnceNew()
 		dc = nil
 		dcErr = nil
@@ -71,9 +63,6 @@ func TestGetDiscoveryClient_NoKubeconfig(t *testing.T) {
 		cfg = nil
 		cfgErr = nil
 	})
-
-	os.Setenv("KUBECONFIG", "/nonexistent/kubeconfig")
-	os.Setenv("HOME", "/nonexistent/home")
 
 	client, err := GetDiscoveryClient()
 	if err == nil {
@@ -88,11 +77,9 @@ func TestGetDiscoveryClient_NoKubeconfig(t *testing.T) {
 // error when no kubeconfig is available.
 // 验证在没有 kubeconfig 的情况下，GetClientSet 返回非 nil 的错误。
 func TestGetClientSet_NoKubeconfig(t *testing.T) {
-	origKubeconfig := os.Getenv("KUBECONFIG")
-	origHome := os.Getenv("HOME")
+	t.Setenv("KUBECONFIG", "/nonexistent/kubeconfig")
+	t.Setenv("HOME", "/nonexistent/home")
 	t.Cleanup(func() {
-		os.Setenv("KUBECONFIG", origKubeconfig)
-		os.Setenv("HOME", origHome)
 		csOnce = syncOnceNew()
 		cs = nil
 		csErr = nil
@@ -100,9 +87,6 @@ func TestGetClientSet_NoKubeconfig(t *testing.T) {
 		cfg = nil
 		cfgErr = nil
 	})
-
-	os.Setenv("KUBECONFIG", "/nonexistent/kubeconfig")
-	os.Setenv("HOME", "/nonexistent/home")
 
 	clientset, err := GetClientSet()
 	if err == nil {

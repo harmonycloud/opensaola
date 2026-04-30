@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -31,7 +32,7 @@ import (
 )
 
 func reconcileMiddleware(name, ns string) (reconcile.Result, error) {
-	r := &MiddlewareReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+	r := &MiddlewareReconciler{Client: k8sClient, Scheme: k8sClient.Scheme(), Recorder: record.NewFakeRecorder(16)}
 	return r.Reconcile(ctx, reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
 	})
@@ -58,9 +59,37 @@ var _ = Describe("Finalizer Envtest", func() {
 
 	It("Envtest_Finalizer_Middleware_Deletion", func() {
 		name := "mid-fin-del-" + randomSuffix()
+		baselineName := "mb-fin-del-" + randomSuffix()
+		packageName := "pkg-fin-del"
+		mb := &v1.MiddlewareBaseline{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: baselineName,
+				Labels: map[string]string{
+					v1.LabelPackageName: packageName,
+				},
+			},
+			Spec: v1.MiddlewareBaselineSpec{
+				GVK: v1.GVK{
+					Group:   "apps",
+					Version: "v1",
+					Kind:    "Deployment",
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, mb)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, mb)
+		})
+
 		mid := &v1.Middleware{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
-			Spec:       v1.MiddlewareSpec{Baseline: "test"},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Labels: map[string]string{
+					v1.LabelPackageName: packageName,
+				},
+			},
+			Spec: v1.MiddlewareSpec{Baseline: baselineName},
 		}
 		// Pre-set finalizer directly to avoid depending on the first reconcile writing back status/Checked condition which triggers the full publish flow.
 		// This test only verifies that the deletion path is re-entrant and can remove the finalizer; it does not verify the publish path.

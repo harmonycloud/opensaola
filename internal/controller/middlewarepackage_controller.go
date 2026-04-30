@@ -75,7 +75,7 @@ func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		if err := r.HandleSecret(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: req.Namespace, Name: secretName}}); err != nil {
 			r.Recorder.Eventf(r.getPackageForEvent(ctx, secretName), "Warning", "HandleSecretFailed", "Failed to handle secret %s: %v", secretName, err)
 			log.FromContext(ctx).Error(err, "failed to handle Secret", "secretName", secretName)
-			return ctrl.Result{}, client.IgnoreNotFound(err)
+			return middlewarePackageSecretErrorResult(err)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -88,6 +88,16 @@ func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	}
 
 	return ctrl.Result{}, nil
+}
+
+func middlewarePackageSecretErrorResult(err error) (ctrl.Result, error) {
+	if err == nil {
+		return ctrl.Result{}, nil
+	}
+	if apiErrors.IsNotFound(err) {
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
+	return ctrl.Result{}, err
 }
 
 func (r *MiddlewarePackageReconciler) HandlePackage(ctx context.Context, req ctrl.Request) error {

@@ -79,7 +79,7 @@ helm upgrade --install opensaola ./chart/opensaola \
   --timeout 5m
 ```
 
-From a source checkout, the Makefile wrapper uses the current branch name as the image tag when available:
+From a source checkout, the Makefile wrapper defaults to the `dev` image tag published by GitHub Actions. Override `HELM_IMAGE_TAG` when testing a release or a specific SHA image:
 
 ```bash
 make helm-deploy
@@ -143,7 +143,7 @@ resources:
 image:
   registry: "ghcr.io"
   repository: "harmonycloud/opensaola"
-  tag: ""                              # empty defaults to Chart appVersion
+  tag: ""                              # empty defaults to Chart appVersion (`dev` on the dev branch)
 ```
 
 See [`chart/opensaola/values.yaml`](chart/opensaola/values.yaml) for all available options.

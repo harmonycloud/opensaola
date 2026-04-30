@@ -1,5 +1,5 @@
 apiVersion: v2
-appVersion: v1.5.0
+appVersion: dev
 description: "A Kubernetes operator for middleware lifecycle management"
 kubeVersion: ">=1.21.0-0"
 home: "https://github.com/harmonycloud/opensaola"
@@ -15,7 +15,7 @@ name: opensaola
 sources:
 - "https://github.com/harmonycloud/opensaola"
 type: application
-version: 1.5.0
+version: 0.1.3-dev.0
 annotations:
   artifacthub.io/license: Apache-2.0
   artifacthub.io/links: |

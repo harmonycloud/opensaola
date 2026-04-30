@@ -14,6 +14,8 @@ helm upgrade --install opensaola ./chart/opensaola \
   --timeout 5m
 ```
 
+The chart on the `dev` branch defaults to `ghcr.io/harmonycloud/opensaola:dev`, which is the image tag produced by the GitHub Docker workflow for the `dev` branch.
+
 Or use the Makefile wrapper:
 
 ```bash
@@ -26,7 +28,7 @@ Tagged releases publish this chart to GHCR:
 
 ```bash
 helm upgrade --install opensaola oci://ghcr.io/harmonycloud/charts/opensaola \
-  --version 1.5.0 \
+  --version <release-version> \
   --namespace opensaola-system \
   --create-namespace \
   --wait \
@@ -44,6 +46,12 @@ helm upgrade --install opensaola ./chart/opensaola \
   --wait \
   --timeout 5m
 ```
+
+## RBAC Scope
+
+OpenSaola can render and reconcile Kubernetes resources from middleware package templates, including custom resources from package-provided CRDs. The default Helm RBAC therefore includes dynamic resource permissions that match `config/rbac/role.yaml`, so a fresh checkout can be installed or upgraded directly with Helm.
+
+Package catalog Secrets are watched in `config.dataNamespace`. The chart grants Secret metadata patch permissions there so package install/uninstall state can be persisted.
 
 ## Verify
 

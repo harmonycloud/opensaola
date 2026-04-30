@@ -26,7 +26,7 @@ HELM_CHART ?= chart/opensaola
 HELM_TIMEOUT ?= 5m
 HELM_IMAGE_REGISTRY ?= ghcr.io
 HELM_IMAGE_REPOSITORY ?= harmonycloud/opensaola
-HELM_IMAGE_TAG ?= $(shell branch=$$(git branch --show-current 2>/dev/null); if [ -n "$$branch" ]; then printf '%s' "$$branch" | tr '/' '-'; fi)
+HELM_IMAGE_TAG ?= dev
 
 .PHONY: all
 all: build
@@ -89,7 +89,7 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet ## Run tests.
-	go test $$(go list ./... | grep -v /e2e | grep -v /internal/controller) -coverprofile cover.out
+	go test $$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v '^$$' | grep -v /e2e | grep -v /internal/controller) -coverprofile cover.out
 
 .PHONY: coverage
 coverage: test ## Open test coverage report in browser.

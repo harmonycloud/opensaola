@@ -6,7 +6,7 @@ image:
   registry: "ghcr.io"
   # -- Image repository
   repository: harmonycloud/opensaola
-  # -- Image tag (defaults to Chart appVersion)
+  # -- Image tag. Empty defaults to Chart appVersion (`dev` on the dev branch; release workflows package `v*` tags with the matching appVersion).
   tag: ""
   # -- Image pull policy
   pullPolicy: IfNotPresent
@@ -24,9 +24,9 @@ kubectl:
   # -- kubectl image for CRD install job
   image:
     # -- Kubectl image registry. Kept separate from image.registry so operator image overrides do not affect the hook job.
-    registry: "docker.io"
-    repository: bitnami/kubectl
-    tag: "1.30"
+    registry: "registry.k8s.io"
+    repository: kubectl
+    tag: "v1.30.14"
     pullPolicy: IfNotPresent
   # -- Optional labels for the CRD install Job pod
   labels: {}

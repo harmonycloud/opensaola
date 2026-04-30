@@ -1,8 +1,8 @@
 ###############################################################################
 # ClusterRole: cluster-wide resources the operator must reconcile.
-# NOTE: Secrets access is intentionally NOT here — see the namespace-scoped
-# Role below. This shrinks the secret blast radius from every namespace in
-# the cluster to just spec.config.dataNamespace.
+# NOTE: Package templates can require wildcard cluster access below. Package
+# catalog Secret metadata updates rely on the namespace-scoped Role later so
+# install/uninstall state can be persisted in spec.config.dataNamespace.
 ###############################################################################
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -14,10 +14,60 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
+  - serviceaccounts
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
   - events
   verbs:
   - create
   - patch
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+- apiGroups:
+  - apiextensions.k8s.io
+  resources:
+  - customresourcedefinitions
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
+  - replicasets
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - apps
   resources:
@@ -91,6 +141,38 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterrolebindings
+  - clusterroles
+  - rolebindings
+  - roles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+{{/*
+MiddlewareConfiguration package templates can render arbitrary Kubernetes
+resources and CRD instances. Keep this in sync with
+internal/controller/rbac_aggregated.go and config/rbac/role.yaml.
+*/}}
+- apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -172,6 +254,7 @@ rules:
   verbs:
   - get
   - list
+  - patch
   - watch
 - apiGroups:
   - ""

@@ -109,10 +109,10 @@ spec:
         - name: kubectl
           image: "{{ include "opensaola.kubectlImage" . }}"
           imagePullPolicy: {{ .Values.kubectl.image.pullPolicy | default .Values.image.pullPolicy }}
-          command:
-            - /bin/sh
-            - -c
-            - kubectl apply -f /tmp/
+          args:
+            - apply
+            - -f
+            - /tmp/
           {{- with .Values.kubectl.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

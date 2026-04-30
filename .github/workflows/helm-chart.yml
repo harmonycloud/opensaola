@@ -16,16 +16,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
-      - name: Verify release tag matches chart version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          chart_version="$(helm show chart chart/opensaola | awk -F': ' '/^version:/ {print $2}')"
-          app_version="$(helm show chart chart/opensaola | awk -F': ' '/^appVersion:/ {print $2}')"
-          test "$chart_version" = "$tag"
-          test "$app_version" = "v$tag"
       - name: Check chart
-        run: make helm-check
+        run: make helm-lint helm-template verify-chart-crds
+      - name: Package chart
+        run: |
+          mkdir -p dist/charts
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+            helm package chart/opensaola \
+              --destination dist/charts \
+              --version "$tag" \
+              --app-version "${GITHUB_REF_NAME}"
+          else
+            helm package chart/opensaola --destination dist/charts
+          fi
       - name: Resolve OCI registry
         id: oci
         run: |

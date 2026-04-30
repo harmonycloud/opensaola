@@ -79,7 +79,7 @@ helm upgrade --install opensaola ./chart/opensaola \
   --timeout 5m
 ```
 
-从源码目录部署时，也可以直接使用 Makefile 包装命令；它会在可用时使用当前分支名作为镜像 tag：
+从源码目录部署时，也可以直接使用 Makefile 包装命令；默认使用 GitHub Actions 为 `dev` 分支发布的 `dev` 镜像 tag。测试正式版本或指定 SHA 镜像时可覆盖 `HELM_IMAGE_TAG`：
 
 ```bash
 make helm-deploy
@@ -143,7 +143,7 @@ resources:
 image:
   registry: "ghcr.io"
   repository: "harmonycloud/opensaola"
-  tag: ""                              # 留空时默认使用 Chart appVersion
+  tag: ""                              # 留空时默认使用 Chart appVersion（dev 分支为 `dev`）
 ```
 
 完整配置项参见 [`chart/opensaola/values.yaml`](chart/opensaola/values.yaml)。

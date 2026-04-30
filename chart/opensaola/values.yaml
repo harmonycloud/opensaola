@@ -1,81 +1,81 @@
-# OpenSaola Helm Chart Values
+# OpenSaola Helm Chart Values / OpenSaola Helm Chart 配置项
 
-# -- Container image configuration
+# -- Container image configuration / 容器镜像配置
 image:
-  # -- Image registry
+  # -- Image registry / 镜像仓库地址
   registry: "ghcr.io"
-  # -- Image repository
+  # -- Image repository / 镜像仓库
   repository: harmonycloud/opensaola
-  # -- Image tag. Empty defaults to Chart appVersion (`dev` on the dev branch; release workflows package `v*` tags with the matching appVersion).
+  # -- Image tag. Empty defaults to Chart appVersion (`dev` on the dev branch; release workflows package `v*` tags with the matching appVersion). / 镜像标签。为空时默认使用 Helm 包 appVersion（dev 分支为 `dev`；发行工作流会用匹配的 appVersion 打包 `v*` 标签）。
   tag: ""
-  # -- Image pull policy
+  # -- Image pull policy / 镜像拉取策略
   pullPolicy: IfNotPresent
 
-# -- Image pull secrets for private registries
+# -- Image pull secrets for private registries / 私有镜像仓库使用的镜像拉取凭据
 imagePullSecrets: []
 
-# -- Number of operator replicas
+# -- Number of operator replicas / 控制器副本数
 replicas: 1
 
-# -- CRD installation via kubectl job
+# -- CRD installation via kubectl job / 通过 kubectl Job 安装 CRD
 kubectl:
-  # -- Whether to install/upgrade CRDs via pre-install hook
+  # -- Whether to install/upgrade CRDs via pre-install hook / 是否通过预安装钩子安装或升级 CRD
   installCRDs: true
-  # -- kubectl image for CRD install job
+  # -- kubectl image for CRD install job / CRD 安装 Job 使用的 kubectl 镜像
   image:
-    # -- Kubectl image registry. Kept separate from image.registry so operator image overrides do not affect the hook job.
+    # -- Kubectl image registry. Kept separate from image.registry so operator image overrides do not affect the hook job. / kubectl 镜像仓库地址。与 image.registry 分开配置，避免控制器镜像覆盖影响钩子 Job。
     registry: "registry.k8s.io"
     repository: kubectl
     tag: "v1.30.14"
     pullPolicy: IfNotPresent
-  # -- Optional labels for the CRD install Job pod
+  # -- Optional labels for the CRD install Job pod / CRD 安装 Job Pod 的可选标签
   labels: {}
-  # -- Optional annotations for the CRD install Job pod
+  # -- Optional annotations for the CRD install Job pod / CRD 安装 Job Pod 的可选注解
   annotations: {}
-  # -- Pod resource requirements for the CRD install Job
+  # -- Pod resource requirements for the CRD install Job / CRD 安装 Job Pod 的资源需求
   resources: {}
-  # -- Node selector for the CRD install Job
+  # -- Node selector for the CRD install Job / CRD 安装 Job 的节点选择器
   nodeSelector: {}
-  # -- Tolerations for the CRD install Job
+  # -- Tolerations for the CRD install Job / CRD 安装 Job 的污点容忍
   tolerations: []
-  # -- Affinity rules for the CRD install Job
+  # -- Affinity rules for the CRD install Job / CRD 安装 Job 的亲和性规则
   affinity: {}
 
-# -- Operator configuration
+# -- Operator configuration / 控制器配置
 config:
-  # -- Namespace where middleware package Secrets are stored. Empty defaults to the Helm release namespace.
+  # -- Namespace where middleware package Secrets are stored. Empty defaults to the Helm release namespace. / 存放中间件包 Secret 的命名空间。为空时默认使用 Helm 发布实例命名空间。
   dataNamespace: ""
-  # -- Create config.dataNamespace when it is set and differs from the Helm release namespace.
+  # -- Create config.dataNamespace when it is set and differs from the Helm release namespace. / 当 config.dataNamespace 已设置且不同于 Helm 发布实例命名空间时，是否创建该命名空间。
   createDataNamespace: false
-  # -- Log level (0=debug, 1=info, 2=warn, 3=error)
+  # -- Log level (0=debug, 1=info, 2=warn, 3=error) / 日志级别（0=debug，1=info，2=warn，3=error）
   logLevel: 0
-  # -- Log format: "console" (human-readable) or "json" (structured)
+  # -- Log format: "console" (human-readable) or "json" (structured) / 日志格式："console"（便于阅读）或 "json"（结构化）
   logFormat: "console"
-  # -- Log file path (empty disables file logging)
+  # -- Log file path (empty disables file logging) / 日志文件路径（为空时禁用文件日志）
   logFilePath: ""
-  # -- Cache cleanup interval in seconds
+  # -- Cache cleanup interval in seconds / 缓存清理间隔，单位为秒
   cacheCleanupInterval: 600
-  # -- Labels configuration
+  # -- Labels configuration / 标签配置
   labels:
     component: "middleware.cn/component"
-  # -- Annotations configuration
+  # -- Annotations configuration / 注解配置
   annotations:
     component: "middleware.cn/component"
-  # -- pprof profiling server (for development/debugging only, NOT for production)
+  # -- pprof profiling server (for development/debugging only, NOT for production) / pprof 性能分析服务（仅用于开发和调试，不建议在生产环境启用）
   pprof:
     enabled: false
     port: "6060"
 
-# -- Service account configuration for the operator
+# -- Service account configuration for the operator / 控制器使用的 ServiceAccount 配置
 serviceAccount:
-  # -- Create a service account for the operator
+  # -- Create a service account for the operator / 是否为控制器创建 ServiceAccount
   create: true
-  # -- Service account name. Empty defaults to the chart fullname.
+  # -- Service account name. Empty defaults to the chart fullname. / ServiceAccount 名称。为空时默认使用 Helm 包完整名称。
   name: ""
-  # -- Extra annotations for the service account
+  # -- Extra annotations for the service account / ServiceAccount 的额外注解
   annotations: {}
 
-# -- Pod resource requirements
+# -- Pod resource requirements / Pod 资源需求
 resources:
   requests:
     cpu: 100m
@@ -84,30 +84,30 @@ resources:
     cpu: 500m
     memory: 512Mi
 
-# -- Node selector for pod scheduling
+# -- Node selector for pod scheduling / Pod 调度使用的节点选择器
 nodeSelector: {}
 
-# -- Tolerations for pod scheduling
+# -- Tolerations for pod scheduling / Pod 调度使用的污点容忍
 tolerations: []
 
-# -- Affinity rules for pod scheduling
+# -- Affinity rules for pod scheduling / Pod 调度使用的亲和性规则
 affinity: {}
 
-# -- Extra labels for the operator pod
+# -- Extra labels for the operator pod / 控制器 Pod 的额外标签
 podLabels: {}
 
-# -- Extra annotations for the operator pod
+# -- Extra annotations for the operator pod / 控制器 Pod 的额外注解
 podAnnotations: {}
 
-# -- PodDisruptionBudget (only effective when replicas > 1)
+# -- PodDisruptionBudget (only effective when replicas > 1) / PodDisruptionBudget（仅当 replicas > 1 时生效）
 pdb:
-  # -- Enable PDB creation
+  # -- Enable PDB creation / 是否创建 PDB
   enabled: true
-  # -- Minimum available pods during disruption
+  # -- Minimum available pods during disruption / 扰动期间最少可用 Pod 数
   minAvailable: 1
 
-# -- Termination grace period in seconds
+# -- Termination grace period in seconds / 终止宽限时间，单位为秒
 terminationGracePeriodSeconds: 60
 
-# -- Time zone passed to the operator container
+# -- Time zone passed to the operator container / 传入控制器容器的时区
 timezone: "UTC"

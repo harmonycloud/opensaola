@@ -1,15 +1,23 @@
 apiVersion: v2
 appVersion: v1.5.0
 description: "A Kubernetes operator for middleware lifecycle management"
-home: "https://github.com/OpenSaola/opensaola"
+kubeVersion: ">=1.21.0-0"
+home: "https://github.com/harmonycloud/opensaola"
 keywords:
 - operator
+- middleware
+- kubernetes
 maintainers:
 - email: CandidXD@outlook.com
   name: CandidXD
   url: https://github.com/CandidXD
 name: opensaola
 sources:
-- "https://github.com/OpenSaola/opensaola"
+- "https://github.com/harmonycloud/opensaola"
 type: application
 version: 1.5.0
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/links: |
+    - name: source
+      url: https://github.com/harmonycloud/opensaola

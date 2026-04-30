@@ -46,7 +46,7 @@ kubectl get deployment opensaola -n <operator-namespace> -o jsonpath='{.spec.tem
 
 ### 3. Review the CHANGELOG for breaking changes
 
-Check the project's release notes at [https://github.com/OpenSaola/opensaola/releases](https://github.com/OpenSaola/opensaola/releases) for:
+Check the project's release notes at [https://github.com/harmonycloud/opensaola/releases](https://github.com/harmonycloud/opensaola/releases) for:
 - CRD field additions, removals, or renames
 - Changes to label or annotation conventions
 - Changes to the reconcile flow or state machine behavior
@@ -79,17 +79,17 @@ kubectl get mid -A -o jsonpath='{range .items[?(@.status.state!="Available")]}{.
 
 ## Upgrading the OpenSaola Operator
 
-### Step 1: Update the Helm repository
+### Step 1: Pull the latest source branch
 
 ```bash
-helm repo update
+git pull --ff-only
 ```
 
 ### Step 2: Review new values
 
 ```bash
-# View the default values for the new version
-helm show values opensaola/opensaola --version <new-version>
+# View the default values from the checked-out source
+helm show values ./chart/opensaola
 
 # Compare with your current values
 helm get values opensaola -n <operator-namespace> > current-values.yaml
@@ -99,16 +99,23 @@ helm get values opensaola -n <operator-namespace> > current-values.yaml
 
 ```bash
 # Upgrade with your existing custom values
-helm upgrade opensaola opensaola/opensaola \
-  -n <operator-namespace> \
+helm upgrade --install opensaola ./chart/opensaola \
+  --namespace <operator-namespace> \
+  --create-namespace \
   -f current-values.yaml \
-  --version <new-version>
+  --wait \
+  --timeout 5m
 
 # Or upgrade with specific value overrides
-helm upgrade opensaola opensaola/opensaola \
-  -n <operator-namespace> \
+helm upgrade --install opensaola ./chart/opensaola \
+  --namespace <operator-namespace> \
+  --create-namespace \
   --set image.tag=<new-tag> \
-  --version <new-version>
+  --wait \
+  --timeout 5m
+
+# From a source checkout, this wrapper uses the current branch name as the image tag when available
+make helm-deploy
 ```
 
 ### Step 4: Verify CRD updates

@@ -1,8 +1,8 @@
-{{- if  .Values.kubectl.installCRDs}}
+{{- if .Values.kubectl.installCRDs }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: {{ include "opensaola.fullname" . }}-install-crds
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "install-crds") }}
   labels:
     {{- include "opensaola.commonLabels" . | nindent 4 }}
   annotations:
@@ -13,7 +13,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "opensaola.fullname" . }}-install-crds
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "install-crds") }}
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
@@ -25,16 +25,16 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "opensaola.fullname" . }}-install-crds
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "install-crds") }}
 subjects:
 - kind: ServiceAccount
-  name: {{ include "opensaola.fullname" . }}-install-crds
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "install-crds") }}
   namespace: {{ .Release.Namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "opensaola.fullname" . }}-install-crds
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "install-crds") }}
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
@@ -58,7 +58,7 @@ rules:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "opensaola.fullname" . }}-install-crds
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "install-crds") }}
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
@@ -74,7 +74,7 @@ data:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "opensaola.fullname" . }}-install-crds
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "install-crds") }}
   namespace: {{ .Release.Namespace }}
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade,pre-rollback
@@ -88,7 +88,7 @@ spec:
   backoffLimit: 3
   template:
     metadata:
-      name: {{ include "opensaola.fullname" . }}-install-crds
+      name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "install-crds") }}
       {{- with .Values.kubectl.labels }}
       labels:
         {{- toYaml . | nindent 8 }}
@@ -104,11 +104,11 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     {{- end }}
-      serviceAccountName: {{ include "opensaola.fullname" . }}-install-crds
+      serviceAccountName: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "install-crds") }}
       containers:
         - name: kubectl
-          image: "{{ if .Values.image.registry }}{{ .Values.image.registry }}/{{ end }}{{ .Values.kubectl.image.repository }}:{{ .Values.kubectl.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: "{{ include "opensaola.kubectlImage" . }}"
+          imagePullPolicy: {{ .Values.kubectl.image.pullPolicy | default .Values.image.pullPolicy }}
           command:
             - /bin/sh
             - -c
@@ -123,7 +123,7 @@ spec:
       volumes:
         - name: crds
           configMap:
-            name: {{ include "opensaola.fullname" . }}-install-crds
+            name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "install-crds") }}
       restartPolicy: OnFailure
       {{- with .Values.kubectl.nodeSelector }}
       nodeSelector:
@@ -138,4 +138,3 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
 {{- end }}
-

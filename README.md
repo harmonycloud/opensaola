@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/)
-[![CI](https://img.shields.io/github/actions/workflow/status/OpenSaola/opensaola/ci.yml?branch=main&label=CI)](https://github.com/OpenSaola/opensaola/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/harmonycloud/opensaola/ci.yml?branch=dev&label=CI)](https://github.com/harmonycloud/opensaola/actions)
 
 **English** | [中文](README_zh.md)
 
@@ -72,9 +72,17 @@ Each resource is driven through a state machine (`Checking → Creating → Runn
 ### Install
 
 ```bash
-helm install opensaola chart/opensaola \
+helm upgrade --install opensaola ./chart/opensaola \
   --namespace opensaola-system \
-  --create-namespace
+  --create-namespace \
+  --wait \
+  --timeout 5m
+```
+
+From a source checkout, the Makefile wrapper uses the current branch name as the image tag when available:
+
+```bash
+make helm-deploy
 ```
 
 ### Verify
@@ -117,7 +125,8 @@ OpenSaola is configured via Helm values. Key settings:
 ```yaml
 # Operator config
 config:
-  dataNamespace: "middleware-operator"  # where package Secrets live
+  dataNamespace: ""                     # empty defaults to the Helm release namespace
+  createDataNamespace: false            # set true when using a separate data namespace
   logLevel: 0                          # 0=debug, 1=info, 2=warn, 3=error
   logFormat: "console"                 # "console" or "json"
 
@@ -130,9 +139,11 @@ resources:
     cpu: 500m
     memory: 512Mi
 
-# Monitoring
-serviceMonitor:
-  enabled: false    # enable for Prometheus auto-discovery
+# Image
+image:
+  registry: "ghcr.io"
+  repository: "harmonycloud/opensaola"
+  tag: ""                              # empty defaults to Chart appVersion
 ```
 
 See [`chart/opensaola/values.yaml`](chart/opensaola/values.yaml) for all available options.

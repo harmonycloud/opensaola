@@ -4,7 +4,7 @@ metadata:
   name: {{ include "opensaola.fullname" . }}
 data:
   config.yaml: |
-    data_namespace: {{ .Values.config.dataNamespace | quote }}
+    data_namespace: {{ include "opensaola.dataNamespace" . | quote }}
     log:
       level: {{ .Values.config.logLevel }}
       format: {{ .Values.config.logFormat | quote }}

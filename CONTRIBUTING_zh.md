@@ -17,7 +17,7 @@
 ### 克隆和构建
 
 ```bash
-git clone https://github.com/OpenSaola/opensaola.git
+git clone https://github.com/harmonycloud/opensaola.git
 cd opensaola
 make build
 ```

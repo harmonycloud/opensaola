@@ -9,5 +9,19 @@ OpenSaola has been installed successfully!
 3. View operator logs:
    kubectl logs -n {{ .Release.Namespace }} -l app.kubernetes.io/name={{ include "opensaola.name" . }} -f
 
-4. To deploy middleware, you need a middleware package first.
-   See: https://github.com/OpenSaola/opensaola#how-it-works
+4. Middleware package Secrets are read from:
+   {{ include "opensaola.dataNamespace" . }}
+
+{{- if and .Values.config.dataNamespace (ne (include "opensaola.dataNamespace" .) .Release.Namespace) (not .Values.config.createDataNamespace) }}
+   NOTE: This namespace must already exist because config.createDataNamespace=false.
+{{- end }}
+
+5. Upgrade this release from a source checkout:
+   helm upgrade --install {{ .Release.Name }} ./chart/opensaola \
+     --namespace {{ .Release.Namespace }} \
+     --create-namespace \
+     --wait \
+     --timeout 5m
+
+6. To deploy middleware, you need a middleware package first.
+   See: https://github.com/harmonycloud/opensaola#how-it-works

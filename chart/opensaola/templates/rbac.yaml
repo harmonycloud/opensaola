@@ -100,7 +100,7 @@ metadata:
     {{- include "opensaola.labels" . | nindent 4 }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "opensaola.fullname" . }}
+    name: {{ include "opensaola.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
@@ -116,7 +116,7 @@ roleRef:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "opensaola.fullname" . }}-leader-election
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "leader-election") }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "opensaola.labels" . | nindent 4 }}
@@ -137,30 +137,31 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "opensaola.fullname" . }}-leader-election
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "leader-election") }}
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "opensaola.labels" . | nindent 4 }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "opensaola.fullname" . }}
+    name: {{ include "opensaola.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: Role
-  name: {{ include "opensaola.fullname" . }}-leader-election
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "leader-election") }}
   apiGroup: rbac.authorization.k8s.io
 ---
 ###############################################################################
 # Role (data namespace): MiddlewarePackage Secret reconciliation.
 # Operator only reads and manages Secrets in .Values.config.dataNamespace,
 # never cluster-wide. If dataNamespace != Release.Namespace the operator is
-# installed in, that namespace must already exist before helm install.
+# installed in and config.createDataNamespace=false, that namespace must
+# already exist before helm install.
 ###############################################################################
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "opensaola.fullname" . }}-packages
-  namespace: {{ .Values.config.dataNamespace }}
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "packages") }}
+  namespace: {{ include "opensaola.dataNamespace" . }}
   labels:
     {{- include "opensaola.labels" . | nindent 4 }}
 rules:
@@ -190,15 +191,15 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "opensaola.fullname" . }}-packages
-  namespace: {{ .Values.config.dataNamespace }}
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "packages") }}
+  namespace: {{ include "opensaola.dataNamespace" . }}
   labels:
     {{- include "opensaola.labels" . | nindent 4 }}
 subjects:
   - kind: ServiceAccount
-    name: {{ include "opensaola.fullname" . }}
+    name: {{ include "opensaola.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 roleRef:
   kind: Role
-  name: {{ include "opensaola.fullname" . }}-packages
+  name: {{ include "opensaola.suffixedName" (dict "root" . "suffix" "packages") }}
   apiGroup: rbac.authorization.k8s.io

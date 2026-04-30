@@ -20,6 +20,13 @@ SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
 KIND_CLUSTER ?= opensaola-e2e
+HELM_RELEASE ?= opensaola
+HELM_NAMESPACE ?= opensaola-system
+HELM_CHART ?= chart/opensaola
+HELM_TIMEOUT ?= 5m
+HELM_IMAGE_REGISTRY ?= ghcr.io
+HELM_IMAGE_REPOSITORY ?= harmonycloud/opensaola
+HELM_IMAGE_TAG ?= $(shell branch=$$(git branch --show-current 2>/dev/null); if [ -n "$$branch" ]; then printf '%s' "$$branch" | tr '/' '-'; fi)
 
 .PHONY: all
 all: build
@@ -55,9 +62,10 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 generate-all: manifests generate sync-chart-crds ## Generate code, manifests, and sync CRDs to Helm chart.
 
 .PHONY: sync-chart-crds
-sync-chart-crds: ## Copy generated CRDs from config/crd/bases/ to chart/opensaola/crds/.
+sync-chart-crds: ## Copy generated CRDs from config/crd/bases/ to chart/opensaola/files/crds/.
 	@echo "Syncing CRDs to Helm chart..."
-	@cp config/crd/bases/*.yaml chart/opensaola/crds/
+	@mkdir -p chart/opensaola/files/crds
+	@cp config/crd/bases/*.yaml chart/opensaola/files/crds/
 	@echo "Done. $$(ls config/crd/bases/*.yaml | wc -l | tr -d ' ') CRDs synced."
 
 .PHONY: fmt
@@ -222,6 +230,49 @@ ifndef ignore-not-found
   ignore-not-found = false
 endif
 
+.PHONY: helm-lint
+helm-lint: ## Lint the OpenSaola Helm chart.
+	$(HELM) lint $(HELM_CHART)
+
+.PHONY: helm-template
+helm-template: ## Render the OpenSaola Helm chart locally.
+	$(HELM) template $(HELM_RELEASE) $(HELM_CHART) --namespace $(HELM_NAMESPACE) --include-crds >/tmp/opensaola-helm-template.yaml
+	@echo "Rendered $(HELM_CHART) to /tmp/opensaola-helm-template.yaml"
+
+.PHONY: helm-package
+helm-package: ## Package the OpenSaola Helm chart into dist/charts/.
+	@mkdir -p dist/charts
+	$(HELM) package $(HELM_CHART) --destination dist/charts
+
+.PHONY: verify-chart-crds
+verify-chart-crds: ## Verify Helm chart CRDs match generated CRDs.
+	@diff -qr config/crd/bases chart/opensaola/files/crds
+
+.PHONY: helm-check
+helm-check: helm-lint helm-template helm-package verify-chart-crds ## Run all Helm chart checks.
+
+.PHONY: helm-deploy
+helm-deploy: helm-upgrade ## Install or upgrade OpenSaola from the local Helm chart.
+
+.PHONY: helm-upgrade
+helm-upgrade: ## Install or upgrade OpenSaola from the local Helm chart.
+	@tag_args=(); \
+	if [ -n "$(HELM_IMAGE_TAG)" ] && [ "$(HELM_IMAGE_TAG)" != "HEAD" ]; then \
+		tag_args+=(--set image.tag="$(HELM_IMAGE_TAG)"); \
+	fi; \
+	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
+		--namespace $(HELM_NAMESPACE) \
+		--create-namespace \
+		--wait \
+		--timeout $(HELM_TIMEOUT) \
+		--set image.registry="$(HELM_IMAGE_REGISTRY)" \
+		--set image.repository="$(HELM_IMAGE_REPOSITORY)" \
+		"$${tag_args[@]}"
+
+.PHONY: helm-uninstall
+helm-uninstall: ## Uninstall the OpenSaola Helm release.
+	$(HELM) uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE) --ignore-not-found
+
 .PHONY: install
 install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
@@ -266,6 +317,7 @@ $(LOCALBIN):
 ## Tool Binaries
 KUBECTL ?= kubectl
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
+HELM ?= helm
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint

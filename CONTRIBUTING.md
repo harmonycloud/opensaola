@@ -17,7 +17,7 @@ Thank you for your interest in contributing to OpenSaola! This document provides
 ### Clone and Build
 
 ```bash
-git clone https://github.com/OpenSaola/opensaola.git
+git clone https://github.com/harmonycloud/opensaola.git
 cd opensaola
 make build
 ```

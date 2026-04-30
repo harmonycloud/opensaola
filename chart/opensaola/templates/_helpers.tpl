@@ -25,6 +25,41 @@ If release name contains chart name it will be used as a full name.
 {{- end }}
 
 {{/*
+Create a DNS-safe name by appending a suffix while keeping the final name
+within Kubernetes' 63-character DNS label limit.
+*/}}
+{{- define "opensaola.suffixedName" -}}
+{{- $root := .root -}}
+{{- $suffix := .suffix -}}
+{{- $base := include "opensaola.fullname" $root -}}
+{{- $baseMaxLen := sub 62 (len $suffix) | int -}}
+{{- printf "%s-%s" ($base | trunc $baseMaxLen | trimSuffix "-") $suffix | trunc 63 | trimSuffix "-" -}}
+{{- end }}
+
+{{/*
+Namespace where middleware package Secrets live. Empty value defaults to the
+release namespace so a normal `helm upgrade --install --create-namespace`
+works out of the box.
+*/}}
+{{- define "opensaola.dataNamespace" -}}
+{{- default .Release.Namespace .Values.config.dataNamespace | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{/*
+Operator image.
+*/}}
+{{- define "opensaola.image" -}}
+{{- if .Values.image.registry }}{{ .Values.image.registry }}/{{ end }}{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+{{- end }}
+
+{{/*
+Kubectl image used by the CRD hook job.
+*/}}
+{{- define "opensaola.kubectlImage" -}}
+{{- if .Values.kubectl.image.registry }}{{ .Values.kubectl.image.registry }}/{{ end }}{{ .Values.kubectl.image.repository }}:{{ .Values.kubectl.image.tag }}
+{{- end }}
+
+{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "opensaola.chart" -}}
@@ -61,7 +96,6 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
-
 
 {{/*
 Common labels

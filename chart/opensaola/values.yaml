@@ -2,10 +2,10 @@
 
 # -- Container image configuration
 image:
-  # -- Image registry (leave empty for Docker Hub)
-  registry: ""
+  # -- Image registry
+  registry: "ghcr.io"
   # -- Image repository
-  repository: opensaola/opensaola
+  repository: harmonycloud/opensaola
   # -- Image tag (defaults to Chart appVersion)
   tag: ""
   # -- Image pull policy
@@ -23,13 +23,30 @@ kubectl:
   installCRDs: true
   # -- kubectl image for CRD install job
   image:
+    # -- Kubectl image registry. Kept separate from image.registry so operator image overrides do not affect the hook job.
+    registry: "docker.io"
     repository: bitnami/kubectl
     tag: "1.30"
+    pullPolicy: IfNotPresent
+  # -- Optional labels for the CRD install Job pod
+  labels: {}
+  # -- Optional annotations for the CRD install Job pod
+  annotations: {}
+  # -- Pod resource requirements for the CRD install Job
+  resources: {}
+  # -- Node selector for the CRD install Job
+  nodeSelector: {}
+  # -- Tolerations for the CRD install Job
+  tolerations: []
+  # -- Affinity rules for the CRD install Job
+  affinity: {}
 
 # -- Operator configuration
 config:
-  # -- Namespace where middleware package Secrets are stored
-  dataNamespace: "middleware-operator"
+  # -- Namespace where middleware package Secrets are stored. Empty defaults to the Helm release namespace.
+  dataNamespace: ""
+  # -- Create config.dataNamespace when it is set and differs from the Helm release namespace.
+  createDataNamespace: false
   # -- Log level (0=debug, 1=info, 2=warn, 3=error)
   logLevel: 0
   # -- Log format: "console" (human-readable) or "json" (structured)
@@ -49,6 +66,15 @@ config:
     enabled: false
     port: "6060"
 
+# -- Service account configuration for the operator
+serviceAccount:
+  # -- Create a service account for the operator
+  create: true
+  # -- Service account name. Empty defaults to the chart fullname.
+  name: ""
+  # -- Extra annotations for the service account
+  annotations: {}
+
 # -- Pod resource requirements
 resources:
   requests:
@@ -67,6 +93,12 @@ tolerations: []
 # -- Affinity rules for pod scheduling
 affinity: {}
 
+# -- Extra labels for the operator pod
+podLabels: {}
+
+# -- Extra annotations for the operator pod
+podAnnotations: {}
+
 # -- PodDisruptionBudget (only effective when replicas > 1)
 pdb:
   # -- Enable PDB creation
@@ -76,3 +108,6 @@ pdb:
 
 # -- Termination grace period in seconds
 terminationGracePeriodSeconds: 60
+
+# -- Time zone passed to the operator container
+timezone: "UTC"

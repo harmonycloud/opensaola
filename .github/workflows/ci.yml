@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, dev]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, dev]
 
 permissions:
   contents: read
@@ -92,6 +92,15 @@ jobs:
           go-version-file: go.mod
       - name: Build
         run: make build
+
+  helm-chart:
+    name: Helm Chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Check Helm chart
+        run: make helm-check
 
   e2e:
     name: E2E Smoke

@@ -1,0 +1,10 @@
+{{- $dataNamespace := include "opensaola.dataNamespace" . -}}
+{{- if and .Values.config.createDataNamespace (ne $dataNamespace .Release.Namespace) }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $dataNamespace }}
+  labels:
+    {{- include "opensaola.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-namespace
+{{- end }}

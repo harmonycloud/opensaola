@@ -9,10 +9,10 @@ Expand the name of the chart.
 
 {{/*
 Create a default fully qualified app name.
-We truncate at 63 chars because some Kubernetes name fields are limited to this by the DNS naming spec.
-If release name contains chart name it will be used as a full name.
 生成默认的完整应用名称。
+We truncate at 63 chars because some Kubernetes name fields are limited to this by the DNS naming spec.
 由于部分 Kubernetes 名称字段受 DNS 命名规范限制，长度会截断到 63 个字符。
+If release name contains chart name it will be used as a full name.
 如果发布实例名称已经包含 Helm 包名称，则直接使用发布实例名称作为完整名称。
 */}}
 {{- define "opensaola.fullname" -}}
@@ -30,8 +30,7 @@ If release name contains chart name it will be used as a full name.
 
 {{/*
 Create a DNS-safe name by appending a suffix while keeping the final name within Kubernetes' 63-character DNS label limit.
-追加后缀生成符合 DNS 规范的名称，并确保最终名称不超过 Kubernetes
-DNS 标签的 63 字符限制。
+追加后缀生成符合 DNS 规范的名称，并确保最终名称不超过 Kubernetes DNS 标签的 63 字符限制。
 */}}
 {{- define "opensaola.suffixedName" -}}
 {{- $root := .root -}}
@@ -43,8 +42,7 @@ DNS 标签的 63 字符限制。
 
 {{/*
 Namespace where middleware package Secrets live. Empty value defaults to the release namespace so a normal `helm upgrade --install --create-namespace` works out of the box.
-中间件包 Secret 所在命名空间。为空时默认使用发布实例命名空间，
-确保普通 `helm upgrade --install --create-namespace` 可以开箱即用。
+中间件包 Secret 所在命名空间。为空时默认使用发布实例命名空间，确保普通 `helm upgrade --install --create-namespace` 可以开箱即用。
 */}}
 {{- define "opensaola.dataNamespace" -}}
 {{- default .Release.Namespace .Values.config.dataNamespace | trunc 63 | trimSuffix "-" }}

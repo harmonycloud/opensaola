@@ -1,12 +1,12 @@
 ###############################################################################
 # ClusterRole: cluster-wide resources the operator must reconcile.
 # ClusterRole：控制器需要协调的集群级资源。
-# NOTE: Package templates can require wildcard cluster access below. Package
-# catalog Secret metadata updates rely on the namespace-scoped Role later so
-# install/uninstall state can be persisted in spec.config.dataNamespace.
-# 注意：包模板可能需要下面的通配符集群访问权限。包目录 Secret 的元数据
-# 更新依赖后续命名空间级 Role，用于将安装/卸载状态持久化到
-# spec.config.dataNamespace。
+# NOTE: Package templates can require wildcard cluster access below.
+# 注意：包模板可能需要下面的通配符集群访问权限。
+# Package catalog Secret metadata updates rely on the namespace-scoped Role later.
+# 包目录 Secret 的元数据更新依赖后续命名空间级 Role。
+# This allows install/uninstall state to be persisted in spec.config.dataNamespace.
+# 用于将安装/卸载状态持久化到 spec.config.dataNamespace。
 ###############################################################################
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -162,8 +162,8 @@ rules:
   - watch
 {{/*
 MiddlewareConfiguration package templates can render arbitrary Kubernetes resources and CRD instances.
-Keep this in sync with internal/controller/rbac_aggregated.go and config/rbac/role.yaml.
 MiddlewareConfiguration 包模板可以渲染任意 Kubernetes 资源和 CRD 实例。
+Keep this in sync with internal/controller/rbac_aggregated.go and config/rbac/role.yaml.
 请与 internal/controller/rbac_aggregated.go 以及 config/rbac/role.yaml 保持同步。
 */}}
 - apiGroups:
@@ -197,12 +197,12 @@ roleRef:
 ###############################################################################
 # Role (Release namespace): leader election lease.
 # Role（发布实例命名空间）：主节点选举 Lease。
-# controller-runtime uses coordination.k8s.io/Lease for leader election; the
-# operator crashes at startup without these verbs. See cmd/main.go manager
-# options (LeaderElection + ReleaseOnCancel).
-# controller-runtime 使用 coordination.k8s.io/Lease 进行主节点选举；
-# 如果缺少这些动词权限，控制器会在启动时崩溃。参见 cmd/main.go 中的
-# 管理器选项（LeaderElection + ReleaseOnCancel）。
+# controller-runtime uses coordination.k8s.io/Lease for leader election.
+# controller-runtime 使用 coordination.k8s.io/Lease 进行主节点选举。
+# The operator crashes at startup without these verbs.
+# 如果缺少这些动词权限，控制器会在启动时崩溃。
+# See cmd/main.go manager options (LeaderElection + ReleaseOnCancel).
+# 参见 cmd/main.go 中的管理器选项（LeaderElection + ReleaseOnCancel）。
 ###############################################################################
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -244,14 +244,14 @@ roleRef:
 ###############################################################################
 # Role (data namespace): MiddlewarePackage Secret reconciliation.
 # Role（数据命名空间）：MiddlewarePackage Secret 协调。
-# Operator only reads and manages Secrets in .Values.config.dataNamespace,
-# never cluster-wide. If dataNamespace != Release.Namespace and
-# config.createDataNamespace=false, that namespace must already exist before
-# helm install.
-# 控制器只会在 .Values.config.dataNamespace 中读取和管理 Secret，
-# 不会进行集群级 Secret 管理。如果 dataNamespace != Release.Namespace，
-# 且 config.createDataNamespace=false，则该命名空间必须在 Helm 安装
-# 前已存在。
+# Operator only reads and manages Secrets in .Values.config.dataNamespace.
+# 控制器只会在 .Values.config.dataNamespace 中读取和管理 Secret。
+# It never manages Secrets cluster-wide.
+# 不会进行集群级 Secret 管理。
+# If dataNamespace != Release.Namespace and config.createDataNamespace=false,
+# 如果 dataNamespace != Release.Namespace，且 config.createDataNamespace=false，
+# that namespace must already exist before helm install.
+# 则该命名空间必须在 Helm 安装前已存在。
 ###############################################################################
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

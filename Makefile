@@ -26,7 +26,11 @@ HELM_CHART ?= chart/opensaola
 HELM_TIMEOUT ?= 5m
 HELM_IMAGE_REGISTRY ?= ghcr.io
 HELM_IMAGE_REPOSITORY ?= harmonycloud/opensaola
-HELM_IMAGE_TAG ?= dev
+HELM_GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-')
+HELM_GIT_SHA ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null)
+HELM_GIT_TAG ?= $(shell git describe --exact-match --tags --match 'v[0-9]*' HEAD 2>/dev/null)
+HELM_IMAGE_TAG ?= $(if $(HELM_GIT_TAG),$(HELM_GIT_TAG),$(if $(filter dev master main,$(HELM_GIT_BRANCH)),$(if $(HELM_GIT_SHA),sha-$(HELM_GIT_SHA),$(HELM_GIT_BRANCH)),dev))
+HELM_IMAGE_PULL_POLICY ?= $(if $(filter dev master main latest,$(HELM_IMAGE_TAG)),Always,IfNotPresent)
 
 .PHONY: all
 all: build
@@ -267,6 +271,7 @@ helm-upgrade: ## Install or upgrade OpenSaola from the local Helm chart.
 		--timeout $(HELM_TIMEOUT) \
 		--set image.registry="$(HELM_IMAGE_REGISTRY)" \
 		--set image.repository="$(HELM_IMAGE_REPOSITORY)" \
+		--set image.pullPolicy="$(HELM_IMAGE_PULL_POLICY)" \
 		"$${tag_args[@]}"
 
 .PHONY: helm-uninstall

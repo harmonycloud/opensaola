@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/)
-[![CI](https://img.shields.io/github/actions/workflow/status/harmonycloud/opensaola/ci.yml?branch=dev&label=CI)](https://github.com/harmonycloud/opensaola/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/harmonycloud/opensaola/ci.yml?branch=master&label=CI)](https://github.com/harmonycloud/opensaola/actions)
 
 [English](README.md) | **中文**
 
@@ -79,7 +79,7 @@ helm upgrade --install opensaola ./chart/opensaola \
   --timeout 5m
 ```
 
-从源码目录部署时，也可以直接使用 Makefile 包装命令；默认使用 GitHub Actions 为 `dev` 分支发布的 `dev` 镜像 tag。测试正式版本或指定 SHA 镜像时可覆盖 `HELM_IMAGE_TAG`：
+从源码目录部署时，建议使用 Makefile 包装命令。如果当前提交正好是 `v*` 发布 tag，它会使用该正式 tag；否则在长期分支（`dev`、`master` 或 `main`）上部署当前提交镜像 tag（`sha-<shortsha>`）。短生命周期功能分支会回退到 `dev`。测试其他正式版本或指定 SHA 镜像时可覆盖 `HELM_IMAGE_TAG`：
 
 ```bash
 make helm-deploy
@@ -143,8 +143,8 @@ resources:
 image:
   registry: "ghcr.io"
   repository: "harmonycloud/opensaola"
-  tag: ""                              # 留空时默认使用 Chart appVersion（dev 分支为 `dev`）
-  pullPolicy: Always
+  tag: ""                              # 留空时默认使用 Chart appVersion；正式发布会从 Git tag 覆盖
+  pullPolicy: IfNotPresent             # 只有使用 dev/master/latest 等浮动 tag 时才需要覆盖为 Always
 ```
 
 完整配置项参见 [`chart/opensaola/values.yaml`](chart/opensaola/values.yaml)。
@@ -183,6 +183,7 @@ make lint
 | [故障排查指南](docs/troubleshooting_zh.md) | 常见问题、调试命令、日志配置 |
 | [升级指南](docs/upgrade-guide_zh.md) | 版本升级流程与回滚 |
 | [测试指南](docs/testing-guide_zh.md) | 测试层级、运行测试、覆盖率、基准测试 |
+| [发布流程](docs/release-process_zh.md) | 分支、镜像 tag 与 Helm Chart 发布策略 |
 | [贡献指南](CONTRIBUTING_zh.md) | 开发环境搭建、架构说明、编码规范 |
 
 ## 参与贡献

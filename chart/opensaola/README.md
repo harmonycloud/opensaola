@@ -16,7 +16,7 @@ helm upgrade --install opensaola ./chart/opensaola \
   --timeout 5m
 ```
 
-The chart on the `dev` branch defaults to `ghcr.io/harmonycloud/opensaola:dev`, which is the image tag produced by the GitHub Docker workflow for the `dev` branch.
+For source checkouts, prefer the Makefile wrapper below. It uses an exact `v*` tag when the current commit is a release tag; otherwise long-lived branches (`dev`, `master`, or `main`) deploy the current commit image tag (`sha-<shortsha>`). When using Helm directly, set `image.tag` and `image.pullPolicy` explicitly.
 
 Or use the Makefile wrapper:
 

@@ -1,9 +1,9 @@
-name: Cleanup Old Dev Images
+name: Cleanup Old Images
 
 # Keep at most 10 most-recent `sha-*` images; always preserve semver (`v*`),
-# and floating tags (`dev`, `main`). Also sweep week-old orphan manifests
+# and floating tags (`dev`, `master`, `main`, `latest`). Also sweep week-old orphan manifests
 # left by multi-arch builds.
-# 保留最新 10 个 sha-* 镜像；永远保留 semver（v*）与浮动 tag（dev、main）；
+# 保留最新 10 个 sha-* 镜像；永远保留 semver（v*）与浮动 tag（dev、master、main、latest）；
 # 顺带清理一周以上的 multi-arch 孤儿 manifest。
 
 on:

@@ -18,6 +18,13 @@ jobs:
       - uses: azure/setup-helm@v4
       - name: Check chart
         run: make helm-lint helm-template verify-chart-crds
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          [[ "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "Release tags must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease"
+            exit 1
+          }
       - name: Package chart
         run: |
           mkdir -p dist/charts

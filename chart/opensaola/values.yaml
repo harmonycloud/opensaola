@@ -10,12 +10,12 @@ image:
   # -- Image repository
   # -- 镜像仓库
   repository: harmonycloud/opensaola
-  # -- Image tag. Empty defaults to Chart appVersion (`dev` on the dev branch; release workflows package `v*` tags with the matching appVersion).
-  # -- 镜像标签。为空时默认使用 Helm 包 appVersion（dev 分支为 `dev`；发行工作流会用匹配的 appVersion 打包 `v*` 标签）。
+  # -- Image tag. Empty defaults to Chart appVersion; release workflows package `v*` tags with the matching appVersion.
+  # -- 镜像标签。为空时默认使用 Helm 包 appVersion；发行工作流会用匹配的 appVersion 打包 `v*` 标签。
   tag: ""
-  # -- Image pull policy
-  # -- 镜像拉取策略
-  pullPolicy: Always
+  # -- Image pull policy. Keep immutable release/SHA tags reproducible; override to Always only for floating tags.
+  # -- 镜像拉取策略。正式版本和 SHA 镜像保持可复现；仅使用浮动标签时覆盖为 Always。
+  pullPolicy: IfNotPresent
 
 # -- Image pull secrets for private registries
 # -- 私有镜像仓库使用的镜像拉取凭据

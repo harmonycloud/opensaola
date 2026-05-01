@@ -16,7 +16,7 @@ helm upgrade --install opensaola ./chart/opensaola \
   --timeout 5m
 ```
 
-`dev` 分支上的 Helm 包默认使用 `ghcr.io/harmonycloud/opensaola:dev`，该镜像标签由 GitHub Docker 工作流在 `dev` 分支构建生成。
+从源码目录部署时，建议优先使用下面的 Makefile 包装命令。如果当前提交正好是 `v*` 发布 tag，它会使用该正式 tag；否则在长期分支（`dev`、`master` 或 `main`）上部署当前提交镜像 tag（`sha-<shortsha>`）。直接使用 Helm 命令部署时，请显式设置 `image.tag` 和 `image.pullPolicy`。
 
 也可以使用 Makefile 封装命令：
 

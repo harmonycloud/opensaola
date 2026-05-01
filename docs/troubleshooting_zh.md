@@ -433,8 +433,8 @@ config:
   logLevel: 0
   # 日志格式: "console"（人类可读）或 "json"（结构化）
   logFormat: "console"
-  # 日志文件路径（空字符串禁用文件日志）
-  logFilePath: ""
+  # 日志文件路径（默认 logs/opensaola.log，空字符串禁用文件日志）
+  logFilePath: "logs/opensaola.log"
 ```
 
 ### 运行时更改日志级别

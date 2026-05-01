@@ -144,6 +144,7 @@ image:
   registry: "ghcr.io"
   repository: "harmonycloud/opensaola"
   tag: ""                              # 留空时默认使用 Chart appVersion（dev 分支为 `dev`）
+  pullPolicy: Always
 ```
 
 完整配置项参见 [`chart/opensaola/values.yaml`](chart/opensaola/values.yaml)。

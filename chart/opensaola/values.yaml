@@ -15,7 +15,7 @@ image:
   tag: ""
   # -- Image pull policy
   # -- 镜像拉取策略
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 # -- Image pull secrets for private registries
 # -- 私有镜像仓库使用的镜像拉取凭据
@@ -74,9 +74,9 @@ config:
   # -- Log format: "console" (human-readable) or "json" (structured)
   # -- 日志格式："console"（便于阅读）或 "json"（结构化）
   logFormat: "console"
-  # -- Log file path (empty disables file logging)
-  # -- 日志文件路径（为空时禁用文件日志）
-  logFilePath: ""
+  # -- Log file path. Empty disables file logging.
+  # -- 日志文件路径。为空时禁用文件日志。
+  logFilePath: "logs/opensaola.log"
   # -- Cache cleanup interval in seconds
   # -- 缓存清理间隔，单位为秒
   cacheCleanupInterval: 600
@@ -153,4 +153,4 @@ terminationGracePeriodSeconds: 60
 
 # -- Time zone passed to the operator container
 # -- 传入控制器容器的时区
-timezone: "UTC"
+timezone: "Asia/Shanghai"

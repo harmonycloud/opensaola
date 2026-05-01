@@ -144,6 +144,7 @@ image:
   registry: "ghcr.io"
   repository: "harmonycloud/opensaola"
   tag: ""                              # empty defaults to Chart appVersion (`dev` on the dev branch)
+  pullPolicy: Always
 ```
 
 See [`chart/opensaola/values.yaml`](chart/opensaola/values.yaml) for all available options.

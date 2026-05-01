@@ -433,8 +433,8 @@ config:
   logLevel: 0
   # Log format: "console" (human-readable) or "json" (structured)
   logFormat: "console"
-  # Log file path (empty string disables file logging)
-  logFilePath: ""
+  # Log file path (defaults to logs/opensaola.log; empty string disables file logging)
+  logFilePath: "logs/opensaola.log"
 ```
 
 ### Changing log level at runtime

@@ -46,17 +46,21 @@ func newTestCR(name, namespace string, labels, annotations map[string]string) *u
 func TestSSACleanMetadata(t *testing.T) {
 	cr := newTestCR("obj1", "ns1", map[string]string{"a": "b"}, nil)
 	cr.SetResourceVersion("12345")
-	cr.Object["metadata"].(map[string]interface{})["creationTimestamp"] = "2026-01-01T00:00:00Z"
+	metadata, ok := cr.Object["metadata"].(map[string]interface{})
+	if !ok {
+		t.Fatal("expected metadata map")
+	}
+	metadata["creationTimestamp"] = "2026-01-01T00:00:00Z"
 
 	// Simulate the metadata cleaning logic (same as in PatchCustomResource/UpdateCustomResource)
 	cr.SetResourceVersion("")
 	cr.SetManagedFields(nil)
-	delete(cr.Object["metadata"].(map[string]interface{}), "creationTimestamp")
+	delete(metadata, "creationTimestamp")
 
 	if cr.GetResourceVersion() != "" {
 		t.Errorf("expected empty resourceVersion, got %s", cr.GetResourceVersion())
 	}
-	if _, exists := cr.Object["metadata"].(map[string]interface{})["creationTimestamp"]; exists {
+	if _, exists := metadata["creationTimestamp"]; exists {
 		t.Error("expected creationTimestamp to be removed")
 	}
 }

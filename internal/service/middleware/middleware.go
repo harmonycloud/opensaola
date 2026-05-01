@@ -58,6 +58,16 @@ func Check(ctx context.Context, cli client.Client, m *v1.Middleware) error {
 
 var updatingLocker sync.Mutex
 
+func targetUpgradeBaseline(m *v1.Middleware) string {
+	if m == nil {
+		return ""
+	}
+	if baseline := m.GetAnnotations()[v1.LabelBaseline]; baseline != "" {
+		return baseline
+	}
+	return m.Spec.Baseline
+}
+
 func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) error {
 	// If the upgrade annotation exists, start the upgrade flow
 	_, ok := m.GetAnnotations()[v1.LabelUpdate]
@@ -111,7 +121,8 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 				return err
 			}
 
-			log.FromContext(ctx).Info("upgrading in progress", "name", m.Name, "namespace", m.Namespace, "package", mp[0].Name, "version", m.Annotations[v1.LabelUpdate], "baseline", m.Annotations[v1.LabelBaseline])
+			targetBaseline := targetUpgradeBaseline(m)
+			log.FromContext(ctx).Info("upgrading in progress", "name", m.Name, "namespace", m.Namespace, "package", mp[0].Name, "version", m.Annotations[v1.LabelUpdate], "baseline", targetBaseline)
 
 			// Do not continue parsing/switching baseline when package is not ready: avoid tight loop stuck in Updating state.
 			enabled, installErr, statusErr := packages.GetInstallStatus(ctx, cli, mp[0].Name)
@@ -137,7 +148,7 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 
 			// Parse the new package
 			var baseline *v1.MiddlewareBaseline
-			baseline, err = packages.GetMiddlewareBaseline(ctx, cli, m.Annotations[v1.LabelBaseline], mp[0].Name)
+			baseline, err = packages.GetMiddlewareBaseline(ctx, cli, targetBaseline, mp[0].Name)
 			if err != nil {
 				return err
 			}

@@ -62,7 +62,7 @@ func TestInitialize_DefaultLogLevel(t *testing.T) {
 }
 
 // TestInitCacheCleanupTimer_ContextCancel verifies that InitCacheCleanupTimer
-// exits promptly when its context is cancelled.
+// exits promptly when its context is canceled.
 // 验证当 context 被取消时，InitCacheCleanupTimer 能及时退出。
 func TestInitCacheCleanupTimer_ContextCancel(t *testing.T) {
 	t.Cleanup(func() {

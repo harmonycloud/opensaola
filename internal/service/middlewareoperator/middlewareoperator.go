@@ -94,6 +94,16 @@ func Check(ctx context.Context, cli client.Client, m *v1.MiddlewareOperator) err
 
 var updatingLocker sync.Mutex
 
+func targetUpgradeBaseline(m *v1.MiddlewareOperator) string {
+	if m == nil {
+		return ""
+	}
+	if baseline := m.GetAnnotations()[v1.LabelBaseline]; baseline != "" {
+		return baseline
+	}
+	return m.Spec.Baseline
+}
+
 func clearUpgradeAnnotation(ctx context.Context, cli client.Client, live, current *v1.MiddlewareOperator) {
 	if live != nil && live.Annotations != nil {
 		delete(live.Annotations, v1.LabelUpdate)
@@ -213,9 +223,11 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.MiddlewareOper
 				return err
 			}
 
+			targetBaseline := targetUpgradeBaseline(m)
+
 			// Parse the new package
 			if err := skipNoOperatorResource(ctx, cli, m); err == nil {
-				_, err = packages.GetMiddlewareOperatorBaseline(ctx, cli, m.Annotations[v1.LabelBaseline], mp[0].Name)
+				_, err = packages.GetMiddlewareOperatorBaseline(ctx, cli, targetBaseline, mp[0].Name)
 				if err != nil {
 					return err
 				}
@@ -237,7 +249,7 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.MiddlewareOper
 			m.Spec = v1.MiddlewareOperatorSpec{}
 			m.Spec.Globe = oldGlobe
 			m.Spec.PreActions = oldPreActions
-			m.Spec.Baseline = m.Annotations[v1.LabelBaseline]
+			m.Spec.Baseline = targetBaseline
 			// Copy maps before modification to avoid mutating origLabels/origAnnotations references
 			newLabels := make(map[string]string, len(m.Labels))
 			for k, v := range m.Labels {

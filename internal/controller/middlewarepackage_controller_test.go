@@ -18,12 +18,15 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
 	corev1 "k8s.io/api/core/v1"
+	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
@@ -99,4 +102,32 @@ func TestMiddlewarePackageSecretToRequests(t *testing.T) {
 	if got, want := reqs[0].Name, secretRequestPrefix+"pkg-a"; got != want {
 		t.Fatalf("unexpected name: got %q want %q", got, want)
 	}
+}
+
+func TestMiddlewarePackageSecretErrorResult(t *testing.T) {
+	t.Run("wrapped not found requeues", func(t *testing.T) {
+		err := fmt.Errorf("publish package resources: %w", apiErrors.NewNotFound(
+			schema.GroupResource{Group: "middleware.cn", Resource: "middlewarepackages"},
+			"pkg-a",
+		))
+
+		result, gotErr := middlewarePackageSecretErrorResult(err)
+		if gotErr != nil {
+			t.Fatalf("expected not found to be swallowed for retry, got %v", gotErr)
+		}
+		if result.RequeueAfter <= 0 {
+			t.Fatalf("expected retry for transient not found, got %#v", result)
+		}
+	})
+
+	t.Run("other errors are returned", func(t *testing.T) {
+		err := fmt.Errorf("boom")
+		result, gotErr := middlewarePackageSecretErrorResult(err)
+		if gotErr == nil {
+			t.Fatalf("expected error to be returned")
+		}
+		if result.Requeue || result.RequeueAfter != 0 {
+			t.Fatalf("expected no retry result for non-not-found error, got %#v", result)
+		}
+	})
 }

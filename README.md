@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/)
-[![CI](https://img.shields.io/github/actions/workflow/status/OpenSaola/opensaola/ci.yml?branch=main&label=CI)](https://github.com/OpenSaola/opensaola/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/harmonycloud/opensaola/ci.yml?branch=master&label=CI)](https://github.com/harmonycloud/opensaola/actions)
 
 **English** | [中文](README_zh.md)
 
@@ -72,9 +72,17 @@ Each resource is driven through a state machine (`Checking → Creating → Runn
 ### Install
 
 ```bash
-helm install opensaola chart/opensaola \
+helm upgrade --install opensaola ./chart/opensaola \
   --namespace opensaola-system \
-  --create-namespace
+  --create-namespace \
+  --wait \
+  --timeout 5m
+```
+
+From a source checkout, prefer the Makefile wrapper. It uses an exact `v*` tag when the current commit is a release tag; otherwise long-lived branches (`dev`, `master`, or `main`) deploy the current commit image tag (`sha-<shortsha>`). Short-lived feature branches fall back to `dev`. Override `HELM_IMAGE_TAG` when testing another release or SHA image:
+
+```bash
+make helm-deploy
 ```
 
 ### Verify
@@ -117,7 +125,8 @@ OpenSaola is configured via Helm values. Key settings:
 ```yaml
 # Operator config
 config:
-  dataNamespace: "middleware-operator"  # where package Secrets live
+  dataNamespace: ""                     # empty defaults to the Helm release namespace
+  createDataNamespace: false            # set true when using a separate data namespace
   logLevel: 0                          # 0=debug, 1=info, 2=warn, 3=error
   logFormat: "console"                 # "console" or "json"
 
@@ -130,9 +139,12 @@ resources:
     cpu: 500m
     memory: 512Mi
 
-# Monitoring
-serviceMonitor:
-  enabled: false    # enable for Prometheus auto-discovery
+# Image
+image:
+  registry: "ghcr.io"
+  repository: "harmonycloud/opensaola"
+  tag: ""                              # empty defaults to Chart appVersion; releases override it from the Git tag
+  pullPolicy: IfNotPresent             # use Always only for floating tags such as dev/master/latest
 ```
 
 See [`chart/opensaola/values.yaml`](chart/opensaola/values.yaml) for all available options.
@@ -171,6 +183,7 @@ Run `make help` to see all available targets.
 | [Troubleshooting Guide](docs/troubleshooting.md) | Common issues, debugging commands, log configuration |
 | [Upgrade Guide](docs/upgrade-guide.md) | Version upgrade procedures and rollback |
 | [Testing Guide](docs/testing-guide.md) | Test tiers, running tests, coverage, benchmarks |
+| [Release Process](docs/release-process.md) | Branch, image tag, and Helm chart release policy |
 | [Contributing Guide](CONTRIBUTING.md) | Development setup, architecture, coding standards |
 
 ## Contributing

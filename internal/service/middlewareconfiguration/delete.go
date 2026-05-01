@@ -126,19 +126,24 @@ func deleteByGVKAndName(ctx context.Context, cli client.Client, gvk schema.Group
 // 1) Extract apiVersion/kind from the template (no rendering); only render metadata.name;
 // 2) If name rendering fails, fall back to listing and deleting by label middleware.cn/app=<owner.Name> (same GVK dimension).
 func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, owner metav1.Object, quoter tools.Quoter) error {
+	configurations := quoter.GetConfigurations()
+	pkgName := quoter.GetLabels()[v1.LabelPackageName]
+	log.FromContext(ctx).Info("starting cleanup of configuration rendered resources", "ownerName", owner.GetName(), "ownerNamespace", owner.GetNamespace(), "packageName", pkgName, "configurationsCount", len(configurations))
+	if len(configurations) == 0 {
+		log.FromContext(ctx).Info("no configuration rendered resources to clean up", "ownerName", owner.GetName(), "ownerNamespace", owner.GetNamespace())
+		return nil
+	}
+	if pkgName == "" {
+		return fmt.Errorf("package name is empty")
+	}
+
 	templateValuesBase, err := tools.GetTemplateValues(ctx, quoter)
 	if err != nil {
 		return fmt.Errorf("failed to get template values: %w", err)
 	}
 
-	pkgName := quoter.GetLabels()[v1.LabelPackageName]
-	log.FromContext(ctx).Info("starting cleanup of configuration rendered resources", "ownerName", owner.GetName(), "ownerNamespace", owner.GetNamespace(), "packageName", pkgName, "configurationsCount", len(quoter.GetConfigurations()))
-	if pkgName == "" {
-		return fmt.Errorf("package name is empty")
-	}
-
 	var errList []string
-	for _, cfg := range quoter.GetConfigurations() {
+	for _, cfg := range configurations {
 		log.FromContext(ctx).Info("processing configuration delete cleanup", "ownerName", owner.GetName(), "ownerNamespace", owner.GetNamespace(), "packageName", pkgName, "cfgName", cfg.Name)
 		mc, getErr := Get(ctx, cli, cfg.Name, pkgName)
 		if getErr != nil {
@@ -155,7 +160,6 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 		}
 		gvk := schema.FromAPIVersionAndKind(apiVersion, kind)
 
-		// CRDs are cluster-wide shared resources, must not be deleted with Middleware
 		// CRDs are cluster-wide shared resources, must not be deleted with Middleware
 		if gvk.Kind == "CustomResourceDefinition" {
 			continue

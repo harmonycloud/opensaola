@@ -13,14 +13,20 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       labels:
         {{- include "opensaola.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "opensaola.fullname" . }}
+      serviceAccountName: {{ include "opensaola.serviceAccountName" . }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 60 }}
       securityContext:
         runAsNonRoot: true
@@ -29,7 +35,7 @@ spec:
         fsGroup: 65532
       containers:
         - name: manager
-          image: "{{ if .Values.image.registry }}{{ .Values.image.registry }}/{{ end }}{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ include "opensaola.image" . }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext:
             allowPrivilegeEscalation: false
@@ -42,9 +48,6 @@ spec:
           ports:
             - name: health
               containerPort: 8080
-              protocol: TCP
-            - name: metrics
-              containerPort: 8443
               protocol: TCP
           livenessProbe:
             httpGet:
@@ -75,7 +78,7 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           env:
             - name: TZ
-              value: Asia/Shanghai
+              value: {{ .Values.timezone | quote }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -7,7 +7,6 @@ Public packages for the OpenSaola operator.
 | Package | Description |
 |---------|-------------|
 | `config` | Configuration management using Viper |
-| `metrics` | Prometheus metrics definitions |
 | `tools` | Shared utilities (template, YAML, CUE, archive) |
 
 ## Moved to internal/

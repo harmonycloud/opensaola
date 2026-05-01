@@ -75,7 +75,7 @@ func fileWriter() io.Writer {
 		fmt.Fprintf(os.Stderr, "[WARN] failed to open log file %s: %v, file logging disabled\n", fp, err)
 		return nil
 	}
-	f.Close()
+	_ = f.Close()
 
 	return rotateWriter(fp)
 }

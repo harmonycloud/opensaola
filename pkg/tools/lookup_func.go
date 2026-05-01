@@ -49,10 +49,6 @@ type ClientProvider interface {
 	GetClientFor(apiVersion, kind string) (dynamic.NamespaceableResourceInterface, bool, error)
 }
 
-type clientProviderFromConfig struct {
-	config *rest.Config
-}
-
 func GetClientFor(apiVersion, kind string) (dynamic.NamespaceableResourceInterface, bool, error) {
 	return getDynamicClientOnKind(apiVersion, kind)
 }

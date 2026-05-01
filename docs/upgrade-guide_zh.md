@@ -46,7 +46,7 @@ kubectl get deployment opensaola -n <operator-namespace> -o jsonpath='{.spec.tem
 
 ### 3. 查看 CHANGELOG 中的破坏性变更
 
-检查项目的发布说明 [https://github.com/OpenSaola/opensaola/releases](https://github.com/OpenSaola/opensaola/releases)，关注以下内容：
+检查项目的发布说明 [https://github.com/harmonycloud/opensaola/releases](https://github.com/harmonycloud/opensaola/releases)，关注以下内容：
 - CRD 字段的新增、移除或重命名
 - Label 或 Annotation 约定的变更
 - Reconcile 流程或状态机行为的变更
@@ -79,36 +79,43 @@ kubectl get mid -A -o jsonpath='{range .items[?(@.status.state!="Available")]}{.
 
 ## 升级 OpenSaola Operator
 
-### 步骤 1：更新 Helm 仓库
+### 步骤 1：拉取最新源码分支
 
 ```bash
-helm repo update
+git pull --ff-only
 ```
 
 ### 步骤 2：查看新版本的配置值
 
 ```bash
-# View the default values for the new version
-helm show values opensaola/opensaola --version <new-version>
+# 查看当前源码中的默认 values
+helm show values ./chart/opensaola
 
-# Compare with your current values
+# 导出当前 release 的自定义 values，便于对比
 helm get values opensaola -n <operator-namespace> > current-values.yaml
 ```
 
 ### 步骤 3：执行升级
 
 ```bash
-# Upgrade with your existing custom values
-helm upgrade opensaola opensaola/opensaola \
-  -n <operator-namespace> \
+# 使用现有自定义 values 升级
+helm upgrade --install opensaola ./chart/opensaola \
+  --namespace <operator-namespace> \
+  --create-namespace \
   -f current-values.yaml \
-  --version <new-version>
+  --wait \
+  --timeout 5m
 
-# Or upgrade with specific value overrides
-helm upgrade opensaola opensaola/opensaola \
-  -n <operator-namespace> \
+# 或者通过 --set 覆盖具体配置
+helm upgrade --install opensaola ./chart/opensaola \
+  --namespace <operator-namespace> \
+  --create-namespace \
   --set image.tag=<new-tag> \
-  --version <new-version>
+  --wait \
+  --timeout 5m
+
+# 从源码目录部署时，这个包装命令会在可用时使用当前分支名作为镜像 tag
+make helm-deploy
 ```
 
 ### 步骤 4：验证 CRD 更新

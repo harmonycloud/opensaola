@@ -70,7 +70,11 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 	cached, ok := BaselineCache.Get(key)
 	if ok {
 		result := deepcopy.Copy(cached)
-		return result.(v1.MiddlewareBaseline), nil
+		middlewareBaseline, ok := result.(v1.MiddlewareBaseline)
+		if !ok {
+			return v1.MiddlewareBaseline{}, fmt.Errorf("cached middlewarebaseline %s has unexpected type %T", name, result)
+		}
+		return middlewareBaseline, nil
 	} else {
 
 		var baselines []*v1.MiddlewareBaseline
@@ -92,7 +96,11 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 				middlewareBaseline.Labels = lbs
 				BaselineCache.Set(key, *middlewareBaseline)
 				result := deepcopy.Copy(*middlewareBaseline)
-				return result.(v1.MiddlewareBaseline), nil
+				copied, ok := result.(v1.MiddlewareBaseline)
+				if !ok {
+					return v1.MiddlewareBaseline{}, fmt.Errorf("middlewarebaseline %s copy has unexpected type %T", name, result)
+				}
+				return copied, nil
 			}
 		}
 	}

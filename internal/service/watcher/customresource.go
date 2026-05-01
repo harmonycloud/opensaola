@@ -186,18 +186,30 @@ func startCRWatcherImpl(ctx context.Context, cli client.Client, attempt int) (er
 		log.FromContext(ctx).V(1).Info("found CR to watch", "gvk", gvk, "namespace", namespace, "name", name)
 
 		// Check if the CR watcher already exists; if so, increment the reference count
-		go synchronizer.SyncCustomResourceV2(ctx, cli, cr, &mid)
+		crForSync := cr.DeepCopy()
+		go func() {
+			if syncErr := synchronizer.SyncCustomResourceV2(ctx, cli, crForSync, &mid); syncErr != nil {
+				log.FromContext(ctx).Error(syncErr, "custom resource sync exited with error", "gvk", crForSync.GroupVersionKind(), "namespace", crForSync.GetNamespace(), "name", crForSync.GetName())
+			}
+		}()
 		cw := NewCRWatcher(cr.GroupVersionKind(), cr.GetNamespace())
 		if cwCache, ok := CustomResourceWatcherMap.Load(cw.GetKey()); ok {
 			log.FromContext(ctx).Info("CR watcher already exists", "key", cw.GetKey())
-			cw = cwCache.(*CustomResourceWatcher)
+			cw, ok = cwCache.(*CustomResourceWatcher)
+			if !ok {
+				return fmt.Errorf("custom resource watcher %s has unexpected type %T", cw.GetKey(), cwCache)
+			}
 			cw.Counter.Add(1)
 			continue
 		}
 
 		log.FromContext(ctx).Info("creating CR watcher", "key", cw.GetKey())
 		CustomResourceWatcherMap.Store(cw.GetKey(), cw)
-		go k8s.NewInformerOptUnit(ctx, cli, cw.StopChan, cw.GVK, cw.Namespace, NewResourceEventHandlerFuncs(ctx, cli, mid.Name, mid.Namespace))
+		go func() {
+			if informerErr := k8s.NewInformerOptUnit(ctx, cli, cw.StopChan, cw.GVK, cw.Namespace, NewResourceEventHandlerFuncs(ctx, cli, mid.Name, mid.Namespace)); informerErr != nil {
+				log.FromContext(ctx).Error(informerErr, "custom resource informer exited with error", "gvk", cw.GVK, "namespace", cw.Namespace)
+			}
+		}()
 	}
 	return nil
 }
@@ -207,7 +219,10 @@ func CloseCRWatcher(ctx context.Context, obj *unstructured.Unstructured) {
 	temp := NewCRWatcher(obj.GroupVersionKind(), obj.GetNamespace())
 	v, ok := CustomResourceWatcherMap.Load(temp.GetKey())
 	if ok {
-		cw := v.(*CustomResourceWatcher)
+		cw, ok := v.(*CustomResourceWatcher)
+		if !ok {
+			return
+		}
 		// Concurrency-safe reference counting: only the transition from 1 -> 0 performs close/delete.
 		newVal := cw.Counter.Add(-1)
 		if newVal == 0 {
@@ -238,22 +253,34 @@ func safeClose(ch chan struct{}) {
 func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, namespace string) cache.ResourceEventHandlerFuncs {
 	return cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			if _, ok := obj.(*unstructured.Unstructured).GetLabels()[v1.LabelPackageName]; !ok {
+			cr, ok := customResourceEventObject(obj)
+			if !ok {
+				return
+			}
+			if _, ok := cr.GetLabels()[v1.LabelPackageName]; !ok {
 				return
 			}
 
 			log.FromContext(ctx).V(1).Info("CR CREATE event", "obj", obj)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			if _, ok := oldObj.(*unstructured.Unstructured).GetLabels()[v1.LabelPackageName]; !ok {
+			oldCR, ok := customResourceEventObject(oldObj)
+			if !ok {
+				return
+			}
+			newCR, ok := customResourceEventObject(newObj)
+			if !ok {
+				return
+			}
+			if _, ok := oldCR.GetLabels()[v1.LabelPackageName]; !ok {
 				return
 			}
 
 			log.FromContext(ctx).V(1).Info("CR UPDATE event", "oldObj", oldObj, "newObj", newObj)
 
 			// Handle custom resource update event; oldObj is the old object, newObj is the updated object
-			oldVersion := oldObj.(*unstructured.Unstructured).GetResourceVersion()
-			newVersion := newObj.(*unstructured.Unstructured).GetResourceVersion()
+			oldVersion := oldCR.GetResourceVersion()
+			newVersion := newCR.GetResourceVersion()
 
 			log.FromContext(ctx).V(1).Info("CR UPDATE event", "oldVersion", oldVersion, "newVersion", newVersion)
 
@@ -262,7 +289,11 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
-			if _, ok := obj.(*unstructured.Unstructured).GetLabels()[v1.LabelPackageName]; !ok {
+			cr, ok := customResourceEventObject(obj)
+			if !ok {
+				return
+			}
+			if _, ok := cr.GetLabels()[v1.LabelPackageName]; !ok {
 				return
 			}
 
@@ -271,15 +302,17 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 			log.FromContext(ctx).V(1).Info("CR DELETE event", "obj", obj)
 
 			// If OwnerReferences no longer exist, stop watching
-			for _, reference := range obj.(*unstructured.Unstructured).GetOwnerReferences() {
-				_, err := k8s.GetMiddleware(ctx, cli, reference.Name, obj.(*unstructured.Unstructured).GetNamespace())
+			for _, reference := range cr.GetOwnerReferences() {
+				_, err := k8s.GetMiddleware(ctx, cli, reference.Name, cr.GetNamespace())
 				if err != nil {
 					if apiErrors.IsNotFound(err) {
 						// Stop watching
-						cr := obj.(*unstructured.Unstructured)
 						CloseCRWatcher(ctx, cr)
 						if resourceStop, ok := synchronizer.SyncCustomResourceStopChanMap.Load(fmt.Sprintf(synchronizer.SyncCustomResourceStopChanMapKey, cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName())); ok {
-							close(resourceStop.(chan struct{}))
+							stopChan, ok := resourceStop.(chan struct{})
+							if ok {
+								close(stopChan)
+							}
 							synchronizer.SyncCustomResourceStopChanMap.Delete(fmt.Sprintf(synchronizer.SyncCustomResourceStopChanMapKey, cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName()))
 						}
 					}
@@ -287,8 +320,8 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 				}
 			}
 
-			obj.(*unstructured.Unstructured).SetResourceVersion("")
-			err := k8s.CreateCustomResource(ctx, cli, obj.(*unstructured.Unstructured))
+			cr.SetResourceVersion("")
+			err := k8s.CreateCustomResource(ctx, cli, cr)
 			if err != nil {
 				log.FromContext(ctx).Error(err, "create custom resource error")
 				return
@@ -296,4 +329,9 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 
 		},
 	}
+}
+
+func customResourceEventObject(obj interface{}) (*unstructured.Unstructured, bool) {
+	cr, ok := obj.(*unstructured.Unstructured)
+	return cr, ok
 }

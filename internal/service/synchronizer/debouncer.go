@@ -65,7 +65,7 @@ func debounceMaxDelay() time.Duration {
 // Debouncer coalesces high-frequency informer events for a single Middleware into
 // at most one triggerFn call per debounce window.
 //
-// Behaviour:
+// Behavior:
 //   - If a pending timer already exists, subsequent Notify() calls are silently dropped.
 //   - If no timer is pending, a new timer is armed for window duration.
 //   - If time since last fire exceeds maxDelay, the trigger fires immediately to prevent

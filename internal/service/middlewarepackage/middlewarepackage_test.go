@@ -17,13 +17,20 @@ limitations under the License.
 package middlewarepackage
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
+	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/service/consts"
 	"github.com/harmonycloud/opensaola/internal/service/packages"
 	corev1 "k8s.io/api/core/v1"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 // ---------------------------------------------------------------------------
@@ -285,6 +292,45 @@ func TestIsTerminalInstallError_ConflictIsNotTerminal(t *testing.T) {
 	)
 	if isTerminalInstallError(err) {
 		t.Error("expected false for Conflict error")
+	}
+}
+
+func newMiddlewarePackageTestClient(t *testing.T, objects ...client.Object) client.Client {
+	t.Helper()
+	s := runtime.NewScheme()
+	if err := v1.AddToScheme(s); err != nil {
+		t.Fatalf("add middleware scheme: %v", err)
+	}
+	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
+	return fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build()
+}
+
+func TestHandleSecretDelete_MissingPackageNoops(t *testing.T) {
+	t.Parallel()
+	cli := newMiddlewarePackageTestClient(t)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "pkg-missing", Namespace: "middleware-operator"}}
+
+	if err := HandleSecret(context.Background(), cli, secret, consts.HandleActionDelete); err != nil {
+		t.Fatalf("expected missing MiddlewarePackage delete to be ignored, got %v", err)
+	}
+}
+
+func TestHandleSecretDelete_DeletesExistingPackage(t *testing.T) {
+	t.Parallel()
+	mp := &v1.MiddlewarePackage{ObjectMeta: metav1.ObjectMeta{Name: "pkg-existing"}}
+	cli := newMiddlewarePackageTestClient(t, mp)
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: mp.Name, Namespace: "middleware-operator"}}
+
+	if err := HandleSecret(context.Background(), cli, secret, consts.HandleActionDelete); err != nil {
+		t.Fatalf("unexpected delete error: %v", err)
+	}
+
+	got := &v1.MiddlewarePackage{}
+	err := cli.Get(context.Background(), client.ObjectKey{Name: mp.Name}, got)
+	if !apiErrors.IsNotFound(err) {
+		t.Fatalf("expected MiddlewarePackage to be deleted, got err=%v object=%#v", err, got)
 	}
 }
 

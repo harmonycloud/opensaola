@@ -234,6 +234,44 @@ func TestResolveDeleteContext_PartialOperatorLiveObjectStillFails(t *testing.T) 
 	}
 }
 
+func TestCanSkipDeleteCleanup_NoCreatedResources(t *testing.T) {
+	m := emptyMiddleware("mid-skip-1", "default")
+	if !CanSkipDeleteCleanup(m) {
+		t.Fatal("expected cleanup to be skippable when no resource conditions are true")
+	}
+
+	m.Status.Conditions = []metav1.Condition{{
+		Type:   v1.CondTypeTemplateParseWithBaseline,
+		Status: metav1.ConditionFalse,
+	}}
+	if !CanSkipDeleteCleanup(m) {
+		t.Fatal("expected cleanup to remain skippable after template parsing failed")
+	}
+}
+
+func TestCanSkipDeleteCleanup_CreatedResources(t *testing.T) {
+	tests := []struct {
+		name          string
+		conditionType string
+	}{
+		{name: "extra resources created", conditionType: v1.CondTypeBuildExtraResource},
+		{name: "custom resource applied", conditionType: v1.CondTypeApplyCluster},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := emptyMiddleware("mid-skip-2", "default")
+			m.Status.Conditions = []metav1.Condition{{
+				Type:   tt.conditionType,
+				Status: metav1.ConditionTrue,
+			}}
+			if CanSkipDeleteCleanup(m) {
+				t.Fatalf("expected cleanup to be required when %s is true", tt.conditionType)
+			}
+		})
+	}
+}
+
 // TestShouldUseLegacyDeleteFallback_Complete: no fallback needed.
 func TestShouldUseLegacyDeleteFallback_Complete(t *testing.T) {
 	need, reason := ShouldUseLegacyDeleteFallback(fullMiddleware("mid-5", "default"))

@@ -24,7 +24,6 @@ import (
 	middlewarecnv1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/middlewarebaseline"
-	metrics "github.com/harmonycloud/opensaola/pkg/metrics"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -48,38 +47,23 @@ type MiddlewareBaselineReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *MiddlewareBaselineReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
-	startTime := time.Now()
-	_, timer := metrics.NewReconcileTimer(ctx, "middlewarebaseline")
-	defer func() {
-		metrics.ObserveReconcile("middlewarebaseline", startTime, result.Requeue, result.RequeueAfter, retErr)
-		res := metrics.ReconcileResult(result.Requeue, result.RequeueAfter, retErr)
-		timer.Observe(res)
-		metrics.ObserveRequeue("middlewarebaseline", result.Requeue, result.RequeueAfter)
-		metrics.ObserveAPIError("middlewarebaseline", retErr)
-	}()
-
 	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
 	ctx = log.IntoContext(ctx, l)
 
 	log.FromContext(ctx).V(1).Info("start processing middlewareBaseline", "req", req)
 
 	// Get middlewareBaseline
-	stop := timer.Start(metrics.PhaseAPIRead)
 	middlewareBaseline, err := k8s.GetMiddlewareBaseline(ctx, r.Client, req.Name)
-	stop()
 	if err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
 	// Validate middlewareBaseline
-	stop = timer.Start(metrics.PhaseCompute)
 	if err := middlewarebaseline.Check(ctx, r.Client, middlewareBaseline); err != nil {
-		stop()
 		r.Recorder.Event(middlewareBaseline, "Warning", "ValidationFailed", err.Error())
 		log.FromContext(ctx).Error(err, "failed to validate MiddlewareBaseline", "name", req.Name)
 		return ctrl.Result{}, err
 	}
-	stop()
 
 	return ctrl.Result{}, nil
 }

@@ -1,0 +1,7 @@
+.DS_Store
+.helmignore
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.bak

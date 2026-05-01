@@ -20,6 +20,17 @@ SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
 KIND_CLUSTER ?= opensaola-e2e
+HELM_RELEASE ?= opensaola
+HELM_NAMESPACE ?= opensaola-system
+HELM_CHART ?= chart/opensaola
+HELM_TIMEOUT ?= 5m
+HELM_IMAGE_REGISTRY ?= ghcr.io
+HELM_IMAGE_REPOSITORY ?= harmonycloud/opensaola
+HELM_GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-')
+HELM_GIT_SHA ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null)
+HELM_GIT_TAG ?= $(shell git describe --exact-match --tags --match 'v[0-9]*' HEAD 2>/dev/null)
+HELM_IMAGE_TAG ?= $(if $(HELM_GIT_TAG),$(HELM_GIT_TAG),$(if $(filter dev master main,$(HELM_GIT_BRANCH)),$(if $(HELM_GIT_SHA),sha-$(HELM_GIT_SHA),$(HELM_GIT_BRANCH)),dev))
+HELM_IMAGE_PULL_POLICY ?= $(if $(filter dev master main latest,$(HELM_IMAGE_TAG)),Always,IfNotPresent)
 
 .PHONY: all
 all: build
@@ -55,9 +66,10 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 generate-all: manifests generate sync-chart-crds ## Generate code, manifests, and sync CRDs to Helm chart.
 
 .PHONY: sync-chart-crds
-sync-chart-crds: ## Copy generated CRDs from config/crd/bases/ to chart/opensaola/crds/.
+sync-chart-crds: ## Copy generated CRDs from config/crd/bases/ to chart/opensaola/files/crds/.
 	@echo "Syncing CRDs to Helm chart..."
-	@cp config/crd/bases/*.yaml chart/opensaola/crds/
+	@mkdir -p chart/opensaola/files/crds
+	@cp config/crd/bases/*.yaml chart/opensaola/files/crds/
 	@echo "Done. $$(ls config/crd/bases/*.yaml | wc -l | tr -d ' ') CRDs synced."
 
 .PHONY: fmt
@@ -81,7 +93,7 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet ## Run tests.
-	go test $$(go list ./... | grep -v /e2e | grep -v /internal/controller) -coverprofile cover.out
+	go test $$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v '^$$' | grep -v /e2e | grep -v /internal/controller) -coverprofile cover.out
 
 .PHONY: coverage
 coverage: test ## Open test coverage report in browser.
@@ -222,6 +234,50 @@ ifndef ignore-not-found
   ignore-not-found = false
 endif
 
+.PHONY: helm-lint
+helm-lint: ## Lint the OpenSaola Helm chart.
+	$(HELM) lint $(HELM_CHART)
+
+.PHONY: helm-template
+helm-template: ## Render the OpenSaola Helm chart locally.
+	$(HELM) template $(HELM_RELEASE) $(HELM_CHART) --namespace $(HELM_NAMESPACE) --include-crds >/tmp/opensaola-helm-template.yaml
+	@echo "Rendered $(HELM_CHART) to /tmp/opensaola-helm-template.yaml"
+
+.PHONY: helm-package
+helm-package: ## Package the OpenSaola Helm chart into dist/charts/.
+	@mkdir -p dist/charts
+	$(HELM) package $(HELM_CHART) --destination dist/charts
+
+.PHONY: verify-chart-crds
+verify-chart-crds: ## Verify Helm chart CRDs match generated CRDs.
+	@diff -qr config/crd/bases chart/opensaola/files/crds
+
+.PHONY: helm-check
+helm-check: helm-lint helm-template helm-package verify-chart-crds ## Run all Helm chart checks.
+
+.PHONY: helm-deploy
+helm-deploy: helm-upgrade ## Install or upgrade OpenSaola from the local Helm chart.
+
+.PHONY: helm-upgrade
+helm-upgrade: ## Install or upgrade OpenSaola from the local Helm chart.
+	@tag_args=(); \
+	if [ -n "$(HELM_IMAGE_TAG)" ] && [ "$(HELM_IMAGE_TAG)" != "HEAD" ]; then \
+		tag_args+=(--set image.tag="$(HELM_IMAGE_TAG)"); \
+	fi; \
+	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
+		--namespace $(HELM_NAMESPACE) \
+		--create-namespace \
+		--wait \
+		--timeout $(HELM_TIMEOUT) \
+		--set image.registry="$(HELM_IMAGE_REGISTRY)" \
+		--set image.repository="$(HELM_IMAGE_REPOSITORY)" \
+		--set image.pullPolicy="$(HELM_IMAGE_PULL_POLICY)" \
+		"$${tag_args[@]}"
+
+.PHONY: helm-uninstall
+helm-uninstall: ## Uninstall the OpenSaola Helm release.
+	$(HELM) uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE) --ignore-not-found
+
 .PHONY: install
 install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
 	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply -f -
@@ -266,6 +322,7 @@ $(LOCALBIN):
 ## Tool Binaries
 KUBECTL ?= kubectl
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
+HELM ?= helm
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
@@ -278,7 +335,8 @@ CONTROLLER_TOOLS_VERSION ?= v0.17.2
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
-GOLANGCI_LINT_VERSION ?= v1.63.4
+PROJECT_GO_TOOLCHAIN ?= $(shell go env GOVERSION)
+GOLANGCI_LINT_VERSION ?= v2.11.4
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -309,7 +367,7 @@ $(ENVTEST): $(LOCALBIN)
 .PHONY: golangci-lint
 golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
-	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
 .PHONY: benchstat-bin
 benchstat-bin: $(BENCHSTAT) ## Download benchstat locally if necessary.
@@ -326,7 +384,7 @@ set -e; \
 package=$(2)@$(3) ;\
 echo "Downloading $${package}" ;\
 rm -f $(1) || true ;\
-GOBIN=$(LOCALBIN) go install $${package} ;\
+GOTOOLCHAIN=$(PROJECT_GO_TOOLCHAIN)+auto GOBIN=$(LOCALBIN) go install $${package} ;\
 mv $(1) $(1)-$(3) ;\
 } ;\
 ln -sf $(1)-$(3) $(1)

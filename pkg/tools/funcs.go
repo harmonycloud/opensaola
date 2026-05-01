@@ -223,11 +223,21 @@ func toCue(data interface{}) string {
 
 		case reflect.String:
 			// Escape double quotes in the string
-			escapedStr := strings.ReplaceAll(v.(string), `"`, `\"`)
+			str, ok := v.(string)
+			if !ok {
+				buf.WriteString(fmt.Sprintf("%v", v))
+				return
+			}
+			escapedStr := strings.ReplaceAll(str, `"`, `\"`)
 			buf.WriteString(fmt.Sprintf(`"%s"`, escapedStr))
 
 		case reflect.Bool:
-			buf.WriteString(fmt.Sprintf("%t", v.(bool)))
+			boolValue, ok := v.(bool)
+			if !ok {
+				buf.WriteString(fmt.Sprintf("%v", v))
+				return
+			}
+			buf.WriteString(fmt.Sprintf("%t", boolValue))
 
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 			buf.WriteString(fmt.Sprintf("%d", v))

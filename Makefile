@@ -21,7 +21,18 @@ SHELL = /usr/bin/env bash -o pipefail
 
 KIND_CLUSTER ?= opensaola-e2e
 HELM_RELEASE ?= opensaola
+HELM_NAMESPACE_FROM_ALIAS := false
+ifneq ($(origin n),undefined)
+  ifeq ($(strip $(n)),)
+    $(error n must not be empty; use n=<namespace>)
+  endif
+  HELM_NAMESPACE ?= $(n)
+  HELM_NAMESPACE_FROM_ALIAS := true
+else
 HELM_NAMESPACE ?= opensaola-system
+endif
+HELM_AUTO_NAMESPACE ?= true
+HELM_NAMESPACE_FROM_DEFAULT := $(if $(filter file,$(origin HELM_NAMESPACE)),$(if $(filter true,$(HELM_NAMESPACE_FROM_ALIAS)),false,true),false)
 HELM_CHART ?= chart/opensaola
 HELM_TIMEOUT ?= 5m
 HELM_IMAGE_REGISTRY ?= ghcr.io
@@ -265,12 +276,28 @@ helm-deploy-dev: helm-upgrade-dev ## Upgrade OpenSaola with the floating dev ima
 
 .PHONY: helm-upgrade
 helm-upgrade: ## Install or upgrade OpenSaola from the local Helm chart.
-	@tag_args=(); \
+	@release_namespace='$(HELM_NAMESPACE)'; \
+	if [ "$(HELM_AUTO_NAMESPACE)" = "true" ] && [ "$(HELM_NAMESPACE_FROM_DEFAULT)" = "true" ]; then \
+		detected_namespaces="$$( $(HELM) list -A --no-headers 2>/dev/null | awk -v release='$(HELM_RELEASE)' '$$1 == release { print $$2 }' )"; \
+		detected_count="$$(printf '%s\n' "$$detected_namespaces" | sed '/^$$/d' | wc -l | tr -d '[:space:]')"; \
+		if [ "$$detected_count" = "1" ]; then \
+			release_namespace="$$(printf '%s\n' "$$detected_namespaces" | sed '/^$$/d' | head -n 1)"; \
+			if [ "$$release_namespace" != "$(HELM_NAMESPACE)" ]; then \
+				echo "Using existing Helm release namespace '$$release_namespace' for release '$(HELM_RELEASE)'."; \
+			fi; \
+		elif [ "$$detected_count" -gt 1 ]; then \
+			echo "Multiple Helm releases named '$(HELM_RELEASE)' found in namespaces:" >&2; \
+			printf '%s\n' "$$detected_namespaces" | sed '/^$$/d; s/^/  /' >&2; \
+			echo "Set HELM_NAMESPACE=<namespace> to choose one." >&2; \
+			exit 1; \
+		fi; \
+	fi; \
+	tag_args=(); \
 	if [ -n "$(HELM_IMAGE_TAG)" ] && [ "$(HELM_IMAGE_TAG)" != "HEAD" ]; then \
 		tag_args+=(--set image.tag="$(HELM_IMAGE_TAG)"); \
 	fi; \
 	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
-		--namespace $(HELM_NAMESPACE) \
+		--namespace "$$release_namespace" \
 		--create-namespace \
 		--wait \
 		--timeout $(HELM_TIMEOUT) \
@@ -289,7 +316,23 @@ helm-upgrade-dev: ## Upgrade OpenSaola with the floating dev image and force a r
 
 .PHONY: helm-uninstall
 helm-uninstall: ## Uninstall the OpenSaola Helm release.
-	$(HELM) uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE) --ignore-not-found
+	@release_namespace='$(HELM_NAMESPACE)'; \
+	if [ "$(HELM_AUTO_NAMESPACE)" = "true" ] && [ "$(HELM_NAMESPACE_FROM_DEFAULT)" = "true" ]; then \
+		detected_namespaces="$$( $(HELM) list -A --no-headers 2>/dev/null | awk -v release='$(HELM_RELEASE)' '$$1 == release { print $$2 }' )"; \
+		detected_count="$$(printf '%s\n' "$$detected_namespaces" | sed '/^$$/d' | wc -l | tr -d '[:space:]')"; \
+		if [ "$$detected_count" = "1" ]; then \
+			release_namespace="$$(printf '%s\n' "$$detected_namespaces" | sed '/^$$/d' | head -n 1)"; \
+			if [ "$$release_namespace" != "$(HELM_NAMESPACE)" ]; then \
+				echo "Using existing Helm release namespace '$$release_namespace' for release '$(HELM_RELEASE)'."; \
+			fi; \
+		elif [ "$$detected_count" -gt 1 ]; then \
+			echo "Multiple Helm releases named '$(HELM_RELEASE)' found in namespaces:" >&2; \
+			printf '%s\n' "$$detected_namespaces" | sed '/^$$/d; s/^/  /' >&2; \
+			echo "Set HELM_NAMESPACE=<namespace> to choose one." >&2; \
+			exit 1; \
+		fi; \
+	fi; \
+	$(HELM) uninstall $(HELM_RELEASE) --namespace "$$release_namespace" --ignore-not-found
 
 .PHONY: install
 install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.

@@ -24,6 +24,8 @@ Or use the Makefile wrapper:
 make helm-deploy
 ```
 
+When `HELM_NAMESPACE` is not set, the wrapper reuses the namespace of an existing `opensaola` release found by `helm list -A`; otherwise it installs into `opensaola-system`. Use `n=<namespace>` (or `HELM_NAMESPACE=<namespace>`) to choose a namespace explicitly.
+
 For a server that tracks the `dev` branch, the preferred one-command upgrade is:
 
 ```bash

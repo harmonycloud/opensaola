@@ -85,6 +85,8 @@ From a source checkout, prefer the Makefile wrapper. It uses an exact `v*` tag w
 make helm-deploy
 ```
 
+If `HELM_NAMESPACE` is not set explicitly, the wrapper first looks for an existing `opensaola` release across all namespaces and upgrades it in place. If no release exists, it installs into `opensaola-system`. Set `n=<namespace>` (or `HELM_NAMESPACE=<namespace>`) to force a specific namespace.
+
 For a server tracking `dev`, upgrade to the image built from the checked-out commit with:
 
 ```bash

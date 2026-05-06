@@ -85,6 +85,8 @@ helm upgrade --install opensaola ./chart/opensaola \
 make helm-deploy
 ```
 
+如果没有显式设置 `HELM_NAMESPACE`，封装命令会先在所有命名空间查找已有的 `opensaola` release，并在原命名空间升级；找不到时才安装到 `opensaola-system`。需要固定命名空间时可设置 `n=<namespace>`，也可以继续用 `HELM_NAMESPACE=<namespace>`。
+
 服务器跟踪 `dev` 分支时，使用下面命令升级到当前检出提交构建出的镜像：
 
 ```bash

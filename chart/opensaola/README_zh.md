@@ -24,6 +24,22 @@ helm upgrade --install opensaola ./chart/opensaola \
 make helm-deploy
 ```
 
+服务器跟踪 `dev` 分支时，推荐的一键升级方式是：
+
+```bash
+git pull --ff-only && make helm-deploy
+```
+
+该命令会部署当前检出提交对应的 `ghcr.io/harmonycloud/opensaola:sha-<shortsha>` 镜像。执行前请先等 GitHub 上该提交的 Docker workflow 完成。
+
+如果想跟随浮动 `dev` 镜像标签，而不是精确提交镜像标签，执行：
+
+```bash
+make helm-deploy-dev
+```
+
+该目标会使用 `image.tag=dev`、`image.pullPolicy=Always`，并更新 `podAnnotations.redeployAt` 强制 Deployment 滚动，避免同一个 `dev` 标签字符串不变时 Pod 不重建。
+
 ## 安装已发布的 OCI 格式 Helm 包
 
 带标签的发行版本会将 Helm 包发布到 GHCR：

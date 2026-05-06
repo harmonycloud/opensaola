@@ -85,6 +85,18 @@ From a source checkout, prefer the Makefile wrapper. It uses an exact `v*` tag w
 make helm-deploy
 ```
 
+For a server tracking `dev`, upgrade to the image built from the checked-out commit with:
+
+```bash
+git pull --ff-only && make helm-deploy
+```
+
+Run it after the GitHub Docker workflow for that commit has published the matching `sha-<shortsha>` image. To follow the floating `dev` image tag and force a rollout, use:
+
+```bash
+make helm-deploy-dev
+```
+
 ### Verify
 
 ```bash

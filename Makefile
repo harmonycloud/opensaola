@@ -31,6 +31,8 @@ HELM_GIT_SHA ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null)
 HELM_GIT_TAG ?= $(shell git describe --exact-match --tags --match 'v[0-9]*' HEAD 2>/dev/null)
 HELM_IMAGE_TAG ?= $(if $(HELM_GIT_TAG),$(HELM_GIT_TAG),$(if $(filter dev master main,$(HELM_GIT_BRANCH)),$(if $(HELM_GIT_SHA),sha-$(HELM_GIT_SHA),$(HELM_GIT_BRANCH)),dev))
 HELM_IMAGE_PULL_POLICY ?= $(if $(filter dev master main latest,$(HELM_IMAGE_TAG)),Always,IfNotPresent)
+HELM_EXTRA_ARGS ?=
+HELM_REDEPLOY_AT ?= $(shell date -u +%Y%m%dT%H%M%SZ)
 
 .PHONY: all
 all: build
@@ -258,6 +260,9 @@ helm-check: helm-lint helm-template helm-package verify-chart-crds ## Run all He
 .PHONY: helm-deploy
 helm-deploy: helm-upgrade ## Install or upgrade OpenSaola from the local Helm chart.
 
+.PHONY: helm-deploy-dev
+helm-deploy-dev: helm-upgrade-dev ## Upgrade OpenSaola with the floating dev image and force a rollout.
+
 .PHONY: helm-upgrade
 helm-upgrade: ## Install or upgrade OpenSaola from the local Helm chart.
 	@tag_args=(); \
@@ -272,7 +277,15 @@ helm-upgrade: ## Install or upgrade OpenSaola from the local Helm chart.
 		--set image.registry="$(HELM_IMAGE_REGISTRY)" \
 		--set image.repository="$(HELM_IMAGE_REPOSITORY)" \
 		--set image.pullPolicy="$(HELM_IMAGE_PULL_POLICY)" \
-		"$${tag_args[@]}"
+		"$${tag_args[@]}" \
+		$(HELM_EXTRA_ARGS)
+
+.PHONY: helm-upgrade-dev
+helm-upgrade-dev: ## Upgrade OpenSaola with the floating dev image and force a rollout.
+	$(MAKE) helm-upgrade \
+		HELM_IMAGE_TAG=dev \
+		HELM_IMAGE_PULL_POLICY=Always \
+		HELM_EXTRA_ARGS='--set-string podAnnotations.redeployAt=$(HELM_REDEPLOY_AT)'
 
 .PHONY: helm-uninstall
 helm-uninstall: ## Uninstall the OpenSaola Helm release.

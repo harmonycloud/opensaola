@@ -34,10 +34,10 @@ kubectl:
   # -- kubectl image for CRD install job
   # -- CRD 安装 Job 使用的 kubectl 镜像
   image:
-    # -- Kubectl image registry. Kept separate from image.registry so operator image overrides do not affect the hook job.
-    # -- kubectl 镜像仓库地址。与 image.registry 分开配置，避免控制器镜像覆盖影响钩子 Job。
-    registry: "registry.k8s.io"
-    repository: kubectl
+    # -- Kubectl image registry. Defaults to GHCR for environments that cannot access registry.k8s.io; kept separate from image.registry so operator image overrides do not affect the hook job.
+    # -- kubectl 镜像仓库地址。默认使用 GHCR，适配无法访问 registry.k8s.io 的环境；与 image.registry 分开配置，避免控制器镜像覆盖影响钩子 Job。
+    registry: "ghcr.io"
+    repository: harmonycloud/kubectl
     tag: "v1.30.14"
     pullPolicy: IfNotPresent
   # -- Optional labels for the CRD install Job pod

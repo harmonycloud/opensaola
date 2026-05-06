@@ -85,6 +85,18 @@ helm upgrade --install opensaola ./chart/opensaola \
 make helm-deploy
 ```
 
+服务器跟踪 `dev` 分支时，使用下面命令升级到当前检出提交构建出的镜像：
+
+```bash
+git pull --ff-only && make helm-deploy
+```
+
+请在 GitHub Docker workflow 已经发布该提交对应的 `sha-<shortsha>` 镜像后执行。如果想跟随浮动 `dev` 镜像标签并强制滚动，使用：
+
+```bash
+make helm-deploy-dev
+```
+
 ### 验证
 
 ```bash

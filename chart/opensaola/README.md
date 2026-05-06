@@ -24,6 +24,22 @@ Or use the Makefile wrapper:
 make helm-deploy
 ```
 
+For a server that tracks the `dev` branch, the preferred one-command upgrade is:
+
+```bash
+git pull --ff-only && make helm-deploy
+```
+
+This deploys `ghcr.io/harmonycloud/opensaola:sha-<shortsha>` for the checked-out commit. Wait for the GitHub Docker workflow of that commit to finish before running it.
+
+If you want to follow the floating `dev` image tag instead of the exact commit tag, run:
+
+```bash
+make helm-deploy-dev
+```
+
+This uses `image.tag=dev`, `image.pullPolicy=Always`, and updates `podAnnotations.redeployAt` so Kubernetes rolls the Deployment even when the image tag string is unchanged.
+
 ## Install A Released OCI Chart
 
 Tagged releases publish this chart to GHCR:

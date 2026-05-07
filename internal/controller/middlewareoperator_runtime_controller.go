@@ -43,7 +43,6 @@ type MiddlewareOperatorRuntimeReconciler struct {
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewareoperators,verbs=get;list;watch
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewareoperators/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
-//+kubebuilder:rbac:groups=apps,resources=deployments/status,verbs=get;list;watch
 
 func (r *MiddlewareOperatorRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	deployment := &appsv1.Deployment{}

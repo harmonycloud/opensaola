@@ -120,18 +120,51 @@ func GetInstallStatus(ctx context.Context, cli client.Client, name string) (enab
 	return enabled, installError, nil
 }
 
+func compatibleProjectListOption() client.ListOption {
+	return client.MatchingLabelsSelector{
+		Selector: consts.OpenSaolaProjectSelector(v1.LabelProject),
+	}
+}
+
+func SelectPreferredMiddlewarePackages(items []v1.MiddlewarePackage) []v1.MiddlewarePackage {
+	if len(items) == 0 {
+		return nil
+	}
+	var current []v1.MiddlewarePackage
+	var legacy []v1.MiddlewarePackage
+	for _, item := range items {
+		switch item.Labels[v1.LabelProject] {
+		case consts.ProjectOpenSaola:
+			current = append(current, item)
+		case consts.ProjectZeusOperator:
+			legacy = append(legacy, item)
+		}
+	}
+	if len(current) > 0 {
+		return current
+	}
+	return legacy
+}
+
+func ListCompatibleMiddlewarePackages(ctx context.Context, cli client.Client, labels client.MatchingLabels) ([]v1.MiddlewarePackage, error) {
+	items, err := k8s.ListMiddlewarePackages(ctx, cli, compatibleProjectListOption(), labels)
+	if err != nil {
+		return nil, err
+	}
+	return SelectPreferredMiddlewarePackages(items), nil
+}
+
 // List reads middleware packages.
 // name is required, version is optional.
 func List(ctx context.Context, cli client.Client, opt Option) ([]*Package, error) {
 	lbs := make(client.MatchingLabels)
-	lbs[v1.LabelProject] = consts.ProjectOpenSaola
 	if opt.LabelComponent != "" {
 		lbs[v1.LabelComponent] = opt.LabelComponent
 	}
 	if opt.LabelPackageVersion != "" {
 		lbs[v1.LabelPackageVersion] = opt.LabelPackageVersion
 	}
-	secrets, err := k8s.GetSecrets(ctx, cli, DataNamespace, lbs)
+	secrets, err := k8s.GetSecrets(ctx, cli, DataNamespace, compatibleProjectListOption(), lbs)
 	if err != nil {
 		return nil, err
 	}

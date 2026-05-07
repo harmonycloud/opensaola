@@ -57,9 +57,7 @@ const secretRequestPrefix = "__secret__/"
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewarepackages/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewarepackages/finalizers,verbs=update
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
-//+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
-//+kubebuilder:rbac:groups=core,resources=secrets/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=core,resources=secrets/finalizers,verbs=update
+//+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -161,7 +159,7 @@ func (r *MiddlewarePackageReconciler) isOpenSaolaSecret(object client.Object) bo
 	if object == nil {
 		return false
 	}
-	return object.GetLabels()[v1.LabelProject] == consts.ProjectOpenSaola
+	return consts.IsOpenSaolaProject(object.GetLabels()[v1.LabelProject])
 }
 
 func (r *MiddlewarePackageReconciler) secretPredicate() predicate.Predicate {

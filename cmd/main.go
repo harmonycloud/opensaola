@@ -42,7 +42,6 @@ import (
 	"github.com/go-logr/zerologr"
 	"github.com/spf13/viper"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -201,9 +200,7 @@ func main() {
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
 				&corev1.Secret{}: {
-					Label: labels.SelectorFromSet(labels.Set{
-						v1.LabelProject: consts.ProjectOpenSaola,
-					}),
+					Label: consts.OpenSaolaProjectSelector(v1.LabelProject),
 					Transform: func(obj interface{}) (interface{}, error) {
 						if secret, ok := obj.(*corev1.Secret); ok {
 							secret.Data = nil

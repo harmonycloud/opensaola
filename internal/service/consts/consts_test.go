@@ -19,6 +19,8 @@ package consts
 import (
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 // TestErrorSentinels_NonNil verifies all error sentinel variables are non-nil.
@@ -143,6 +145,31 @@ func TestProjectConstant(t *testing.T) {
 	}
 	if ProjectOpenSaola != "opensaola" {
 		t.Errorf("ProjectOpenSaola should be 'opensaola', got %q", ProjectOpenSaola)
+	}
+}
+
+func TestIsOpenSaolaProject(t *testing.T) {
+	t.Parallel()
+	for _, project := range []string{ProjectOpenSaola, ProjectZeusOperator} {
+		if !IsOpenSaolaProject(project) {
+			t.Fatalf("expected project %q to be compatible", project)
+		}
+	}
+	if IsOpenSaolaProject("other") {
+		t.Fatal("expected unrelated project to be incompatible")
+	}
+}
+
+func TestOpenSaolaProjectSelector(t *testing.T) {
+	t.Parallel()
+	selector := OpenSaolaProjectSelector("project")
+	for _, project := range []string{ProjectOpenSaola, ProjectZeusOperator} {
+		if !selector.Matches(labels.Set{"project": project}) {
+			t.Fatalf("expected selector to match project %q", project)
+		}
+	}
+	if selector.Matches(labels.Set{"project": "other"}) {
+		t.Fatal("expected selector to reject unrelated project")
 	}
 }
 

@@ -94,9 +94,9 @@ func GetMiddlewarePackage(ctx context.Context, cli client.Client, name string) (
 }
 
 // ListMiddlewarePackages lists MiddlewarePackages.
-func ListMiddlewarePackages(ctx context.Context, cli client.Client, labelsSelector client.MatchingLabels) ([]v1.MiddlewarePackage, error) {
+func ListMiddlewarePackages(ctx context.Context, cli client.Client, listOptions ...client.ListOption) ([]v1.MiddlewarePackage, error) {
 	list := new(v1.MiddlewarePackageList)
-	err := cli.List(ctx, list, labelsSelector)
+	err := cli.List(ctx, list, listOptions...)
 	if err != nil {
 		return nil, err
 	}

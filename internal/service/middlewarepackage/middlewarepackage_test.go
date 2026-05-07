@@ -238,6 +238,27 @@ func TestIsTerminalInstallError_TransientError(t *testing.T) {
 	}
 }
 
+func TestNormalizedPackageLabels(t *testing.T) {
+	t.Parallel()
+	source := map[string]string{
+		v1.LabelProject:        consts.ProjectZeusOperator,
+		v1.LabelComponent:      "ZooKeeper",
+		v1.LabelPackageVersion: "1.0.0",
+	}
+
+	got := normalizedPackageLabels(source)
+	if got[v1.LabelProject] != consts.ProjectOpenSaola {
+		t.Fatalf("expected project label to be normalized to %q, got %q", consts.ProjectOpenSaola, got[v1.LabelProject])
+	}
+	if got[v1.LabelComponent] != "ZooKeeper" {
+		t.Fatalf("expected component label to be preserved, got %q", got[v1.LabelComponent])
+	}
+	source[v1.LabelComponent] = "changed"
+	if got[v1.LabelComponent] != "ZooKeeper" {
+		t.Fatal("expected normalized labels to be copied, not aliased")
+	}
+}
+
 func TestIsTerminalInstallError_YAMLConversionError(t *testing.T) {
 	t.Parallel()
 	// Error containing "error converting YAML to JSON" should be terminal.

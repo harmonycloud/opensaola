@@ -73,6 +73,15 @@ func isTerminalInstallError(err error) bool {
 		strings.Contains(msg, "invalid map key")
 }
 
+func normalizedPackageLabels(source map[string]string) map[string]string {
+	labels := make(map[string]string, len(source)+1)
+	for key, value := range source {
+		labels[key] = value
+	}
+	labels[v1.LabelProject] = consts.ProjectOpenSaola
+	return labels
+}
+
 func Check(ctx context.Context, cli client.Client, mp *v1.MiddlewarePackage) error {
 	if mp == nil {
 		return nil
@@ -148,7 +157,7 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 			},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   secret.Name,
-				Labels: secret.Labels,
+				Labels: normalizedPackageLabels(secret.Labels),
 			},
 			Spec: v1.MiddlewarePackageSpec{
 				Name:        pkg.Metadata.Name,
@@ -184,7 +193,9 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 			}
 
 			var enabledSecrets *corev1.SecretList
-			enabledSecrets, err = k8s.GetSecrets(ctx, cli, packages.DataNamespace, client.MatchingLabels{
+			enabledSecrets, err = k8s.GetSecrets(ctx, cli, packages.DataNamespace, client.MatchingLabelsSelector{
+				Selector: consts.OpenSaolaProjectSelector(v1.LabelProject),
+			}, client.MatchingLabels{
 				v1.LabelEnabled:   "true",
 				v1.LabelComponent: secret.Labels[v1.LabelComponent],
 			})
@@ -199,6 +210,10 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 					continue
 				}
 				delete(item.Labels, v1.LabelEnabled)
+				if item.Labels == nil {
+					item.Labels = map[string]string{}
+				}
+				item.Labels[v1.LabelProject] = consts.ProjectOpenSaola
 				err = k8s.UpdateSecret(ctx, cli, &item)
 			}
 
@@ -222,7 +237,11 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 				return err
 			}
 
+			if secret.Labels == nil {
+				secret.Labels = map[string]string{}
+			}
 			secret.Labels[v1.LabelEnabled] = "true"
+			secret.Labels[v1.LabelProject] = consts.ProjectOpenSaola
 			delete(secret.Annotations, v1.LabelInstall)
 			delete(secret.Annotations, v1.AnnotationInstallDigest)
 			delete(secret.Annotations, v1.AnnotationInstallError)
@@ -236,7 +255,11 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 			if err != nil {
 				return err
 			}
+			if secret.Labels == nil {
+				secret.Labels = map[string]string{}
+			}
 			secret.Labels[v1.LabelEnabled] = "false"
+			secret.Labels[v1.LabelProject] = consts.ProjectOpenSaola
 			delete(secret.Annotations, v1.LabelUnInstall)
 			delete(secret.Annotations, v1.AnnotationInstallDigest)
 			delete(secret.Annotations, v1.AnnotationInstallError)

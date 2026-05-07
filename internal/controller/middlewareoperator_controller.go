@@ -60,7 +60,6 @@ var errMiddlewareOperatorFinalizerAdded = errors.New("middlewareoperator finaliz
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewareoperators/finalizers,verbs=update
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=apps,resources=deployments/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=apps,resources=deployments/finalizers,verbs=update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to

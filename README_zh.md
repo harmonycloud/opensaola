@@ -122,6 +122,8 @@ HELM_INTERNAL_REPOSITORY=middleware/opensaola \
 make helm-sync-image
 ```
 
+镜像同步默认使用 `skopeo copy --all` 保留多架构 manifest。执行环境需要安装 `skopeo`；如果明确只需要同步当前机器架构，可以设置 `HELM_SYNC_MULTI_ARCH=false` 使用 docker/nerdctl 单架构兜底。
+
 如果想跟随浮动 `dev` 镜像标签并强制滚动，使用：
 
 ```bash

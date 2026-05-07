@@ -60,6 +60,7 @@ HELM_TARGET_KUBECTL_IMAGE_REPOSITORY := $(if $(filter true,$(HELM_USE_INTERNAL_I
 HELM_SOURCE_KUBECTL_IMAGE := $(HELM_KUBECTL_IMAGE_REGISTRY)/$(HELM_KUBECTL_IMAGE_REPOSITORY):$(HELM_KUBECTL_IMAGE_TAG)
 HELM_TARGET_KUBECTL_IMAGE := $(HELM_TARGET_KUBECTL_IMAGE_REGISTRY)/$(HELM_TARGET_KUBECTL_IMAGE_REPOSITORY):$(HELM_KUBECTL_IMAGE_TAG)
 HELM_SYNC_IMAGE ?= false
+HELM_SYNC_MULTI_ARCH ?= true
 HELM_REQUIRE_INTERNAL_IMAGE ?= false
 HELM_EXTRA_ARGS ?=
 HELM_REDEPLOY_AT ?= $(shell date -u +%Y%m%dT%H%M%SZ)
@@ -328,7 +329,14 @@ sync-helm-image:
 		fi; \
 		echo "Syncing $$source_image -> $$target_image"; \
 		if command -v skopeo >/dev/null 2>&1; then \
-			skopeo copy --dest-tls-verify=false "docker://$$source_image" "docker://$$target_image"; \
+			if [ "$(HELM_SYNC_MULTI_ARCH)" = "true" ]; then \
+				skopeo copy --all --dest-tls-verify=false "docker://$$source_image" "docker://$$target_image"; \
+			else \
+				skopeo copy --dest-tls-verify=false "docker://$$source_image" "docker://$$target_image"; \
+			fi; \
+		elif [ "$(HELM_SYNC_MULTI_ARCH)" = "true" ]; then \
+			echo "skopeo is required for multi-architecture image sync. Install skopeo or set HELM_SYNC_MULTI_ARCH=false for single-architecture fallback." >&2; \
+			exit 1; \
 		elif command -v docker >/dev/null 2>&1; then \
 			docker pull "$$source_image"; \
 			docker tag "$$source_image" "$$target_image"; \

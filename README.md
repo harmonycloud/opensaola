@@ -122,6 +122,8 @@ HELM_INTERNAL_REPOSITORY=middleware/opensaola \
 make helm-sync-image
 ```
 
+Image sync uses `skopeo copy --all` by default to preserve the multi-architecture manifest. The execution environment must have `skopeo` installed; set `HELM_SYNC_MULTI_ARCH=false` only when a current-platform docker/nerdctl fallback is intended.
+
 To follow the floating `dev` image tag and force a rollout, use:
 
 ```bash

@@ -23,7 +23,7 @@ imagePullSecrets: []
 
 # -- Number of operator replicas
 # -- 控制器副本数
-replicas: 1
+replicas: 2
 
 # -- CRD installation via kubectl job
 # -- 通过 kubectl Job 安装 CRD

@@ -34,6 +34,17 @@ git pull --ff-only && make helm-deploy
 
 This deploys `ghcr.io/harmonycloud/opensaola:sha-<shortsha>` for the checked-out commit. Wait for the GitHub Docker workflow of that commit to finish before running it.
 
+If the cluster pulls GHCR slowly, set only the internal Harbor registry and OpenSaola repository path. The Makefile syncs the current image to Harbor and deploys the internal image:
+
+```bash
+git pull --ff-only && \
+HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
+HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+make helm-deploy
+```
+
+This keeps the default tag selection, so no manual tag is needed. The kubectl image used by the CRD hook Job is synced to the same Harbor project as well.
+
 If you want to follow the floating `dev` image tag instead of the exact commit tag, run:
 
 ```bash

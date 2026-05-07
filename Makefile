@@ -42,6 +42,23 @@ HELM_GIT_SHA ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null)
 HELM_GIT_TAG ?= $(shell git describe --exact-match --tags --match 'v[0-9]*' HEAD 2>/dev/null)
 HELM_IMAGE_TAG ?= $(if $(HELM_GIT_TAG),$(HELM_GIT_TAG),$(if $(filter dev master main,$(HELM_GIT_BRANCH)),$(if $(HELM_GIT_SHA),sha-$(HELM_GIT_SHA),$(HELM_GIT_BRANCH)),dev))
 HELM_IMAGE_PULL_POLICY ?= $(if $(filter dev master main latest,$(HELM_IMAGE_TAG)),Always,IfNotPresent)
+HELM_INTERNAL_REGISTRY ?=
+HELM_INTERNAL_REPOSITORY ?=
+HELM_INTERNAL_PROJECT := $(patsubst %/,%,$(dir $(strip $(HELM_INTERNAL_REPOSITORY))))
+HELM_INTERNAL_KUBECTL_REPOSITORY ?= $(if $(filter .,$(HELM_INTERNAL_PROJECT)),kubectl,$(HELM_INTERNAL_PROJECT)/kubectl)
+HELM_KUBECTL_IMAGE_REGISTRY ?= ghcr.io
+HELM_KUBECTL_IMAGE_REPOSITORY ?= harmonycloud/kubectl
+HELM_KUBECTL_IMAGE_TAG ?= v1.30.14
+HELM_KUBECTL_IMAGE_PULL_POLICY ?= IfNotPresent
+HELM_USE_INTERNAL_IMAGE := $(if $(and $(strip $(HELM_INTERNAL_REGISTRY)),$(strip $(HELM_INTERNAL_REPOSITORY))),true,false)
+HELM_TARGET_IMAGE_REGISTRY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(strip $(HELM_INTERNAL_REGISTRY)),$(HELM_IMAGE_REGISTRY))
+HELM_TARGET_IMAGE_REPOSITORY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(strip $(HELM_INTERNAL_REPOSITORY)),$(HELM_IMAGE_REPOSITORY))
+HELM_SOURCE_IMAGE := $(HELM_IMAGE_REGISTRY)/$(HELM_IMAGE_REPOSITORY):$(HELM_IMAGE_TAG)
+HELM_TARGET_IMAGE := $(HELM_TARGET_IMAGE_REGISTRY)/$(HELM_TARGET_IMAGE_REPOSITORY):$(HELM_IMAGE_TAG)
+HELM_TARGET_KUBECTL_IMAGE_REGISTRY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(strip $(HELM_INTERNAL_REGISTRY)),$(HELM_KUBECTL_IMAGE_REGISTRY))
+HELM_TARGET_KUBECTL_IMAGE_REPOSITORY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(HELM_INTERNAL_KUBECTL_REPOSITORY),$(HELM_KUBECTL_IMAGE_REPOSITORY))
+HELM_SOURCE_KUBECTL_IMAGE := $(HELM_KUBECTL_IMAGE_REGISTRY)/$(HELM_KUBECTL_IMAGE_REPOSITORY):$(HELM_KUBECTL_IMAGE_TAG)
+HELM_TARGET_KUBECTL_IMAGE := $(HELM_TARGET_KUBECTL_IMAGE_REGISTRY)/$(HELM_TARGET_KUBECTL_IMAGE_REPOSITORY):$(HELM_KUBECTL_IMAGE_TAG)
 HELM_EXTRA_ARGS ?=
 HELM_REDEPLOY_AT ?= $(shell date -u +%Y%m%dT%H%M%SZ)
 
@@ -274,8 +291,48 @@ helm-deploy: helm-upgrade ## Install or upgrade OpenSaola from the local Helm ch
 .PHONY: helm-deploy-dev
 helm-deploy-dev: helm-upgrade-dev ## Upgrade OpenSaola with the floating dev image and force a rollout.
 
+.PHONY: sync-helm-image
+sync-helm-image: ## Sync Helm images to HELM_INTERNAL_REGISTRY when internal image mode is enabled.
+	@if { [ -n "$(strip $(HELM_INTERNAL_REGISTRY))" ] && [ -z "$(strip $(HELM_INTERNAL_REPOSITORY))" ]; } || \
+		{ [ -z "$(strip $(HELM_INTERNAL_REGISTRY))" ] && [ -n "$(strip $(HELM_INTERNAL_REPOSITORY))" ]; }; then \
+		echo "HELM_INTERNAL_REGISTRY and HELM_INTERNAL_REPOSITORY must be set together." >&2; \
+		exit 1; \
+	fi; \
+	if [ "$(HELM_USE_INTERNAL_IMAGE)" != "true" ]; then \
+		exit 0; \
+	fi; \
+	if [ -z "$(HELM_IMAGE_TAG)" ] || [ "$(HELM_IMAGE_TAG)" = "HEAD" ]; then \
+		echo "Internal image sync requires HELM_IMAGE_TAG to resolve to a concrete tag." >&2; \
+		exit 1; \
+	fi; \
+	sync_image() { \
+		local source_image="$$1"; \
+		local target_image="$$2"; \
+		if [ "$$source_image" = "$$target_image" ]; then \
+			echo "Image already uses target registry: $$target_image"; \
+			return 0; \
+		fi; \
+		echo "Syncing $$source_image -> $$target_image"; \
+		if command -v skopeo >/dev/null 2>&1; then \
+			skopeo copy --dest-tls-verify=false "docker://$$source_image" "docker://$$target_image"; \
+		elif command -v docker >/dev/null 2>&1; then \
+			docker pull "$$source_image"; \
+			docker tag "$$source_image" "$$target_image"; \
+			docker push "$$target_image"; \
+		elif command -v nerdctl >/dev/null 2>&1; then \
+			nerdctl pull "$$source_image"; \
+			nerdctl tag "$$source_image" "$$target_image"; \
+			nerdctl push --insecure-registry "$$target_image"; \
+		else \
+			echo "No image sync tool found. Install skopeo, docker, or nerdctl." >&2; \
+			exit 1; \
+		fi; \
+	}; \
+	sync_image '$(HELM_SOURCE_IMAGE)' '$(HELM_TARGET_IMAGE)'; \
+	sync_image '$(HELM_SOURCE_KUBECTL_IMAGE)' '$(HELM_TARGET_KUBECTL_IMAGE)'
+
 .PHONY: helm-upgrade
-helm-upgrade: ## Install or upgrade OpenSaola from the local Helm chart.
+helm-upgrade: sync-helm-image ## Install or upgrade OpenSaola from the local Helm chart.
 	@release_namespace='$(HELM_NAMESPACE)'; \
 	if [ "$(HELM_AUTO_NAMESPACE)" = "true" ] && [ "$(HELM_NAMESPACE_FROM_DEFAULT)" = "true" ]; then \
 		detected_namespaces="$$( $(HELM) list -A --no-headers 2>/dev/null | awk -v release='$(HELM_RELEASE)' '$$1 == release { print $$2 }' )"; \
@@ -296,15 +353,23 @@ helm-upgrade: ## Install or upgrade OpenSaola from the local Helm chart.
 	if [ -n "$(HELM_IMAGE_TAG)" ] && [ "$(HELM_IMAGE_TAG)" != "HEAD" ]; then \
 		tag_args+=(--set image.tag="$(HELM_IMAGE_TAG)"); \
 	fi; \
+	kubectl_image_args=(); \
+	if [ "$(HELM_USE_INTERNAL_IMAGE)" = "true" ]; then \
+		kubectl_image_args+=(--set kubectl.image.registry="$(HELM_TARGET_KUBECTL_IMAGE_REGISTRY)"); \
+		kubectl_image_args+=(--set kubectl.image.repository="$(HELM_TARGET_KUBECTL_IMAGE_REPOSITORY)"); \
+		kubectl_image_args+=(--set kubectl.image.tag="$(HELM_KUBECTL_IMAGE_TAG)"); \
+		kubectl_image_args+=(--set kubectl.image.pullPolicy="$(HELM_KUBECTL_IMAGE_PULL_POLICY)"); \
+	fi; \
 	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
 		--namespace "$$release_namespace" \
 		--create-namespace \
 		--wait \
 		--timeout $(HELM_TIMEOUT) \
-		--set image.registry="$(HELM_IMAGE_REGISTRY)" \
-		--set image.repository="$(HELM_IMAGE_REPOSITORY)" \
+		--set image.registry="$(HELM_TARGET_IMAGE_REGISTRY)" \
+		--set image.repository="$(HELM_TARGET_IMAGE_REPOSITORY)" \
 		--set image.pullPolicy="$(HELM_IMAGE_PULL_POLICY)" \
 		"$${tag_args[@]}" \
+		"$${kubectl_image_args[@]}" \
 		$(HELM_EXTRA_ARGS)
 
 .PHONY: helm-upgrade-dev

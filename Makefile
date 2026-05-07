@@ -59,6 +59,8 @@ HELM_TARGET_KUBECTL_IMAGE_REGISTRY := $(if $(filter true,$(HELM_USE_INTERNAL_IMA
 HELM_TARGET_KUBECTL_IMAGE_REPOSITORY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(HELM_INTERNAL_KUBECTL_REPOSITORY),$(HELM_KUBECTL_IMAGE_REPOSITORY))
 HELM_SOURCE_KUBECTL_IMAGE := $(HELM_KUBECTL_IMAGE_REGISTRY)/$(HELM_KUBECTL_IMAGE_REPOSITORY):$(HELM_KUBECTL_IMAGE_TAG)
 HELM_TARGET_KUBECTL_IMAGE := $(HELM_TARGET_KUBECTL_IMAGE_REGISTRY)/$(HELM_TARGET_KUBECTL_IMAGE_REPOSITORY):$(HELM_KUBECTL_IMAGE_TAG)
+HELM_SYNC_IMAGE ?= false
+HELM_REQUIRE_INTERNAL_IMAGE ?= false
 HELM_EXTRA_ARGS ?=
 HELM_REDEPLOY_AT ?= $(shell date -u +%Y%m%dT%H%M%SZ)
 
@@ -291,14 +293,26 @@ helm-deploy: helm-upgrade ## Install or upgrade OpenSaola from the local Helm ch
 .PHONY: helm-deploy-dev
 helm-deploy-dev: helm-upgrade-dev ## Upgrade OpenSaola with the floating dev image and force a rollout.
 
+.PHONY: helm-sync-image
+helm-sync-image: HELM_REQUIRE_INTERNAL_IMAGE=true
+helm-sync-image: HELM_SYNC_IMAGE=true
+helm-sync-image: sync-helm-image ## Sync Helm images to the configured internal registry without upgrading.
+
 .PHONY: sync-helm-image
-sync-helm-image: ## Sync Helm images to HELM_INTERNAL_REGISTRY when internal image mode is enabled.
+sync-helm-image:
 	@if { [ -n "$(strip $(HELM_INTERNAL_REGISTRY))" ] && [ -z "$(strip $(HELM_INTERNAL_REPOSITORY))" ]; } || \
 		{ [ -z "$(strip $(HELM_INTERNAL_REGISTRY))" ] && [ -n "$(strip $(HELM_INTERNAL_REPOSITORY))" ]; }; then \
 		echo "HELM_INTERNAL_REGISTRY and HELM_INTERNAL_REPOSITORY must be set together." >&2; \
 		exit 1; \
 	fi; \
 	if [ "$(HELM_USE_INTERNAL_IMAGE)" != "true" ]; then \
+		if [ "$(HELM_REQUIRE_INTERNAL_IMAGE)" = "true" ] || [ "$(HELM_SYNC_IMAGE)" = "true" ]; then \
+			echo "Set HELM_INTERNAL_REGISTRY and HELM_INTERNAL_REPOSITORY to sync Helm images." >&2; \
+			exit 1; \
+		fi; \
+		exit 0; \
+	fi; \
+	if [ "$(HELM_SYNC_IMAGE)" != "true" ]; then \
 		exit 0; \
 	fi; \
 	if [ -z "$(HELM_IMAGE_TAG)" ] || [ "$(HELM_IMAGE_TAG)" = "HEAD" ]; then \

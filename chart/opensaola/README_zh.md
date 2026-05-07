@@ -34,7 +34,7 @@ git pull --ff-only && make helm-deploy
 
 该命令会部署当前检出提交对应的 `ghcr.io/harmonycloud/opensaola:sha-<shortsha>` 镜像。执行前请先等 GitHub 上该提交的 Docker workflow 完成。
 
-如果集群拉取 GHCR 较慢，只需要指定内部 Harbor 地址和 OpenSaola 仓库路径，Makefile 会自动同步当前镜像到内部仓库并使用内部镜像升级：
+如果集群拉取 GHCR 较慢，只需要指定内部 Harbor 地址和 OpenSaola 仓库路径，Makefile 会使用内部镜像升级；默认不会同步镜像：
 
 ```bash
 git pull --ff-only && \
@@ -43,7 +43,23 @@ HELM_INTERNAL_REPOSITORY=middleware/opensaola \
 make helm-deploy
 ```
 
-该模式会沿用默认镜像 tag 规则，不需要手动指定 tag；CRD hook Job 使用的 kubectl 镜像也会同步到同一 Harbor 项目。
+该模式会沿用默认镜像 tag 规则，不需要手动指定 tag。如果需要在升级前同步 OpenSaola 和 CRD hook Job 使用的 kubectl 镜像，加上 `HELM_SYNC_IMAGE=true`：
+
+```bash
+git pull --ff-only && \
+HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
+HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_SYNC_IMAGE=true \
+make helm-deploy
+```
+
+如果只需要提前同步镜像，不执行 Helm 升级，可以运行：
+
+```bash
+HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
+HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+make helm-sync-image
+```
 
 如果想跟随浮动 `dev` 镜像标签，而不是精确提交镜像标签，执行：
 

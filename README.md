@@ -95,7 +95,7 @@ git pull --ff-only && make helm-deploy
 
 Run it after the GitHub Docker workflow for that commit has published the matching `sha-<shortsha>` image.
 
-If the cluster pulls GHCR slowly, set only the internal Harbor registry and OpenSaola repository path. The Makefile syncs the current image to Harbor and deploys the internal image:
+If the cluster pulls GHCR slowly, set only the internal Harbor registry and OpenSaola repository path. The Makefile deploys the internal image and does not sync images by default:
 
 ```bash
 git pull --ff-only && \
@@ -104,7 +104,23 @@ HELM_INTERNAL_REPOSITORY=middleware/opensaola \
 make helm-deploy
 ```
 
-This keeps the default tag selection, so no manual tag is needed. The kubectl image used by the CRD hook Job is synced to the same Harbor project as well.
+This keeps the default tag selection, so no manual tag is needed. To sync the OpenSaola image and the kubectl image used by the CRD hook Job before upgrading, add `HELM_SYNC_IMAGE=true`:
+
+```bash
+git pull --ff-only && \
+HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
+HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_SYNC_IMAGE=true \
+make helm-deploy
+```
+
+To sync images ahead of time without running a Helm upgrade, use:
+
+```bash
+HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
+HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+make helm-sync-image
+```
 
 To follow the floating `dev` image tag and force a rollout, use:
 

@@ -70,7 +70,7 @@ config:
   createDataNamespace: false
   # -- Log level (0=debug, 1=info, 2=warn, 3=error)
   # -- 日志级别（0=debug，1=info，2=warn，3=error）
-  logLevel: 0
+  logLevel: 1
   # -- Log format: "console" (human-readable) or "json" (structured)
   # -- 日志格式："console"（便于阅读）或 "json"（结构化）
   logFormat: "console"

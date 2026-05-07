@@ -327,12 +327,16 @@ sync-helm-image:
 			echo "Image already uses target registry: $$target_image"; \
 			return 0; \
 		fi; \
+		if command -v skopeo >/dev/null 2>&1 && skopeo inspect --raw --tls-verify=false "docker://$$target_image" >/dev/null 2>&1; then \
+			echo "Image already exists in target registry: $$target_image"; \
+			return 0; \
+		fi; \
 		echo "Syncing $$source_image -> $$target_image"; \
 		if command -v skopeo >/dev/null 2>&1; then \
 			if [ "$(HELM_SYNC_MULTI_ARCH)" = "true" ]; then \
-				skopeo copy --all --dest-tls-verify=false "docker://$$source_image" "docker://$$target_image"; \
+				skopeo copy --all --dest-tls-verify=false "docker://$$source_image" "docker://$$target_image" || return $$?; \
 			else \
-				skopeo copy --dest-tls-verify=false "docker://$$source_image" "docker://$$target_image"; \
+				skopeo copy --dest-tls-verify=false "docker://$$source_image" "docker://$$target_image" || return $$?; \
 			fi; \
 		elif [ "$(HELM_SYNC_MULTI_ARCH)" = "true" ]; then \
 			echo "skopeo is required for multi-architecture image sync. Install skopeo or set HELM_SYNC_MULTI_ARCH=false for single-architecture fallback." >&2; \

@@ -124,7 +124,7 @@ func startCRWatcherImpl(ctx context.Context, cli client.Client, attempt int) (er
 	log.FromContext(ctx).Info("start cr watcher initial list done")
 
 	// Start watching
-	log.FromContext(ctx).V(1).Info("watcher get middlewares", "middlewares", middlewares)
+	log.FromContext(ctx).V(1).Info("watcher get middlewares", "count", len(middlewares), "middlewares", middlewareLogRefs(middlewares))
 	for _, mid := range middlewares {
 		// Get CR
 		var (
@@ -261,7 +261,7 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 				return
 			}
 
-			log.FromContext(ctx).V(1).Info("CR CREATE event", "obj", obj)
+			log.FromContext(ctx).V(1).Info("CR CREATE event", customResourceLogFields("cr", cr)...)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			oldCR, ok := customResourceEventObject(oldObj)
@@ -276,13 +276,13 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 				return
 			}
 
-			log.FromContext(ctx).V(1).Info("CR UPDATE event", "oldObj", oldObj, "newObj", newObj)
-
 			// Handle custom resource update event; oldObj is the old object, newObj is the updated object
 			oldVersion := oldCR.GetResourceVersion()
 			newVersion := newCR.GetResourceVersion()
 
-			log.FromContext(ctx).V(1).Info("CR UPDATE event", "oldVersion", oldVersion, "newVersion", newVersion)
+			logFields := customResourceLogFields("new", newCR)
+			logFields = append(logFields, "oldResourceVersion", oldVersion, "oldGeneration", oldCR.GetGeneration())
+			log.FromContext(ctx).V(1).Info("CR UPDATE event", logFields...)
 
 			// Compare versions
 			if oldVersion != newVersion {
@@ -299,7 +299,7 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 
 			// Handle custom resource delete event
 			// obj is the deleted custom resource object
-			log.FromContext(ctx).V(1).Info("CR DELETE event", "obj", obj)
+			log.FromContext(ctx).V(1).Info("CR DELETE event", customResourceLogFields("cr", cr)...)
 
 			// If OwnerReferences no longer exist, stop watching
 			for _, reference := range cr.GetOwnerReferences() {
@@ -334,4 +334,44 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 func customResourceEventObject(obj interface{}) (*unstructured.Unstructured, bool) {
 	cr, ok := obj.(*unstructured.Unstructured)
 	return cr, ok
+}
+
+func customResourceLogFields(prefix string, cr *unstructured.Unstructured) []interface{} {
+	if cr == nil {
+		return []interface{}{prefix + "Nil", true}
+	}
+	labels := cr.GetLabels()
+	return []interface{}{
+		prefix + "APIVersion", cr.GetAPIVersion(),
+		prefix + "Kind", cr.GetKind(),
+		prefix + "Namespace", cr.GetNamespace(),
+		prefix + "Name", cr.GetName(),
+		prefix + "ResourceVersion", cr.GetResourceVersion(),
+		prefix + "Generation", cr.GetGeneration(),
+		prefix + "PackageName", labels[v1.LabelPackageName],
+		prefix + "PackageVersion", labels[v1.LabelPackageVersion],
+		prefix + "Component", labels[v1.LabelComponent],
+		prefix + "Definition", labels["middleware.cn/definition"],
+		prefix + "OwnerReferences", len(cr.GetOwnerReferences()),
+	}
+}
+
+func middlewareLogRefs(middlewares []v1.Middleware) []string {
+	const limit = 20
+	count := len(middlewares)
+	if count == 0 {
+		return nil
+	}
+	logCount := count
+	if logCount > limit {
+		logCount = limit
+	}
+	refs := make([]string, 0, logCount+1)
+	for i := 0; i < logCount; i++ {
+		refs = append(refs, fmt.Sprintf("%s/%s", middlewares[i].Namespace, middlewares[i].Name))
+	}
+	if count > limit {
+		refs = append(refs, fmt.Sprintf("...+%d", count-limit))
+	}
+	return refs
 }

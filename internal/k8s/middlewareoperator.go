@@ -50,9 +50,9 @@ func MiddlewareOperatorGroupResource() schema.GroupResource {
 // CreateMiddlewareOperator creates a MiddlewareOperator.
 func CreateMiddlewareOperator(ctx context.Context, cli client.Client, m *v1.MiddlewareOperator) error {
 	// First check if it already exists
-	_, err := GetMiddleware(ctx, cli, m.Name, m.Namespace)
+	_, err := GetMiddlewareOperator(ctx, cli, m.Name, m.Namespace)
 	if err == nil {
-		return errors.NewAlreadyExists(MiddlewareGroupResource(), m.Name)
+		return errors.NewAlreadyExists(MiddlewareOperatorGroupResource(), m.Name)
 	}
 	return cli.Create(ctx, m)
 }

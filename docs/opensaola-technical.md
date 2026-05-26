@@ -701,13 +701,13 @@ MiddlewareAction (Namespaced) -- 引用 --> MiddlewareActionBaseline
     |
     |-- 否 --> [判断 Generation vs ObservedGeneration]
                    |
-                   |-- generation == observedGeneration && 未初始化完成 || observedGeneration == 0
+                   |-- observedGeneration == 0
                    |       --> [HandleResource(Publish)]
                    |
                    |-- generation > observedGeneration || state == Updating
                    |       --> [HandleResource(Update)]
                    |
-                   |-- 其他（已初始化 && generation == observedGeneration && state != Updating）
+                   |-- 其他（generation == observedGeneration && state != Updating）
                    |       --> 仅同步状态（defer 中根据 Conditions 计算 State）
                    |       注：这是稳态运行的主要路径
                    
@@ -774,7 +774,7 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 | 触发事件 | 影响的 CRD | 行为 |
 |----------|-----------|------|
 | Spec 变更（Generation 增加） | 所有 CRD | 重新 Reconcile |
-| Status 变更 | Middleware | **被忽略**（Predicate 过滤） |
+| Status 变更 | Middleware, MiddlewareOperator | **被忽略**（Predicate 过滤） |
 | 添加 `middleware.cn/update` 注解 | Middleware, MiddlewareOperator | 触发升级流程 |
 | 添加 `middleware.cn/install` 注解到 Secret | MiddlewarePackage | 触发包安装 |
 | 添加 `middleware.cn/uninstall` 注解到 Secret | MiddlewarePackage | 触发包卸载 |
@@ -821,17 +821,11 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 
 **Watch 资源**：`v1.Middleware`（自身）  
 **Predicate 过滤器**：忽略仅 Status 字段变更的 Update 事件  
-**全局变量**：`MiddlewareInitializationCompleted` - 标记是否完成初始化
-
-> **MiddlewareInitializationCompleted 边界说明**：
-> 1. 作用：确保 Operator 启动时对已存在的 Middleware 做一次全量 Publish（即使 generation == observedGeneration，也会执行 HandleResource(Publish)）
-> 2. 仅第一个成功执行的 Reconcile 会将此标志设为 true，后续 Reconcile 进入正常的 generation 比较逻辑
-> 3. 新创建的 Middleware（observedGeneration == 0）不受此标志影响，因为 `observedGeneration == 0` 条件独立于此标志，始终会触发 Publish
 
 **Reconcile 主逻辑**：
 
 1. **获取 Middleware**：通过 `k8s.GetMiddleware` 获取
-   - 如果 NotFound：从 `MiddlewareCache` 获取缓存副本，调用 `HandleResource(Delete)` 删除关联资源，清除缓存
+   - 如果 NotFound：忽略并退出
    - 如果其他错误：返回错误
 
 2. **defer 状态更新**：
@@ -846,7 +840,7 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
    - 检查 `middleware.cn/update` 注解是否存在
 
 5. **Generation 判断**：
-   - `generation == observedGeneration && !初始化完成` 或 `observedGeneration == 0`：调用 `HandleResource(Publish)`
+   - `observedGeneration == 0`：调用 `HandleResource(Publish)`
    - `generation > observedGeneration` 或 `state == Updating`：调用 `HandleResource(Update)`
 
 **HandleResource 调用链**：
@@ -870,15 +864,15 @@ HandleResource(Publish/Update/Delete)
 ### 5.3 MiddlewareOperator Controller
 
 **Watch 资源**：`v1.MiddlewareOperator`（自身），`appsv1.Deployment`（Owns）  
-**全局变量**：`MiddlewareOperatorInitializationCompleted`
+**Predicate 过滤器**：忽略 MiddlewareOperator 仅 Status 字段变更的 Update 事件；Deployment ownership 使用 `GenerationChangedPredicate`
 
-> **注意**：与 Middleware Controller 不同，MiddlewareOperator 的 `SetupWithManager` **未配置** Status 变更过滤的 Predicate，因此 Status 变更也会触发 Reconcile。Middleware Controller 使用了自定义 `predicate.Funcs` 过滤掉仅 Status 变化的 Update 事件，而 MiddlewareOperator Controller 直接使用默认行为。
+> **注意**：MiddlewareOperator 仍保留注解和元数据变更事件，因此即使过滤了仅 Status 更新，`middleware.cn/update` 仍能触发升级流程。
 
 **Reconcile 主逻辑**（分两阶段）：
 
 **阶段 1 - handleMiddlewareOperator**：
 1. 获取 MiddlewareOperator
-   - NotFound：从缓存获取 -> HandleResource(Delete) -> 清缓存
+   - NotFound：忽略并退出
 2. defer 状态更新（与 Middleware 相同逻辑）
 3. Check 校验：验证 baseline 不为空
 4. ReplacePackage 升级检查
@@ -1443,7 +1437,7 @@ type TarInfo struct {
 |------|------|
 | 使用 sync.Map 缓存 Baseline/Configuration/OperatorBaseline/ActionBaseline | 避免频繁从 Secret 解压读取包内容；配合定时清理（cache_cleanup_interval，默认 1800 秒） |
 | Middleware 删除时从 Cache 获取对象 | 已删除的对象无法从 API Server 获取，需要依赖缓存进行资源清理 |
-| Middleware Controller 使用 Predicate 过滤 Status 更新 | 避免 Status 更新触发无限循环 Reconcile |
+| Middleware 和 MiddlewareOperator Controller 使用 Predicate 过滤 Status 更新 | 避免 Status 更新触发无限循环 Reconcile，同时保留 spec、metadata 和 annotation 变更 |
 | MiddlewareAction 的一次性执行语义（State 非空即跳过） | Action 是操作而非声明式状态，执行完毕后不应重复执行 |
 | CR 被删除时自动重建 | 保护中间件实例不被意外删除；通过 Watcher DeleteFunc 实现 |
 | MiddlewareOperator 比较 Deployment 差异并恢复 | 防止 Deployment 被外部修改（如 kubectl edit），确保与 Spec 声明一致 |

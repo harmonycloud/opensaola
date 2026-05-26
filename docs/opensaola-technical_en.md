@@ -701,13 +701,13 @@ Create/Update
     |
     |-- no --> [Compare Generation vs ObservedGeneration]
                    |
-                   |-- generation == observedGeneration && not initialized || observedGeneration == 0
+                   |-- observedGeneration == 0
                    |       --> [HandleResource(Publish)]
                    |
                    |-- generation > observedGeneration || state == Updating
                    |       --> [HandleResource(Update)]
                    |
-                   |-- other (initialized && generation == observedGeneration && state != Updating)
+                   |-- other (generation == observedGeneration && state != Updating)
                    |       --> sync state only (defer computes State based on Conditions)
                    |       Note: this is the primary path during steady-state operation
                    
@@ -774,7 +774,7 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 | Trigger Event | Affected CRDs | Behavior |
 |---------------|---------------|----------|
 | Spec change (Generation increases) | All CRDs | Re-Reconcile |
-| Status change | Middleware | **Ignored** (filtered by Predicate) |
+| Status change | Middleware, MiddlewareOperator | **Ignored** (filtered by Predicate) |
 | Adding `middleware.cn/update` annotation | Middleware, MiddlewareOperator | Triggers upgrade flow |
 | Adding `middleware.cn/install` annotation to Secret | MiddlewarePackage | Triggers package installation |
 | Adding `middleware.cn/uninstall` annotation to Secret | MiddlewarePackage | Triggers package uninstallation |
@@ -821,17 +821,11 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 
 **Watch Resource**: `v1.Middleware` (itself)  
 **Predicate Filter**: Ignores Update events where only Status fields changed  
-**Global Variable**: `MiddlewareInitializationCompleted` - Marks whether initialization is complete
-
-> **MiddlewareInitializationCompleted boundary notes**:
-> 1. Purpose: Ensures a full Publish for all existing Middleware instances when the Operator starts up (HandleResource(Publish) is executed even when generation == observedGeneration)
-> 2. Only the first successfully executed Reconcile sets this flag to true; subsequent Reconciles enter the normal generation comparison logic
-> 3. Newly created Middleware (observedGeneration == 0) is not affected by this flag, because the `observedGeneration == 0` condition is independent of this flag and always triggers a Publish
 
 **Reconcile Main Logic**:
 
 1. **Get Middleware**: Retrieved via `k8s.GetMiddleware`
-   - If NotFound: Get cached copy from `MiddlewareCache`, call `HandleResource(Delete)` to delete associated resources, clear cache
+   - If NotFound: Ignore and exit
    - If other error: Return error
 
 2. **Deferred status update**:
@@ -846,7 +840,7 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
    - Check whether `middleware.cn/update` annotation exists
 
 5. **Generation comparison**:
-   - `generation == observedGeneration && !initialized` or `observedGeneration == 0`: Call `HandleResource(Publish)`
+   - `observedGeneration == 0`: Call `HandleResource(Publish)`
    - `generation > observedGeneration` or `state == Updating`: Call `HandleResource(Update)`
 
 **HandleResource Call Chain**:
@@ -870,15 +864,15 @@ HandleResource(Publish/Update/Delete)
 ### 5.3 MiddlewareOperator Controller
 
 **Watch Resource**: `v1.MiddlewareOperator` (itself), `appsv1.Deployment` (Owns)  
-**Global Variable**: `MiddlewareOperatorInitializationCompleted`
+**Predicate Filter**: Ignores MiddlewareOperator Update events where only Status fields changed; Deployment ownership uses `GenerationChangedPredicate`
 
-> **Note**: Unlike the Middleware Controller, MiddlewareOperator's `SetupWithManager` does **not** configure a Predicate to filter Status changes, so Status changes also trigger a Reconcile. The Middleware Controller uses a custom `predicate.Funcs` to filter out Update events where only Status changed, while the MiddlewareOperator Controller uses the default behavior.
+> **Note**: MiddlewareOperator keeps annotation and metadata changes in the event stream, so `middleware.cn/update` can still trigger upgrades even though status-only updates are filtered.
 
 **Reconcile Main Logic** (two phases):
 
 **Phase 1 - handleMiddlewareOperator**:
 1. Get MiddlewareOperator
-   - NotFound: Get from cache -> HandleResource(Delete) -> clear cache
+   - NotFound: Ignore and exit
 2. Deferred status update (same logic as Middleware)
 3. Check validation: Verify baseline is not empty
 4. ReplacePackage upgrade check
@@ -1443,7 +1437,7 @@ Provides `CreatePatch`, `ApplyPatch`, `ValidatePatch` methods
 |----------|-----------|
 | Use sync.Map to cache Baseline/Configuration/OperatorBaseline/ActionBaseline | Avoid frequent decompression reads from Secrets; paired with periodic cleanup (cache_cleanup_interval, default 1800 seconds) |
 | Get object from Cache when Middleware is deleted | Deleted objects cannot be retrieved from the API Server; cache is needed for resource cleanup |
-| Middleware Controller uses Predicate to filter Status updates | Prevents Status updates from triggering infinite Reconcile loops |
+| Middleware and MiddlewareOperator controllers use Predicate to filter Status updates | Prevents Status updates from triggering infinite Reconcile loops while preserving spec, metadata, and annotation changes |
 | One-time execution semantics for MiddlewareAction (skip if State is non-empty) | Actions are operations, not declarative state; they should not be re-executed after completion |
 | Automatically rebuild CR when deleted | Protects middleware instances from accidental deletion; implemented via Watcher DeleteFunc |
 | MiddlewareOperator compares Deployment differences and restores | Prevents Deployments from being externally modified (e.g., kubectl edit); ensures consistency with the declared Spec |

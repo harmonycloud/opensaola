@@ -29,6 +29,7 @@ import (
 	"github.com/harmonycloud/opensaola/internal/service/middlewarebaseline"
 	"github.com/harmonycloud/opensaola/internal/service/middlewareoperatorbaseline"
 	"github.com/harmonycloud/opensaola/internal/service/synchronizer"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -249,8 +250,14 @@ func safeClose(ch chan struct{}) {
 	close(ch)
 }
 
-// NewResourceEventHandlerFuncs creates resource event handler functions
+type customResourceUpdateNotifier func(namespace, middlewareName string)
+
+// NewResourceEventHandlerFuncs creates resource event handler functions.
 func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, namespace string) cache.ResourceEventHandlerFuncs {
+	return newResourceEventHandlerFuncs(ctx, cli, notifyCustomResourceSync)
+}
+
+func newResourceEventHandlerFuncs(ctx context.Context, cli client.Client, notify customResourceUpdateNotifier) cache.ResourceEventHandlerFuncs {
 	return cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			cr, ok := customResourceEventObject(obj)
@@ -278,14 +285,14 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 
 			// Handle custom resource update event; oldObj is the old object, newObj is the updated object
 			oldVersion := oldCR.GetResourceVersion()
-			newVersion := newCR.GetResourceVersion()
 
 			logFields := customResourceLogFields("new", newCR)
 			logFields = append(logFields, "oldResourceVersion", oldVersion, "oldGeneration", oldCR.GetGeneration())
 			log.FromContext(ctx).V(1).Info("CR UPDATE event", logFields...)
 
 			// Compare versions
-			if oldVersion != newVersion {
+			if customResourceStatusChanged(oldCR, newCR) {
+				notify(newCR.GetNamespace(), middlewareNameForCustomResource(newCR))
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
@@ -329,6 +336,29 @@ func NewResourceEventHandlerFuncs(ctx context.Context, cli client.Client, name, 
 
 		},
 	}
+}
+
+func customResourceStatusChanged(oldCR, newCR *unstructured.Unstructured) bool {
+	if oldCR.GetResourceVersion() == newCR.GetResourceVersion() {
+		return false
+	}
+	return !equality.Semantic.DeepEqual(oldCR.Object["status"], newCR.Object["status"])
+}
+
+func middlewareNameForCustomResource(cr *unstructured.Unstructured) string {
+	for _, reference := range cr.GetOwnerReferences() {
+		if reference.Kind == "Middleware" && reference.APIVersion == v1.GroupVersion.String() && reference.Name != "" {
+			return reference.Name
+		}
+	}
+	return cr.GetName()
+}
+
+func notifyCustomResourceSync(namespace, middlewareName string) {
+	if middlewareName != "" && synchronizer.NotifyMiddleware(namespace, middlewareName) {
+		return
+	}
+	synchronizer.NotifyNamespace(namespace)
 }
 
 func customResourceEventObject(obj interface{}) (*unstructured.Unstructured, bool) {

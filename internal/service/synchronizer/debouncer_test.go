@@ -146,3 +146,39 @@ func TestDebouncer_Stop(t *testing.T) {
 		// success — no fire
 	}
 }
+
+func TestNsDebounceRegistry_NotifyMiddleware(t *testing.T) {
+	targetFired := make(chan struct{}, 1)
+	otherFired := make(chan struct{}, 1)
+	r := &NsDebounceRegistry{
+		debouncers: map[string]*Debouncer{
+			registryKey("ns1", "target"): &Debouncer{
+				window:    time.Millisecond,
+				maxDelay:  time.Second,
+				triggerFn: func() { targetFired <- struct{}{} },
+			},
+			registryKey("ns1", "other"): &Debouncer{
+				window:    time.Millisecond,
+				maxDelay:  time.Second,
+				triggerFn: func() { otherFired <- struct{}{} },
+			},
+		},
+	}
+
+	if ok := r.NotifyMiddleware("ns1", "target"); !ok {
+		t.Fatal("NotifyMiddleware returned false for registered middleware")
+	}
+	select {
+	case <-targetFired:
+	case <-time.After(time.Second):
+		t.Fatal("target middleware was not notified")
+	}
+	select {
+	case <-otherFired:
+		t.Fatal("other middleware should not be notified")
+	default:
+	}
+	if ok := r.NotifyMiddleware("ns1", "missing"); ok {
+		t.Fatal("NotifyMiddleware returned true for missing middleware")
+	}
+}

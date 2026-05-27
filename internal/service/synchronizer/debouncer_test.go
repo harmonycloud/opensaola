@@ -152,12 +152,12 @@ func TestNsDebounceRegistry_NotifyMiddleware(t *testing.T) {
 	otherFired := make(chan struct{}, 1)
 	r := &NsDebounceRegistry{
 		debouncers: map[string]*Debouncer{
-			registryKey("ns1", "target"): &Debouncer{
+			registryKey("ns1", "target"): {
 				window:    time.Millisecond,
 				maxDelay:  time.Second,
 				triggerFn: func() { targetFired <- struct{}{} },
 			},
-			registryKey("ns1", "other"): &Debouncer{
+			registryKey("ns1", "other"): {
 				window:    time.Millisecond,
 				maxDelay:  time.Second,
 				triggerFn: func() { otherFired <- struct{}{} },

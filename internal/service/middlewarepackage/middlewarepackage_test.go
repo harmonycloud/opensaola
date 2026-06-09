@@ -17,6 +17,8 @@ limitations under the License.
 package middlewarepackage
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -328,6 +330,33 @@ func newMiddlewarePackageTestClient(t *testing.T, objects ...client.Object) clie
 	return fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build()
 }
 
+func buildPackageRelease(t *testing.T, root string, files map[string]string) []byte {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	tw := tar.NewWriter(buf)
+	for name, data := range files {
+		path := root + "/" + name
+		if err := tw.WriteHeader(&tar.Header{
+			Name: path,
+			Size: int64(len(data)),
+			Mode: 0o644,
+		}); err != nil {
+			t.Fatalf("write tar header %s: %v", path, err)
+		}
+		if _, err := tw.Write([]byte(data)); err != nil {
+			t.Fatalf("write tar data %s: %v", path, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar writer: %v", err)
+	}
+	compressed, _, err := packages.Compress(buf.Bytes())
+	if err != nil {
+		t.Fatalf("compress package: %v", err)
+	}
+	return compressed
+}
+
 func TestHandleSecretDelete_MissingPackageNoops(t *testing.T) {
 	t.Parallel()
 	cli := newMiddlewarePackageTestClient(t)
@@ -352,6 +381,78 @@ func TestHandleSecretDelete_DeletesExistingPackage(t *testing.T) {
 	err := cli.Get(context.Background(), client.ObjectKey{Name: mp.Name}, got)
 	if !apiErrors.IsNotFound(err) {
 		t.Fatalf("expected MiddlewarePackage to be deleted, got err=%v object=%#v", err, got)
+	}
+}
+
+func TestHandleResourceDelete_IgnoresMissingPublishedResources(t *testing.T) {
+	t.Parallel()
+	const (
+		secretName = "pkg-delete-missing"
+		namespace  = "middleware-operator"
+	)
+	oldNamespace := packages.DataNamespace
+	packages.SetDataNamespace(namespace)
+	t.Cleanup(func() {
+		packages.SetDataNamespace(oldNamespace)
+		packages.InvalidatePackageCache(secretName)
+	})
+
+	release := buildPackageRelease(t, "testpkg-1.0.0", map[string]string{
+		"metadata.yaml": "name: testpkg\nversion: \"1.0.0\"\n",
+		"baselines/standard.yaml": `apiVersion: middleware.cn/v1
+kind: MiddlewareBaseline
+metadata:
+  name: test-standard
+spec: {}
+`,
+		"baselines/operator.yaml": `apiVersion: middleware.cn/v1
+kind: MiddlewareOperatorBaseline
+metadata:
+  name: test-operator
+spec: {}
+`,
+		"actions/restart.yaml": `apiVersion: middleware.cn/v1
+kind: MiddlewareActionBaseline
+metadata:
+  name: test-restart
+spec:
+  baselineType: NormalAction
+  actionType: restart
+  steps: []
+`,
+		"configurations/config.yaml": `apiVersion: middleware.cn/v1
+kind: MiddlewareConfiguration
+metadata:
+  name: test-config
+spec:
+  template: |
+    apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: test
+`,
+	})
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      secretName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				v1.LabelProject:        consts.ProjectOpenSaola,
+				v1.LabelComponent:      "testpkg",
+				v1.LabelPackageVersion: "1.0.0",
+				v1.LabelPackageName:    secretName,
+				v1.LabelEnabled:        "true",
+			},
+		},
+		Data: map[string][]byte{
+			packages.Release: release,
+		},
+	}
+	mp := &v1.MiddlewarePackage{ObjectMeta: metav1.ObjectMeta{Name: secretName}}
+	cli := newMiddlewarePackageTestClient(t, secret, mp)
+
+	if err := HandleResource(context.Background(), cli, consts.HandleActionDelete, secretName); err != nil {
+		t.Fatalf("expected missing published resources to be ignored during delete, got %v", err)
 	}
 }
 

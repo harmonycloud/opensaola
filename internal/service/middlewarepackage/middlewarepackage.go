@@ -494,49 +494,60 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 		}
 	case consts.HandleActionDelete:
 		// Delete middleware baselines
+		var deleteErr error
 		for _, baseline := range middlewareBaseline {
-			log.FromContext(ctx).Info("start deleting MiddlewareBaseline", "name", baseline.Name)
-			err = k8s.DeleteMiddlewareBaseline(ctx, cli, baseline)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "failed to delete MiddlewareBaseline", "name", baseline.Name)
-				continue
+			if itemErr := deletePackageResource(ctx, "MiddlewareBaseline", baseline.Name, func() error {
+				return k8s.DeleteMiddlewareBaseline(ctx, cli, baseline)
+			}); itemErr != nil && deleteErr == nil {
+				deleteErr = itemErr
 			}
-			log.FromContext(ctx).Info("finished deleting MiddlewareBaseline", "name", baseline.Name)
 		}
 
 		// Delete middleware operator baselines
 		for _, operatorBaseline := range middlewareOperatorBaseline {
-			log.FromContext(ctx).Info("start deleting MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
-			err = k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaseline)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "failed to delete MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
-				continue
+			if itemErr := deletePackageResource(ctx, "MiddlewareOperatorBaseline", operatorBaseline.Name, func() error {
+				return k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaseline)
+			}); itemErr != nil && deleteErr == nil {
+				deleteErr = itemErr
 			}
-			log.FromContext(ctx).Info("finished deleting MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
 		}
 
 		// Delete action baselines
 		for _, actionBaseline := range middlewareActionBaselines {
-			log.FromContext(ctx).Info("start deleting MiddlewareActionBaseline", "name", actionBaseline.Name)
-			err = k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaseline)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "failed to delete MiddlewareActionBaseline", "name", actionBaseline.Name)
-				continue
+			if itemErr := deletePackageResource(ctx, "MiddlewareActionBaseline", actionBaseline.Name, func() error {
+				return k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaseline)
+			}); itemErr != nil && deleteErr == nil {
+				deleteErr = itemErr
 			}
-			log.FromContext(ctx).Info("finished deleting MiddlewareActionBaseline", "name", actionBaseline.Name)
 		}
 
 		// Delete configurations
 		for _, configuration := range configurations {
-			log.FromContext(ctx).Info("start deleting MiddlewareConfiguration", "name", configuration.Name)
-			err = k8s.DeleteMiddlewareConfiguration(ctx, cli, configuration)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "failed to delete MiddlewareConfiguration", "name", configuration.Name)
-				continue
+			if itemErr := deletePackageResource(ctx, "MiddlewareConfiguration", configuration.Name, func() error {
+				return k8s.DeleteMiddlewareConfiguration(ctx, cli, configuration)
+			}); itemErr != nil && deleteErr == nil {
+				deleteErr = itemErr
 			}
-			log.FromContext(ctx).Info("finished deleting MiddlewareConfiguration", "name", configuration.Name)
+		}
+		if deleteErr != nil {
+			err = deleteErr
+			return err
 		}
 
 	}
+	return nil
+}
+
+func deletePackageResource(ctx context.Context, kind, name string, deleteFn func() error) error {
+	log.FromContext(ctx).Info("start deleting "+kind, "name", name)
+	if err := deleteFn(); err != nil {
+		if apiErrors.IsNotFound(err) {
+			log.FromContext(ctx).Info(kind+" already absent", "name", name)
+			return nil
+		}
+		log.FromContext(ctx).Error(err, "failed to delete "+kind, "name", name)
+		return err
+	}
+	log.FromContext(ctx).Info("finished deleting "+kind, "name", name)
 	return nil
 }

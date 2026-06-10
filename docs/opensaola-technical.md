@@ -777,7 +777,8 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 | Status 变更 | Middleware, MiddlewareOperator | **被忽略**（Predicate 过滤） |
 | 添加 `middleware.cn/update` 注解 | Middleware, MiddlewareOperator | 触发升级流程 |
 | 添加 `middleware.cn/install` 注解到 Secret | MiddlewarePackage | 触发包安装 |
-| 添加 `middleware.cn/uninstall` 注解到 Secret | MiddlewarePackage | 触发包卸载 |
+| 添加 `middleware.cn/uninstall` 注解到 Secret | MiddlewarePackage | 触发兼容软卸载：清理包资源并设置 `enabled=false` |
+| 删除带 `middleware.cn/package-secret-cleanup` finalizer 的 Secret | MiddlewarePackage | 触发真实包卸载：清理包资源、删除 MiddlewarePackage、移除 finalizer 后让 Secret 删除 |
 | Deployment 变更 | MiddlewareOperator（Owns Deployment） | 同步 Deployment 状态并比较差异 |
 | Secret 创建/更新/删除（带 project 标签） | MiddlewarePackage（Watches Secret） | 创建/更新/删除 MiddlewarePackage |
 | CR 对象删除 | Middleware（通过 Watcher） | 自动重建 CR |
@@ -807,7 +808,8 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 | `middleware.cn/update` | 升级目标版本 | 用户触发升级时设置 | `2.0.0` |
 | `middleware.cn/baseline` | 升级目标基线名称 | 用户触发升级时设置 | `redis-baseline-v2` |
 | `middleware.cn/install` | 安装标记 | 用户触发安装时设置 | 存在即触发 |
-| `middleware.cn/uninstall` | 卸载标记 | 用户触发卸载时设置 | 存在即触发 |
+| `middleware.cn/uninstall` | 兼容软卸载标记 | 旧客户端触发卸载时设置 | 存在即触发软卸载 |
+| `middleware.cn/uninstallError` | 卸载失败原因 | 卸载被占用资源阻断时由 Operator 设置 | 错误信息 |
 | `middleware.cn/configurations` | 关联的 Configuration 名称 | Configuration 发布时设置 | `redis-configmap` |
 | `middleware.cn/disasterSyncer` | 灾备同步器 GVK/Name | 用户配置 | `group/version/kind/name` |
 | `middleware.cn/dataSyncer` | 数据同步器 GVK/Name | 用户配置 | `group/version/kind/name` |
@@ -918,12 +920,19 @@ HandleResource(Publish/Update/Delete)
 1. 获取 MiddlewarePackage
 2. 调用 `middlewarepackage.Check` - 设置 Checked=True
 
+### Finalizers
+
+| Key | 用途 | 设置时机 |
+|-----|------|----------|
+| `middleware.cn/package-secret-cleanup` | 包 Secret 删除保护，用于真实卸载时保留 Secret.Data 供 Operator 清理包资源 | `saola uninstall` 发起删除前设置 |
+
 **HandleSecret**（由 Secret Watch 触发）：
 1. 获取 Secret
    - **存在**：
+     - Secret 正在删除且带 `package-secret-cleanup` finalizer：检查引用 -> HandleResource(Delete) -> 删除 MiddlewarePackage -> 移除 finalizer
      - 解析包 -> 创建/更新 MiddlewarePackage
      - 有 `install` 注解：禁用同组件的其他已启用包 -> HandleResource(Publish)（发布 Baseline/Config/Action） -> 设置 enabled=true
-     - 有 `uninstall` 注解：HandleResource(Delete) -> 设置 enabled=false
+     - 有 `uninstall` 注解：兼容软卸载路径，检查引用 -> HandleResource(Delete) -> 设置 enabled=false
    - **不存在**（删除事件）：
      - 删除对应的 MiddlewarePackage
 
@@ -1234,13 +1243,16 @@ Checked=True?
 
 ### 9.3 MiddlewarePackage 卸载
 
-通过 Secret 的 `middleware.cn/uninstall` 注解触发：
-1. 调用 `HandleResource(Delete)`
+通过删除带 `middleware.cn/package-secret-cleanup` finalizer 的 Secret 触发：
+1. 检查是否仍有 Middleware / MiddlewareOperator 通过 `middleware.cn/packagename` 引用该包
+   - 若存在引用：写入 `middleware.cn/uninstallError`，保留 finalizer，不清理资源；删除引用后由后续重试继续处理
+2. 调用 `HandleResource(Delete)`
    - 删除所有 MiddlewareBaseline
    - 删除所有 MiddlewareOperatorBaseline
    - 删除所有 MiddlewareActionBaseline
    - 删除所有 MiddlewareConfiguration
-2. 设置 `enabled=false`，删除 `uninstall` 注解
+3. 删除对应的 MiddlewarePackage
+4. 移除 Secret 上的 `middleware.cn/package-secret-cleanup` finalizer，由 Kubernetes 完成 Secret 删除
 
 ### 9.4 Secret 删除
 

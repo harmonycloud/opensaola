@@ -32,8 +32,9 @@ const (
 	LabelInstall   = "middleware.cn/install"
 	LabelUnInstall = "middleware.cn/uninstall"
 
-	AnnotationInstallDigest = "middleware.cn/installDigest"
-	AnnotationInstallError  = "middleware.cn/installError"
+	AnnotationInstallDigest  = "middleware.cn/installDigest"
+	AnnotationInstallError   = "middleware.cn/installError"
+	AnnotationUninstallError = "middleware.cn/uninstallError"
 
 	LabelSource     = "middleware.cn/source"
 	LabelSourceName = "middleware.cn/sourcename"
@@ -51,6 +52,7 @@ const (
 const (
 	FinalizerMiddleware         = "middleware.cn/middleware-cleanup"
 	FinalizerMiddlewareOperator = "middleware.cn/middlewareoperator-cleanup"
+	FinalizerPackageSecret      = "middleware.cn/package-secret-cleanup"
 )
 
 const (

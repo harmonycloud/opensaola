@@ -58,6 +58,18 @@ func TestMiddlewarePackageSecretPredicate_UpdateFilter(t *testing.T) {
 		}
 	})
 
+	t.Run("deletion timestamp change enqueued", func(t *testing.T) {
+		oldSecret := base.DeepCopy()
+		newSecret := base.DeepCopy()
+		now := metav1.Now()
+		newSecret.DeletionTimestamp = &now
+		newSecret.Finalizers = []string{v1.FinalizerPackageSecret}
+
+		if !pred.Update(event.UpdateEvent{ObjectOld: oldSecret, ObjectNew: newSecret}) {
+			t.Fatalf("expected Update predicate to enqueue on deletion timestamp change")
+		}
+	})
+
 	t.Run("data change enqueued", func(t *testing.T) {
 		oldSecret := base.DeepCopy()
 		newSecret := base.DeepCopy()

@@ -188,6 +188,9 @@ func (r *MiddlewarePackageReconciler) secretPredicate() predicate.Predicate {
 			if !okOld || !okNew {
 				return true
 			}
+			if (oldSecret.GetDeletionTimestamp() == nil) != (newSecret.GetDeletionTimestamp() == nil) {
+				return true
+			}
 
 			// Only enqueue on meaningful content changes; skip metadata-only (labels/resourceVersion) updates to avoid unnecessary reconciles
 			if !equality.Semantic.DeepEqual(oldSecret.Data, newSecret.Data) {

@@ -777,7 +777,8 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 | Status change | Middleware, MiddlewareOperator | **Ignored** (filtered by Predicate) |
 | Adding `middleware.cn/update` annotation | Middleware, MiddlewareOperator | Triggers upgrade flow |
 | Adding `middleware.cn/install` annotation to Secret | MiddlewarePackage | Triggers package installation |
-| Adding `middleware.cn/uninstall` annotation to Secret | MiddlewarePackage | Triggers package uninstallation |
+| Adding `middleware.cn/uninstall` annotation to Secret | MiddlewarePackage | Triggers compatible soft uninstall: clean package resources and set `enabled=false` |
+| Deleting a Secret with the `middleware.cn/package-secret-cleanup` finalizer | MiddlewarePackage | Triggers real package uninstall: clean package resources, delete MiddlewarePackage, remove finalizer, then let the Secret be deleted |
 | Deployment change | MiddlewareOperator (Owns Deployment) | Syncs Deployment status and compares differences |
 | Secret create/update/delete (with project label) | MiddlewarePackage (Watches Secret) | Creates/updates/deletes MiddlewarePackage |
 | CR object deletion | Middleware (via Watcher) | Automatically rebuilds the CR |
@@ -807,7 +808,8 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 | `middleware.cn/update` | Upgrade target version | Set when user triggers an upgrade | `2.0.0` |
 | `middleware.cn/baseline` | Upgrade target baseline name | Set when user triggers an upgrade | `redis-baseline-v2` |
 | `middleware.cn/install` | Install marker | Set when user triggers installation | Presence triggers installation |
-| `middleware.cn/uninstall` | Uninstall marker | Set when user triggers uninstallation | Presence triggers uninstallation |
+| `middleware.cn/uninstall` | Compatible soft-uninstall marker | Set by older clients when triggering uninstallation | Presence triggers soft uninstall |
+| `middleware.cn/uninstallError` | Uninstall failure reason | Set by the operator when uninstall is blocked by in-use resources | Error message |
 | `middleware.cn/configurations` | Associated Configuration names | Set during Configuration publishing | `redis-configmap` |
 | `middleware.cn/disasterSyncer` | Disaster recovery syncer GVK/Name | Configured by user | `group/version/kind/name` |
 | `middleware.cn/dataSyncer` | Data syncer GVK/Name | Configured by user | `group/version/kind/name` |
@@ -918,12 +920,19 @@ HandleResource(Publish/Update/Delete)
 1. Get MiddlewarePackage
 2. Call `middlewarepackage.Check` - Set Checked=True
 
+### Finalizers
+
+| Key | Purpose | When Set |
+|-----|---------|----------|
+| `middleware.cn/package-secret-cleanup` | Protects package Secret deletion so the operator can still read Secret.Data while cleaning package resources | Set by `saola uninstall` before deleting the Secret |
+
 **HandleSecret** (triggered by Secret Watch):
 1. Get Secret
    - **Exists**:
+     - Secret is being deleted and has the `package-secret-cleanup` finalizer: check references -> HandleResource(Delete) -> delete MiddlewarePackage -> remove finalizer
      - Parse package -> create/update MiddlewarePackage
      - Has `install` annotation: Disable other enabled packages of the same component -> HandleResource(Publish) (publish Baseline/Config/Action) -> set enabled=true
-     - Has `uninstall` annotation: HandleResource(Delete) -> set enabled=false
+     - Has `uninstall` annotation: compatible soft-uninstall path, check references -> HandleResource(Delete) -> set enabled=false
    - **Does not exist** (delete event):
      - Delete the corresponding MiddlewarePackage
 
@@ -1234,13 +1243,16 @@ When a MiddlewareOperator is deleted:
 
 ### 9.3 MiddlewarePackage Uninstallation
 
-Triggered via the `middleware.cn/uninstall` annotation on the Secret:
-1. Call `HandleResource(Delete)`
+Triggered by deleting a Secret that has the `middleware.cn/package-secret-cleanup` finalizer:
+1. Check whether any Middleware / MiddlewareOperator still references the package via `middleware.cn/packagename`
+   - If references exist: write `middleware.cn/uninstallError`, keep the finalizer, and do not clean resources; after references are deleted, a later retry continues cleanup
+2. Call `HandleResource(Delete)`
    - Delete all MiddlewareBaselines
    - Delete all MiddlewareOperatorBaselines
    - Delete all MiddlewareActionBaselines
    - Delete all MiddlewareConfigurations
-2. Set `enabled=false`, remove `uninstall` annotation
+3. Delete the corresponding MiddlewarePackage
+4. Remove the `middleware.cn/package-secret-cleanup` finalizer from the Secret so Kubernetes completes Secret deletion
 
 ### 9.4 Secret Deletion
 

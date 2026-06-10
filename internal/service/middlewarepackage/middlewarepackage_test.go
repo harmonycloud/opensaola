@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
@@ -33,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -381,6 +383,122 @@ func TestHandleSecretDelete_DeletesExistingPackage(t *testing.T) {
 	err := cli.Get(context.Background(), client.ObjectKey{Name: mp.Name}, got)
 	if !apiErrors.IsNotFound(err) {
 		t.Fatalf("expected MiddlewarePackage to be deleted, got err=%v object=%#v", err, got)
+	}
+}
+
+func TestHandleSecretUninstall_BlocksWhenPackageIsUsed(t *testing.T) {
+	const (
+		secretName = "redis-v1"
+		namespace  = "middleware-operator"
+	)
+	oldNamespace := packages.DataNamespace
+	packages.SetDataNamespace(namespace)
+	t.Cleanup(func() {
+		packages.SetDataNamespace(oldNamespace)
+		packages.InvalidatePackageCache(secretName)
+	})
+
+	release := buildPackageRelease(t, "redis-1.0.0", map[string]string{
+		"metadata.yaml": "name: redis\nversion: \"1.0.0\"\n",
+	})
+	now := metav1.Now()
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              secretName,
+			Namespace:         namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{v1.FinalizerPackageSecret},
+			Labels: map[string]string{
+				v1.LabelProject: consts.ProjectOpenSaola,
+			},
+		},
+		Data: map[string][]byte{
+			packages.Release: release,
+		},
+	}
+	middleware := &v1.Middleware{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-redis",
+			Namespace: "app",
+			Labels: map[string]string{
+				v1.LabelPackageName: secretName,
+			},
+		},
+		Spec: v1.MiddlewareSpec{Baseline: "redis-cluster"},
+	}
+	cli := newMiddlewarePackageTestClient(t, secret, middleware)
+
+	if err := HandleSecret(context.Background(), cli, secret, consts.HandleActionPublish); err == nil {
+		t.Fatalf("expected usage error, got nil")
+	}
+
+	got := &corev1.Secret{}
+	if err := cli.Get(context.Background(), client.ObjectKey{Name: secretName, Namespace: namespace}, got); err != nil {
+		t.Fatalf("get Secret after blocked uninstall: %v", err)
+	}
+	if !controllerutil.ContainsFinalizer(got, v1.FinalizerPackageSecret) {
+		t.Fatalf("expected package finalizer to remain while package is in use")
+	}
+	if !strings.Contains(got.Annotations[v1.AnnotationUninstallError], "app/my-redis") {
+		t.Fatalf("expected uninstallError to mention usage, got %q", got.Annotations[v1.AnnotationUninstallError])
+	}
+}
+
+func TestHandleSecretUninstall_DeletesSecretAfterCleanup(t *testing.T) {
+	const (
+		secretName = "redis-v1-delete"
+		namespace  = "middleware-operator"
+	)
+	oldNamespace := packages.DataNamespace
+	packages.SetDataNamespace(namespace)
+	t.Cleanup(func() {
+		packages.SetDataNamespace(oldNamespace)
+		packages.InvalidatePackageCache(secretName)
+	})
+
+	release := buildPackageRelease(t, "redis-1.0.0", map[string]string{
+		"metadata.yaml": "name: redis\nversion: \"1.0.0\"\n",
+	})
+	now := metav1.Now()
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              secretName,
+			Namespace:         namespace,
+			DeletionTimestamp: &now,
+			Finalizers:        []string{v1.FinalizerPackageSecret},
+			Labels: map[string]string{
+				v1.LabelProject: consts.ProjectOpenSaola,
+			},
+		},
+		Data: map[string][]byte{
+			packages.Release: release,
+		},
+	}
+	mp := &v1.MiddlewarePackage{ObjectMeta: metav1.ObjectMeta{Name: secretName}}
+	cli := newMiddlewarePackageTestClient(t, secret, mp)
+
+	if err := HandleSecret(context.Background(), cli, secret, consts.HandleActionPublish); err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
+	}
+
+	gotSecret := &corev1.Secret{}
+	err := cli.Get(context.Background(), client.ObjectKey{Name: secretName, Namespace: namespace}, gotSecret)
+	if err != nil && !apiErrors.IsNotFound(err) {
+		t.Fatalf("get Secret after finalizer cleanup: %v", err)
+	}
+	if err == nil {
+		if controllerutil.ContainsFinalizer(gotSecret, v1.FinalizerPackageSecret) {
+			t.Fatalf("expected package finalizer to be removed, got %#v", gotSecret.Finalizers)
+		}
+		if gotSecret.Labels[v1.LabelEnabled] != "false" {
+			t.Fatalf("expected Secret enabled=false, got %q", gotSecret.Labels[v1.LabelEnabled])
+		}
+	}
+
+	gotMP := &v1.MiddlewarePackage{}
+	err = cli.Get(context.Background(), client.ObjectKey{Name: secretName}, gotMP)
+	if !apiErrors.IsNotFound(err) {
+		t.Fatalf("expected MiddlewarePackage to be deleted, got err=%v object=%#v", err, gotMP)
 	}
 }
 

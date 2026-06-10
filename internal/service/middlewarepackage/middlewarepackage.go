@@ -20,6 +20,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/harmonycloud/opensaola/internal/service/middlewareactionbaseline"
@@ -36,6 +38,7 @@ import (
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -82,6 +85,122 @@ func normalizedPackageLabels(source map[string]string) map[string]string {
 	return labels
 }
 
+type packageUsage struct {
+	Kind      string
+	Namespace string
+	Name      string
+	Baseline  string
+	State     string
+}
+
+func findPackageUsages(ctx context.Context, cli client.Client, packageName string) ([]packageUsage, error) {
+	selector := client.MatchingLabels{v1.LabelPackageName: packageName}
+	var usages []packageUsage
+
+	middlewares, err := k8s.ListMiddlewares(ctx, cli, "", selector)
+	if err != nil {
+		return nil, fmt.Errorf("list Middleware by package %q: %w", packageName, err)
+	}
+	for _, item := range middlewares {
+		usages = append(usages, packageUsage{
+			Kind:      "middleware",
+			Namespace: item.Namespace,
+			Name:      item.Name,
+			Baseline:  item.Spec.Baseline,
+			State:     string(item.Status.State),
+		})
+	}
+
+	operators, err := k8s.ListMiddlewareOperators(ctx, cli, "", selector)
+	if err != nil {
+		return nil, fmt.Errorf("list MiddlewareOperator by package %q: %w", packageName, err)
+	}
+	for _, item := range operators {
+		usages = append(usages, packageUsage{
+			Kind:      "middlewareoperator",
+			Namespace: item.Namespace,
+			Name:      item.Name,
+			Baseline:  item.Spec.Baseline,
+			State:     string(item.Status.State),
+		})
+	}
+
+	sort.Slice(usages, func(i, j int) bool {
+		left := usages[i].Kind + "/" + usages[i].Namespace + "/" + usages[i].Name
+		right := usages[j].Kind + "/" + usages[j].Namespace + "/" + usages[j].Name
+		return left < right
+	})
+	return usages, nil
+}
+
+func formatPackageUsageMessage(packageName string, usages []packageUsage) string {
+	if len(usages) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "package %q is still used; uninstall deployed Middleware or MiddlewareOperator resources first:", packageName)
+	for _, usage := range usages {
+		fmt.Fprintf(&b, " %s %s/%s", usage.Kind, usage.Namespace, usage.Name)
+		if usage.Baseline != "" {
+			fmt.Fprintf(&b, "(baseline=%s", usage.Baseline)
+			if usage.State != "" {
+				fmt.Fprintf(&b, ",state=%s", usage.State)
+			}
+			b.WriteString(")")
+		} else if usage.State != "" {
+			fmt.Fprintf(&b, "(state=%s)", usage.State)
+		}
+	}
+	return b.String()
+}
+
+func finalizePackageSecret(ctx context.Context, cli client.Client, secret *corev1.Secret, mp *v1.MiddlewarePackage) error {
+	if !controllerutil.ContainsFinalizer(secret, v1.FinalizerPackageSecret) {
+		return nil
+	}
+
+	usages, usageErr := findPackageUsages(ctx, cli, secret.Name)
+	if usageErr != nil {
+		return usageErr
+	}
+	if len(usages) > 0 {
+		if secret.Annotations == nil {
+			secret.Annotations = map[string]string{}
+		}
+		message := truncateBytes(formatPackageUsageMessage(secret.Name, usages), 1024)
+		secret.Annotations[v1.AnnotationUninstallError] = message
+		if err := k8s.UpdateSecret(ctx, cli, secret); err != nil {
+			log.FromContext(ctx).Error(err, "failed to update package uninstall error", "name", secret.Name)
+			return err
+		}
+		return fmt.Errorf("%s", message)
+	}
+
+	if err := HandleResource(ctx, cli, consts.HandleActionDelete, secret.Name); err != nil {
+		return err
+	}
+	if mp != nil {
+		if err := k8s.DeleteMiddlewarePackage(ctx, cli, mp); err != nil && !apiErrors.IsNotFound(err) {
+			return err
+		}
+	}
+
+	patch := client.MergeFrom(secret.DeepCopy())
+	if secret.Labels == nil {
+		secret.Labels = map[string]string{}
+	}
+	secret.Labels[v1.LabelEnabled] = "false"
+	secret.Labels[v1.LabelProject] = consts.ProjectOpenSaola
+	if secret.Annotations != nil {
+		delete(secret.Annotations, v1.LabelUnInstall)
+		delete(secret.Annotations, v1.AnnotationInstallDigest)
+		delete(secret.Annotations, v1.AnnotationInstallError)
+		delete(secret.Annotations, v1.AnnotationUninstallError)
+	}
+	controllerutil.RemoveFinalizer(secret, v1.FinalizerPackageSecret)
+	return cli.Patch(ctx, secret, patch)
+}
+
 func Check(ctx context.Context, cli client.Client, mp *v1.MiddlewarePackage) error {
 	if mp == nil {
 		return nil
@@ -112,6 +231,10 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 	}
 	switch act {
 	case consts.HandleActionPublish, consts.HandleActionUpdate:
+		if secret.GetDeletionTimestamp() != nil {
+			return finalizePackageSecret(ctx, cli, secret, mp)
+		}
+
 		// If MiddlewarePackage already registered and no install/uninstall
 		// action pending, skip tarball decompression entirely. This avoids
 		// loading all 600+ packages into memory on every pod restart.
@@ -251,6 +374,27 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 				return err
 			}
 		} else if _, ok = secret.Annotations[v1.LabelUnInstall]; ok {
+			usages, usageErr := findPackageUsages(ctx, cli, secret.Name)
+			if usageErr != nil {
+				return usageErr
+			}
+			if len(usages) > 0 {
+				if secret.Annotations == nil {
+					secret.Annotations = map[string]string{}
+				}
+				secret.Annotations[v1.AnnotationUninstallError] = truncateBytes(formatPackageUsageMessage(secret.Name, usages), 1024)
+				delete(secret.Annotations, v1.LabelUnInstall)
+				if secret.Labels == nil {
+					secret.Labels = map[string]string{}
+				}
+				secret.Labels[v1.LabelProject] = consts.ProjectOpenSaola
+				if err = k8s.UpdateSecret(ctx, cli, secret); err != nil {
+					log.FromContext(ctx).Error(err, "failed to update package uninstall error", "name", secret.Name)
+					return err
+				}
+				return nil
+			}
+
 			err = HandleResource(ctx, cli, consts.HandleActionDelete, secret.Name)
 			if err != nil {
 				return err
@@ -263,6 +407,7 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 			delete(secret.Annotations, v1.LabelUnInstall)
 			delete(secret.Annotations, v1.AnnotationInstallDigest)
 			delete(secret.Annotations, v1.AnnotationInstallError)
+			delete(secret.Annotations, v1.AnnotationUninstallError)
 			err = k8s.UpdateSecret(ctx, cli, secret)
 			if err != nil {
 				log.FromContext(ctx).Error(err, "failed to update package resource", "name", secret.Name)

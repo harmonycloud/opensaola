@@ -129,6 +129,28 @@ tolerations: []
 # -- Pod 调度使用的亲和性规则
 affinity: {}
 
+# -- Metrics endpoint configuration (controller-runtime built-in metrics over HTTP)
+# -- 指标端点配置（通过 HTTP 暴露 controller-runtime 内置指标）
+metrics:
+  # -- Enable the metrics HTTP endpoint and container port
+  # -- 是否启用指标 HTTP 端点和容器端口
+  enabled: true
+  # -- Port the metrics endpoint binds to
+  # -- 指标端点监听的端口
+  port: 8081
+  # -- ServiceMonitor for Prometheus auto-discovery (requires prometheus-operator)
+  # -- 供 Prometheus 自动发现的 ServiceMonitor（需要 prometheus-operator）
+  serviceMonitor:
+    # -- Enable ServiceMonitor creation
+    # -- 是否创建 ServiceMonitor
+    enabled: false
+    # -- Scrape interval
+    # -- 抓取间隔
+    interval: 30s
+    # -- Extra labels for the ServiceMonitor (e.g. to match the Prometheus selector)
+    # -- ServiceMonitor 的额外标签（例如用于匹配 Prometheus 的选择器）
+    labels: {}
+
 # -- Extra labels for the operator pod
 # -- 控制器 Pod 的额外标签
 podLabels: {}

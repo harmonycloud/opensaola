@@ -34,3 +34,11 @@ OpenSaola 已安装成功！
    部署中间件前，需要先安装中间件包。
    See: https://github.com/harmonycloud/opensaola#how-it-works
    参考：https://github.com/harmonycloud/opensaola#how-it-works
+
+{{- if .Values.metrics.serviceMonitor.enabled }}
+
+7. ServiceMonitor is enabled. Prometheus (prometheus-operator) will auto-discover
+   the controller-runtime metrics on port {{ .Values.metrics.port }}.
+   已启用 ServiceMonitor。Prometheus（prometheus-operator）会在端口 {{ .Values.metrics.port }}
+   上自动发现 controller-runtime 指标。
+{{- end }}

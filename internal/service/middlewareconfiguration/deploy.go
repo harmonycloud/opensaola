@@ -20,9 +20,8 @@ import (
 	"context"
 	"fmt"
 
-	"k8s.io/apimachinery/pkg/api/errors"
-
 	"github.com/harmonycloud/opensaola/internal/k8s"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
 
@@ -49,6 +48,7 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		return nil
 	}
 
+	var resourceIsNamespaced bool
 	namespaced, nsErr := k8s.IsNamespaced(obj)
 	if nsErr != nil {
 		if k8s.IsCRDNotInstalled(nsErr) {
@@ -60,12 +60,9 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 			return fmt.Errorf("failed to check if resource is namespaced: %w", nsErr)
 		}
 	} else if namespaced {
+		resourceIsNamespaced = true
 		if obj.GetNamespace() == "" {
 			obj.SetNamespace(owner.GetNamespace())
-		}
-		err = ctrl.SetControllerReference(owner, obj, cli.Scheme())
-		if err != nil {
-			return fmt.Errorf("failed to set ControllerReference: %w", err)
 		}
 	}
 
@@ -89,42 +86,48 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 	tempAnnotations[v1.LabelConfigurations] = m.Name
 	obj.SetAnnotations(tempAnnotations)
 
-	var isExists bool
 	old, err := k8s.GetCustomResource(ctx, cli, obj.GetName(), obj.GetNamespace(), obj.GroupVersionKind())
 	if err != nil && !errors.IsNotFound(err) {
 		return err
 	}
-	if old == nil {
-		oldLists, err := k8s.ListCustomResources(ctx, cli, obj.GetNamespace(), obj.GroupVersionKind(), client.MatchingLabels{
-			v1.LabelApp:       m.GetLabels()[owner.GetName()],
-			v1.LabelComponent: m.GetLabels()[v1.LabelComponent],
-		})
-		if err != nil && !errors.IsNotFound(err) {
-			return err
-		}
-		for _, item := range oldLists {
-			if item.GetAnnotations()[v1.LabelConfigurations] == m.Name {
-				old = &item
-				break
-			}
-		}
-		if old != nil {
-			isExists = true
-		}
-	} else {
-		isExists = true
-	}
+	isExists := old != nil
 
 	switch act {
 	case consts.HandleActionPublish, consts.HandleActionUpdate:
 		if isExists {
-			obj.SetName(old.GetName())
+			if resourceIsNamespaced {
+				setOwnerRef, ownerErr := shouldSetControllerReference(owner, old, m, obj)
+				if ownerErr != nil {
+					return ownerErr
+				}
+				if setOwnerRef {
+					err = ctrl.SetControllerReference(owner, obj, cli.Scheme())
+					if err != nil {
+						return fmt.Errorf("failed to set ControllerReference: %w", err)
+					}
+				} else {
+					obj.SetOwnerReferences(old.GetOwnerReferences())
+					log.FromContext(ctx).Info("patching configuration resource without taking controller ownership",
+						"configuration", m.Name,
+						"gvk", obj.GroupVersionKind().String(),
+						"namespace", obj.GetNamespace(),
+						"name", obj.GetName(),
+						"controllerOwner", metav1.GetControllerOf(old),
+					)
+				}
+			}
 			err = k8s.PatchCustomResource(ctx, cli, obj)
 			if err != nil {
 				return err
 			}
 			log.FromContext(ctx).V(1).Info(fmt.Sprintf("updated %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
 		} else {
+			if resourceIsNamespaced {
+				err = ctrl.SetControllerReference(owner, obj, cli.Scheme())
+				if err != nil {
+					return fmt.Errorf("failed to set ControllerReference: %w", err)
+				}
+			}
 			err = k8s.CreateCustomResource(ctx, cli, obj)
 			if err != nil && !errors.IsAlreadyExists(err) {
 				log.FromContext(ctx).V(1).Info(fmt.Sprintf("failed to create %s", obj.GetKind()), "obj", obj)
@@ -141,7 +144,17 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 			if obj.GroupVersionKind().Kind == "CustomResourceDefinition" {
 				return nil
 			}
-			obj.SetName(old.GetName())
+			deletePolicy := configurationPolicy(m, obj, v1.AnnotationConfigurationDeletePolicy)
+			if !shouldDeleteRenderedResource(owner, old, m.Name, deletePolicy) {
+				log.FromContext(ctx).Info("skipping configuration rendered resource delete because it is not owned by OpenSaola lifecycle",
+					"configuration", m.Name,
+					"gvk", obj.GroupVersionKind().String(),
+					"namespace", old.GetNamespace(),
+					"name", old.GetName(),
+					"controllerOwner", metav1.GetControllerOf(old),
+				)
+				return nil
+			}
 			err = k8s.DeleteCustomResource(ctx, cli, obj)
 			if err != nil && !errors.IsNotFound(err) {
 				log.FromContext(ctx).Error(err, fmt.Sprintf("failed to delete %s", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())

@@ -36,10 +36,20 @@ const (
 	AnnotationInstallError   = "middleware.cn/installError"
 	AnnotationUninstallError = "middleware.cn/uninstallError"
 
+	AnnotationConfigurationOwnershipPolicy = "middleware.cn/configurationOwnershipPolicy"
+	AnnotationConfigurationDeletePolicy    = "middleware.cn/configurationDeletePolicy"
+
 	LabelSource     = "middleware.cn/source"
 	LabelSourceName = "middleware.cn/sourcename"
 
 	LabelNoOperator = "middleware.cn/nooperator"
+)
+
+const (
+	ConfigurationOwnershipPolicyManaged = "managed"
+
+	ConfigurationDeletePolicyDelete = "delete"
+	ConfigurationDeletePolicyOrphan = "orphan"
 )
 
 const (

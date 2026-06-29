@@ -136,12 +136,14 @@ func TestLabelConstants_ContainDomain(t *testing.T) {
 func TestAnnotationConstants_ContainDomain(t *testing.T) {
 	t.Parallel()
 	annotations := map[string]string{
-		"AnnotationInstallDigest":     AnnotationInstallDigest,
-		"AnnotationInstallError":      AnnotationInstallError,
-		"AnnotationUninstallError":    AnnotationUninstallError,
-		"AnnotationDisasterSyncer":    AnnotationDisasterSyncer,
-		"AnnotationDataSyncer":        AnnotationDataSyncer,
-		"AnnotationOppositeClusterId": AnnotationOppositeClusterId,
+		"AnnotationInstallDigest":                AnnotationInstallDigest,
+		"AnnotationInstallError":                 AnnotationInstallError,
+		"AnnotationUninstallError":               AnnotationUninstallError,
+		"AnnotationConfigurationOwnershipPolicy": AnnotationConfigurationOwnershipPolicy,
+		"AnnotationConfigurationDeletePolicy":    AnnotationConfigurationDeletePolicy,
+		"AnnotationDisasterSyncer":               AnnotationDisasterSyncer,
+		"AnnotationDataSyncer":                   AnnotationDataSyncer,
+		"AnnotationOppositeClusterId":            AnnotationOppositeClusterId,
 	}
 	for name, a := range annotations {
 		if !strings.Contains(a, "middleware.cn/") {

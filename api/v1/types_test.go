@@ -136,11 +136,14 @@ func TestLabelConstants_ContainDomain(t *testing.T) {
 func TestAnnotationConstants_ContainDomain(t *testing.T) {
 	t.Parallel()
 	annotations := map[string]string{
-		"AnnotationInstallDigest":     AnnotationInstallDigest,
-		"AnnotationInstallError":      AnnotationInstallError,
-		"AnnotationDisasterSyncer":    AnnotationDisasterSyncer,
-		"AnnotationDataSyncer":        AnnotationDataSyncer,
-		"AnnotationOppositeClusterId": AnnotationOppositeClusterId,
+		"AnnotationInstallDigest":                AnnotationInstallDigest,
+		"AnnotationInstallError":                 AnnotationInstallError,
+		"AnnotationUninstallError":               AnnotationUninstallError,
+		"AnnotationConfigurationOwnershipPolicy": AnnotationConfigurationOwnershipPolicy,
+		"AnnotationConfigurationDeletePolicy":    AnnotationConfigurationDeletePolicy,
+		"AnnotationDisasterSyncer":               AnnotationDisasterSyncer,
+		"AnnotationDataSyncer":                   AnnotationDataSyncer,
+		"AnnotationOppositeClusterId":            AnnotationOppositeClusterId,
 	}
 	for name, a := range annotations {
 		if !strings.Contains(a, "middleware.cn/") {
@@ -156,6 +159,7 @@ func TestFinalizerConstants_NonEmpty(t *testing.T) {
 	finalizers := map[string]string{
 		"FinalizerMiddleware":         FinalizerMiddleware,
 		"FinalizerMiddlewareOperator": FinalizerMiddlewareOperator,
+		"FinalizerPackageSecret":      FinalizerPackageSecret,
 	}
 	for name, f := range finalizers {
 		if f == "" {
@@ -168,8 +172,13 @@ func TestFinalizerConstants_NonEmpty(t *testing.T) {
 // 验证所有 finalizer 常量的值互不相同。
 func TestFinalizerConstants_Distinct(t *testing.T) {
 	t.Parallel()
-	if FinalizerMiddleware == FinalizerMiddlewareOperator {
-		t.Error("FinalizerMiddleware and FinalizerMiddlewareOperator should be distinct")
+	finalizers := []string{FinalizerMiddleware, FinalizerMiddlewareOperator, FinalizerPackageSecret}
+	seen := map[string]bool{}
+	for _, item := range finalizers {
+		if seen[item] {
+			t.Errorf("duplicate finalizer value: %q", item)
+		}
+		seen[item] = true
 	}
 }
 

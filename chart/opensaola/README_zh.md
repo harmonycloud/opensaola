@@ -24,6 +24,53 @@ helm upgrade --install opensaola ./chart/opensaola \
 make helm-deploy
 ```
 
+未设置 `HELM_NAMESPACE` 时，封装命令会通过 `helm list -A` 复用已有 `opensaola` release 所在命名空间；没有已有 release 时才安装到 `opensaola-system`。需要显式指定命名空间时可用 `n=<namespace>`，也可继续用 `HELM_NAMESPACE=<namespace>`。
+
+服务器跟踪 `dev` 分支时，推荐的一键升级方式是：
+
+```bash
+git pull --ff-only && make helm-deploy
+```
+
+该命令会部署当前检出提交对应的 `ghcr.io/harmonycloud/opensaola:sha-<shortsha>` 镜像。执行前请先等 GitHub 上该提交的 Docker workflow 完成。
+
+如果集群拉取 GHCR 较慢，只需要指定内部 Harbor 地址和 OpenSaola 仓库路径，Makefile 会使用内部镜像升级；默认不会同步镜像：
+
+```bash
+git pull --ff-only && \
+HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
+HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+make helm-deploy
+```
+
+该模式会沿用默认镜像 tag 规则，不需要手动指定 tag。如果需要在升级前同步 OpenSaola 和 CRD hook Job 使用的 kubectl 镜像，加上 `HELM_SYNC_IMAGE=true`：
+
+```bash
+git pull --ff-only && \
+HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
+HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_SYNC_IMAGE=true \
+make helm-deploy
+```
+
+如果只需要提前同步镜像，不执行 Helm 升级，可以运行：
+
+```bash
+HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
+HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+make helm-sync-image
+```
+
+镜像同步默认使用 `skopeo copy --all` 保留多架构 manifest。执行环境需要安装 `skopeo`；如果明确只需要同步当前机器架构，可以设置 `HELM_SYNC_MULTI_ARCH=false` 使用 docker/nerdctl 单架构兜底。
+
+如果想跟随浮动 `dev` 镜像标签，而不是精确提交镜像标签，执行：
+
+```bash
+make helm-deploy-dev
+```
+
+该目标会使用 `image.tag=dev`、`image.pullPolicy=Always`，并更新 `podAnnotations.redeployAt` 强制 Deployment 滚动，避免同一个 `dev` 标签字符串不变时 Pod 不重建。
+
 ## 安装已发布的 OCI 格式 Helm 包
 
 带标签的发行版本会将 Helm 包发布到 GHCR：

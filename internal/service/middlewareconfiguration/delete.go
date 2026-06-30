@@ -98,21 +98,31 @@ type deleteByNameResult string
 const (
 	deleteByNameDeleted  deleteByNameResult = "deleted"
 	deleteByNameNotFound deleteByNameResult = "not_found"
+	deleteByNameSkipped  deleteByNameResult = "skipped"
 )
 
-func deleteByGVKAndName(ctx context.Context, cli client.Client, gvk schema.GroupVersionKind, namespace string, name string) (deleteByNameResult, error) {
+func deleteByGVKAndName(ctx context.Context, cli client.Client, owner metav1.Object, gvk schema.GroupVersionKind, namespace string, name string, configurationName string, deletePolicy string) (deleteByNameResult, error) {
 	log.FromContext(ctx).Info("deleting configuration rendered resource by name", "gvk", gvk.String(), "namespace", namespace, "name", name)
-	obj := new(unstructured.Unstructured)
-	obj.SetGroupVersionKind(gvk)
-	obj.SetName(name)
-	if namespace != "" {
-		obj.SetNamespace(namespace)
-	}
-	err := k8s.DeleteCustomResource(ctx, cli, obj)
+	obj, err := k8s.GetCustomResource(ctx, cli, name, namespace, gvk)
 	if errors.IsNotFound(err) {
 		log.FromContext(ctx).Info("configuration rendered resource not found by name", "warning", true, "gvk", gvk.String(), "namespace", namespace, "name", name)
 		return deleteByNameNotFound, nil
 	}
+	if err != nil {
+		log.FromContext(ctx).Error(err, "failed to get configuration rendered resource by name", "gvk", gvk.String(), "namespace", namespace, "name", name)
+		return "", err
+	}
+	if !shouldDeleteRenderedResource(owner, obj, configurationName, deletePolicy) {
+		log.FromContext(ctx).Info("skipping configuration rendered resource delete because it is not owned by OpenSaola lifecycle",
+			"gvk", gvk.String(),
+			"namespace", namespace,
+			"name", name,
+			"configuration", configurationName,
+			"controllerOwner", metav1.GetControllerOf(obj),
+		)
+		return deleteByNameSkipped, nil
+	}
+	err = k8s.DeleteCustomResource(ctx, cli, obj)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "failed to delete configuration rendered resource by name", "gvk", gvk.String(), "namespace", namespace, "name", name)
 		return "", err
@@ -164,6 +174,7 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 		if gvk.Kind == "CustomResourceDefinition" {
 			continue
 		}
+		deletePolicy := configurationPolicy(&mc, nil, v1.AnnotationConfigurationDeletePolicy)
 
 		templateValues := *templateValuesBase
 		// Avoid nil pointer from missing values in template .Values.xxx: ensure map exists (missing keys may still be nil)
@@ -205,7 +216,7 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 
 		// Prefer deletion by rendered name
 		if renderedName != "" {
-			if delResult, delErr := deleteByGVKAndName(ctx, cli, gvk, ns, renderedName); delErr == nil && delResult == deleteByNameDeleted {
+			if delResult, delErr := deleteByGVKAndName(ctx, cli, owner, gvk, ns, renderedName, cfg.Name, deletePolicy); delErr == nil && delResult == deleteByNameDeleted {
 				log.FromContext(ctx).Info("configuration deleted by name, skipping fallback", "cfgName", cfg.Name, "gvk", gvk.String(), "renderedName", renderedName, "namespace", ns)
 				continue
 			} else if delErr == nil {
@@ -225,6 +236,16 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 		}
 		log.FromContext(ctx).Info("configuration fallback list query completed", "cfgName", cfg.Name, "gvk", gvk.String(), "namespace", ns, "items", len(items))
 		for _, item := range items {
+			if !shouldDeleteRenderedResource(owner, &item, cfg.Name, deletePolicy) {
+				log.FromContext(ctx).Info("configuration fallback skipped object because it is not owned by OpenSaola lifecycle",
+					"cfgName", cfg.Name,
+					"gvk", gvk.String(),
+					"namespace", item.GetNamespace(),
+					"name", item.GetName(),
+					"controllerOwner", metav1.GetControllerOf(&item),
+				)
+				continue
+			}
 			log.FromContext(ctx).Info("configuration fallback deleting object", "cfgName", cfg.Name, "gvk", gvk.String(), "namespace", item.GetNamespace(), "name", item.GetName())
 			obj := item.DeepCopy()
 			obj.SetGroupVersionKind(gvk)

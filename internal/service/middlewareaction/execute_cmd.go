@@ -64,9 +64,9 @@ func executeCmd(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 	if conditionExecuteCmd.Status != metav1.ConditionTrue {
 		defer func() {
 			if err != nil {
-				conditionExecuteCmd.Failed(*ctx, err.Error(), m.Generation)
+				conditionExecuteCmd.Failed(*ctx, safeActionDiagnosticMessage(err.Error()), m.Generation)
 			} else {
-				conditionExecuteCmd.SuccessWithMsg(*ctx, msg, m.Generation)
+				conditionExecuteCmd.SuccessWithMsg(*ctx, safeActionDiagnosticMessage(msg), m.Generation)
 			}
 			if m.Name != "" {
 				if updateErr := k8s.UpdateMiddlewareActionStatus(*ctx, cli, m); updateErr != nil {
@@ -88,15 +88,15 @@ func executeCmd(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 			cmd = exec.Command("sh", "-c", strings.Join(step.CMD.Command, " "))
 		}
 
-		log.FromContext(*ctx).V(1).Info(strings.Join(step.CMD.Command, " "))
+		log.FromContext(*ctx).V(1).Info("executing command step", "step", step.Name, "commandArgs", len(step.CMD.Command))
 
 		// Use CombinedOutput to capture both stdout and stderr
 		var output []byte
 		output, err = cmd.CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("%w;%s", err, string(output))
+			return commandStepError(err, output)
 		}
-		msg = fmt.Sprintf("%s", string(output))
+		msg = commandStepSuccessMessage(output)
 
 		if step.Output.Expose {
 			stepMap := ctxkeys.StepFrom(*ctx)
@@ -108,13 +108,13 @@ func executeCmd(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 			case "json":
 				err = json.Unmarshal(output, &outputMap)
 				if err != nil {
-					return err
+					return parseExposedOutputError(step.Output.Type, step.Name)
 				}
 				stepEntry["output"] = outputMap
 			case "yaml":
 				err = yaml.Unmarshal(output, &outputMap)
 				if err != nil {
-					return err
+					return parseExposedOutputError(step.Output.Type, step.Name)
 				}
 				stepEntry["output"] = outputMap
 			case "string":

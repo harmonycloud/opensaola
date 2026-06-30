@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/harmonycloud/opensaola/internal/service/middlewareactionbaseline"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,8 +50,7 @@ type MiddlewareActionReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
-	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
-	ctx = log.IntoContext(ctx, l)
+	ctx = withReconcileLogger(ctx, "middlewareaction", "MiddlewareAction", req)
 
 	log.FromContext(ctx).V(1).Info("start processing MiddlewareAction", "name", req.NamespacedName)
 

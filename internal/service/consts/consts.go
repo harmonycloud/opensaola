@@ -16,6 +16,11 @@ limitations under the License.
 
 package consts
 
+import (
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
+)
+
 const (
 	StatusCondTypeCheck = "Check"
 )
@@ -40,5 +45,29 @@ const (
 )
 
 const (
-	ProjectOpenSaola = "opensaola"
+	ProjectOpenSaola        = "opensaola"
+	ProjectZeusOperator     = "zeus-operator"
+	projectLabelSelectorKey = "project label selector"
 )
+
+var CompatibleProjects = []string{
+	ProjectOpenSaola,
+	ProjectZeusOperator,
+}
+
+func IsOpenSaolaProject(project string) bool {
+	for _, candidate := range CompatibleProjects {
+		if project == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func OpenSaolaProjectSelector(labelKey string) labels.Selector {
+	req, err := labels.NewRequirement(labelKey, selection.In, CompatibleProjects)
+	if err != nil {
+		panic(projectLabelSelectorKey + ": " + err.Error())
+	}
+	return labels.NewSelector().Add(*req)
+}

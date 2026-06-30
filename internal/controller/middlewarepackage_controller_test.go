@@ -58,6 +58,18 @@ func TestMiddlewarePackageSecretPredicate_UpdateFilter(t *testing.T) {
 		}
 	})
 
+	t.Run("deletion timestamp change enqueued", func(t *testing.T) {
+		oldSecret := base.DeepCopy()
+		newSecret := base.DeepCopy()
+		now := metav1.Now()
+		newSecret.DeletionTimestamp = &now
+		newSecret.Finalizers = []string{v1.FinalizerPackageSecret}
+
+		if !pred.Update(event.UpdateEvent{ObjectOld: oldSecret, ObjectNew: newSecret}) {
+			t.Fatalf("expected Update predicate to enqueue on deletion timestamp change")
+		}
+	})
+
 	t.Run("data change enqueued", func(t *testing.T) {
 		oldSecret := base.DeepCopy()
 		newSecret := base.DeepCopy()
@@ -77,30 +89,46 @@ func TestMiddlewarePackageSecretPredicate_UpdateFilter(t *testing.T) {
 			t.Fatalf("expected Update predicate to enqueue on install annotation change")
 		}
 	})
+
+	t.Run("legacy project label enqueued", func(t *testing.T) {
+		oldSecret := base.DeepCopy()
+		newSecret := base.DeepCopy()
+		oldSecret.Labels[v1.LabelProject] = consts.ProjectZeusOperator
+		newSecret.Labels[v1.LabelProject] = consts.ProjectZeusOperator
+		newSecret.Annotations[v1.LabelInstall] = "true"
+
+		if !pred.Update(event.UpdateEvent{ObjectOld: oldSecret, ObjectNew: newSecret}) {
+			t.Fatalf("expected Update predicate to enqueue legacy project Secret")
+		}
+	})
 }
 
 func TestMiddlewarePackageSecretToRequests(t *testing.T) {
 	r := &MiddlewarePackageReconciler{}
 
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pkg-a",
-			Namespace: "ns",
-			Labels: map[string]string{
-				v1.LabelProject: consts.ProjectOpenSaola,
-			},
-		},
-	}
+	for _, project := range []string{consts.ProjectOpenSaola, consts.ProjectZeusOperator} {
+		t.Run(project, func(t *testing.T) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pkg-a",
+					Namespace: "ns",
+					Labels: map[string]string{
+						v1.LabelProject: project,
+					},
+				},
+			}
 
-	reqs := r.secretToRequests(context.Background(), secret)
-	if len(reqs) != 1 {
-		t.Fatalf("expected 1 request, got %d", len(reqs))
-	}
-	if got, want := reqs[0].Namespace, "ns"; got != want {
-		t.Fatalf("unexpected namespace: got %q want %q", got, want)
-	}
-	if got, want := reqs[0].Name, secretRequestPrefix+"pkg-a"; got != want {
-		t.Fatalf("unexpected name: got %q want %q", got, want)
+			reqs := r.secretToRequests(context.Background(), secret)
+			if len(reqs) != 1 {
+				t.Fatalf("expected 1 request, got %d", len(reqs))
+			}
+			if got, want := reqs[0].Namespace, "ns"; got != want {
+				t.Fatalf("unexpected namespace: got %q want %q", got, want)
+			}
+			if got, want := reqs[0].Name, secretRequestPrefix+"pkg-a"; got != want {
+				t.Fatalf("unexpected name: got %q want %q", got, want)
+			}
+		})
 	}
 }
 

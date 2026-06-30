@@ -24,6 +24,53 @@ Or use the Makefile wrapper:
 make helm-deploy
 ```
 
+When `HELM_NAMESPACE` is not set, the wrapper reuses the namespace of an existing `opensaola` release found by `helm list -A`; otherwise it installs into `opensaola-system`. Use `n=<namespace>` (or `HELM_NAMESPACE=<namespace>`) to choose a namespace explicitly.
+
+For a server that tracks the `dev` branch, the preferred one-command upgrade is:
+
+```bash
+git pull --ff-only && make helm-deploy
+```
+
+This deploys `ghcr.io/harmonycloud/opensaola:sha-<shortsha>` for the checked-out commit. Wait for the GitHub Docker workflow of that commit to finish before running it.
+
+If the cluster pulls GHCR slowly, set only the internal Harbor registry and OpenSaola repository path. The Makefile deploys the internal image and does not sync images by default:
+
+```bash
+git pull --ff-only && \
+HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
+HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+make helm-deploy
+```
+
+This keeps the default tag selection, so no manual tag is needed. To sync the OpenSaola image and the kubectl image used by the CRD hook Job before upgrading, add `HELM_SYNC_IMAGE=true`:
+
+```bash
+git pull --ff-only && \
+HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
+HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_SYNC_IMAGE=true \
+make helm-deploy
+```
+
+To sync images ahead of time without running a Helm upgrade, use:
+
+```bash
+HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
+HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+make helm-sync-image
+```
+
+Image sync uses `skopeo copy --all` by default to preserve the multi-architecture manifest. The execution environment must have `skopeo` installed; set `HELM_SYNC_MULTI_ARCH=false` only when a current-platform docker/nerdctl fallback is intended.
+
+If you want to follow the floating `dev` image tag instead of the exact commit tag, run:
+
+```bash
+make helm-deploy-dev
+```
+
+This uses `image.tag=dev`, `image.pullPolicy=Always`, and updates `podAnnotations.redeployAt` so Kubernetes rolls the Deployment even when the image tag string is unchanged.
+
 ## Install A Released OCI Chart
 
 Tagged releases publish this chart to GHCR:

@@ -65,6 +65,20 @@ The wrapper uses an exact `v*` tag when the current commit is a release tag. Oth
 
 For `sha-*` deployments, wait until the Docker workflow for that commit has completed so the image exists in GHCR.
 
+On a server that tracks `dev`, the exact-commit upgrade command is:
+
+```bash
+git pull --ff-only && make helm-deploy
+```
+
+To follow the floating `dev` tag instead, use the explicit rollout target:
+
+```bash
+make helm-deploy-dev
+```
+
+The floating-tag target sets `image.tag=dev`, `image.pullPolicy=Always`, and refreshes `podAnnotations.redeployAt` so the Deployment restarts even though the tag string stays the same.
+
 Override the image tag for release or SHA testing:
 
 ```bash

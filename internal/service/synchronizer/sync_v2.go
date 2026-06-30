@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/mohae/deepcopy"
@@ -37,6 +39,79 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+func pvcBelongsToStatefulSet(pvc corev1.PersistentVolumeClaim, sts appsv1.StatefulSet) bool {
+	if !pvcNameMatchesStatefulSetClaimTemplate(pvc.Name, sts) {
+		return false
+	}
+	pvcLabels := pvc.GetLabels()
+	if len(pvcLabels) == 0 {
+		return false
+	}
+	for _, labelSet := range statefulSetPVCLabelSets(sts) {
+		if labelsContainAll(pvcLabels, labelSet) {
+			return true
+		}
+	}
+	return false
+}
+
+func pvcNameMatchesStatefulSetClaimTemplate(pvcName string, sts appsv1.StatefulSet) bool {
+	if pvcName == "" || sts.Name == "" {
+		return false
+	}
+	for _, template := range sts.Spec.VolumeClaimTemplates {
+		if template.Name == "" {
+			continue
+		}
+		prefix := fmt.Sprintf("%s-%s-", template.Name, sts.Name)
+		ordinal := strings.TrimPrefix(pvcName, prefix)
+		if ordinal != pvcName && isStatefulSetPodOrdinal(ordinal) {
+			return true
+		}
+	}
+	return false
+}
+
+func isStatefulSetPodOrdinal(value string) bool {
+	if value == "" {
+		return false
+	}
+	ordinal, err := strconv.Atoi(value)
+	return err == nil && ordinal >= 0
+}
+
+func statefulSetPVCLabelSets(sts appsv1.StatefulSet) []map[string]string {
+	var labelSets []map[string]string
+	// StatefulSet-created PVCs inherit selector matchLabels from the StatefulSet controller.
+	if sts.Spec.Selector != nil && len(sts.Spec.Selector.MatchLabels) > 0 {
+		labelSets = append(labelSets, maps.Clone(sts.Spec.Selector.MatchLabels))
+	}
+	if len(sts.Spec.Template.Labels) > 0 {
+		labelSets = append(labelSets, maps.Clone(sts.Spec.Template.Labels))
+	}
+	return labelSets
+}
+
+func labelsContainAll(labels map[string]string, expected map[string]string) bool {
+	if len(labels) == 0 || len(expected) == 0 {
+		return false
+	}
+	for key, value := range expected {
+		if value == "" || labels[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func customResourcesFromStatus(status []byte) (v1.CustomResources, error) {
+	var customResources v1.CustomResources
+	if err := json.Unmarshal(status, &customResources); err != nil {
+		return v1.CustomResources{}, err
+	}
+	return customResources, nil
+}
 
 // recomputeAndUpdateStatus reads the latest Middleware and CR state, rebuilds
 // the full include list from the local informer cache, and writes the result back
@@ -74,7 +149,7 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		return
 	}
 
-	err = json.Unmarshal(nowCrStatusBytes, &nowMid.Status.CustomResources)
+	nowMid.Status.CustomResources, err = customResourcesFromStatus(nowCrStatusBytes)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "recomputeAndUpdateStatus: unmarshal cr status error")
 		return
@@ -314,7 +389,7 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		nowMid.Status.CustomResources.Include.Services = append(nowMid.Status.CustomResources.Include.Services, svc)
 	}
 
-	// PVCs — list from local cache, filter by ownerRef, label, or pod volume claim name.
+	// PVCs — list from local cache, filter by ownerRef, label, StatefulSet claim template labels, or pod volume claim name.
 	pvcList := cache.ListPVCs(nowMid.Namespace)
 	for _, pvc := range pvcList {
 		for _, ownerReference := range pvc.OwnerReferences {
@@ -329,6 +404,12 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 				continue
 			}
 		}
+		for _, statefulset := range statefulsets {
+			if pvcBelongsToStatefulSet(pvc, statefulset) {
+				pvcs[pvc.Name] = pvc
+				break
+			}
+		}
 		for _, podPvcName := range podsPvcNameList {
 			if pvc.Name == podPvcName {
 				pvcs[pvc.Name] = pvc
@@ -341,6 +422,10 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		nowMid.Status.CustomResources.Include.Pvcs = append(nowMid.Status.CustomResources.Include.Pvcs, v1.IncludeModel{
 			Name: key,
 		})
+	}
+	if diagnostic := deriveMiddlewareReadinessDiagnostic(nowMid, nowCr, pods, pvcs); diagnostic != "" {
+		nowMid.Status.CustomResources.Phase = v1.PhaseFailed
+		nowMid.Status.CustomResources.Reason = diagnostic
 	}
 
 	// Disaster sync — unchanged from V1, still reads from API server via k8s helpers.

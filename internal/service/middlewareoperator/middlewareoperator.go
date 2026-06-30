@@ -181,7 +181,7 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.MiddlewareOper
 
 			// Get the new package
 			var mp []v1.MiddlewarePackage
-			mp, err = k8s.ListMiddlewarePackages(ctx, cli, client.MatchingLabels{
+			mp, err = packages.ListCompatibleMiddlewarePackages(ctx, cli, client.MatchingLabels{
 				v1.LabelComponent:      m.Labels[v1.LabelComponent],
 				v1.LabelPackageVersion: targetVersion,
 			})

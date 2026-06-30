@@ -24,13 +24,15 @@ rules:
   - events
   verbs:
   - create
+  - get
+  - list
   - patch
+  - watch
 - apiGroups:
   - ""
   resources:
   - persistentvolumeclaims
   - pods
-  - secrets
   verbs:
   - get
   - list
@@ -44,17 +46,12 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - secrets/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - ""
-  resources:
-  - secrets/status
+  - secrets
   verbs:
   - get
+  - list
   - patch
-  - update
+  - watch
 - apiGroups:
   - '*'
   resources:
@@ -107,16 +104,6 @@ rules:
   verbs:
   - update
 - apiGroups:
-  - apps
-  resources:
-  - deployments/status
-  verbs:
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
   - middleware.cn
   resources:
   - middlewareactionbaselines
@@ -167,12 +154,25 @@ rules:
   - rbac.authorization.k8s.io
   resources:
   - clusterrolebindings
-  - clusterroles
   - rolebindings
-  - roles
   verbs:
   - create
   - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  - roles
+  verbs:
+  - bind
+  - create
+  - delete
+  - escalate
   - get
   - list
   - patch

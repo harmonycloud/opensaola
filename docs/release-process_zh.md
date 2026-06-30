@@ -65,6 +65,20 @@ make helm-deploy
 
 使用 `sha-*` 部署前，需要等待该提交对应的 Docker workflow 完成，确保镜像已经推送到 GHCR。
 
+服务器跟踪 `dev` 分支时，精确提交镜像的一键升级命令是：
+
+```bash
+git pull --ff-only && make helm-deploy
+```
+
+如果想跟随浮动 `dev` 标签，使用显式滚动目标：
+
+```bash
+make helm-deploy-dev
+```
+
+该浮动标签目标会设置 `image.tag=dev`、`image.pullPolicy=Always`，并刷新 `podAnnotations.redeployAt`，确保即使 tag 字符串不变，Deployment 也会重新滚动。
+
 测试正式版本或指定提交镜像时可以覆盖：
 
 ```bash

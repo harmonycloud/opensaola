@@ -20,6 +20,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/harmonycloud/opensaola/internal/service/middlewareactionbaseline"
@@ -36,6 +38,7 @@ import (
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -73,6 +76,131 @@ func isTerminalInstallError(err error) bool {
 		strings.Contains(msg, "invalid map key")
 }
 
+func normalizedPackageLabels(source map[string]string) map[string]string {
+	labels := make(map[string]string, len(source)+1)
+	for key, value := range source {
+		labels[key] = value
+	}
+	labels[v1.LabelProject] = consts.ProjectOpenSaola
+	return labels
+}
+
+type packageUsage struct {
+	Kind      string
+	Namespace string
+	Name      string
+	Baseline  string
+	State     string
+}
+
+func findPackageUsages(ctx context.Context, cli client.Client, packageName string) ([]packageUsage, error) {
+	selector := client.MatchingLabels{v1.LabelPackageName: packageName}
+	var usages []packageUsage
+
+	middlewares, err := k8s.ListMiddlewares(ctx, cli, "", selector)
+	if err != nil {
+		return nil, fmt.Errorf("list Middleware by package %q: %w", packageName, err)
+	}
+	for _, item := range middlewares {
+		usages = append(usages, packageUsage{
+			Kind:      "middleware",
+			Namespace: item.Namespace,
+			Name:      item.Name,
+			Baseline:  item.Spec.Baseline,
+			State:     string(item.Status.State),
+		})
+	}
+
+	operators, err := k8s.ListMiddlewareOperators(ctx, cli, "", selector)
+	if err != nil {
+		return nil, fmt.Errorf("list MiddlewareOperator by package %q: %w", packageName, err)
+	}
+	for _, item := range operators {
+		usages = append(usages, packageUsage{
+			Kind:      "middlewareoperator",
+			Namespace: item.Namespace,
+			Name:      item.Name,
+			Baseline:  item.Spec.Baseline,
+			State:     string(item.Status.State),
+		})
+	}
+
+	sort.Slice(usages, func(i, j int) bool {
+		left := usages[i].Kind + "/" + usages[i].Namespace + "/" + usages[i].Name
+		right := usages[j].Kind + "/" + usages[j].Namespace + "/" + usages[j].Name
+		return left < right
+	})
+	return usages, nil
+}
+
+func formatPackageUsageMessage(packageName string, usages []packageUsage) string {
+	if len(usages) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "package %q is still used; uninstall deployed Middleware or MiddlewareOperator resources first:", packageName)
+	for _, usage := range usages {
+		fmt.Fprintf(&b, " %s %s/%s", usage.Kind, usage.Namespace, usage.Name)
+		if usage.Baseline != "" {
+			fmt.Fprintf(&b, "(baseline=%s", usage.Baseline)
+			if usage.State != "" {
+				fmt.Fprintf(&b, ",state=%s", usage.State)
+			}
+			b.WriteString(")")
+		} else if usage.State != "" {
+			fmt.Fprintf(&b, "(state=%s)", usage.State)
+		}
+	}
+	return b.String()
+}
+
+func finalizePackageSecret(ctx context.Context, cli client.Client, secret *corev1.Secret, mp *v1.MiddlewarePackage) error {
+	if !controllerutil.ContainsFinalizer(secret, v1.FinalizerPackageSecret) {
+		return nil
+	}
+
+	usages, usageErr := findPackageUsages(ctx, cli, secret.Name)
+	if usageErr != nil {
+		return usageErr
+	}
+	if len(usages) > 0 {
+		if secret.Annotations == nil {
+			secret.Annotations = map[string]string{}
+		}
+		message := truncateBytes(formatPackageUsageMessage(secret.Name, usages), 1024)
+		secret.Annotations[v1.AnnotationUninstallError] = message
+		if err := k8s.UpdateSecret(ctx, cli, secret); err != nil {
+			log.FromContext(ctx).Error(err, "failed to update package uninstall error", "name", secret.Name)
+			return err
+		}
+		return fmt.Errorf("%s", message)
+	}
+
+	if err := HandleResource(ctx, cli, consts.HandleActionDelete, secret.Name); err != nil {
+		return err
+	}
+	if mp != nil {
+		if err := k8s.DeleteMiddlewarePackage(ctx, cli, mp); err != nil && !apiErrors.IsNotFound(err) {
+			return err
+		}
+	}
+
+	patch := client.MergeFrom(secret.DeepCopy())
+	if secret.Labels == nil {
+		secret.Labels = map[string]string{}
+	}
+	secret.Labels[v1.LabelEnabled] = "false"
+	secret.Labels[v1.LabelProject] = consts.ProjectOpenSaola
+	if secret.Annotations != nil {
+		delete(secret.Annotations, v1.LabelUnInstall)
+		delete(secret.Annotations, v1.AnnotationInstallDigest)
+		delete(secret.Annotations, v1.AnnotationInstallError)
+		delete(secret.Annotations, v1.AnnotationUninstallError)
+	}
+	controllerutil.RemoveFinalizer(secret, v1.FinalizerPackageSecret)
+	return cli.Patch(ctx, secret, patch)
+}
+
 func Check(ctx context.Context, cli client.Client, mp *v1.MiddlewarePackage) error {
 	if mp == nil {
 		return nil
@@ -103,6 +231,10 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 	}
 	switch act {
 	case consts.HandleActionPublish, consts.HandleActionUpdate:
+		if secret.GetDeletionTimestamp() != nil {
+			return finalizePackageSecret(ctx, cli, secret, mp)
+		}
+
 		// If MiddlewarePackage already registered and no install/uninstall
 		// action pending, skip tarball decompression entirely. This avoids
 		// loading all 600+ packages into memory on every pod restart.
@@ -148,7 +280,7 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 			},
 			ObjectMeta: metav1.ObjectMeta{
 				Name:   secret.Name,
-				Labels: secret.Labels,
+				Labels: normalizedPackageLabels(secret.Labels),
 			},
 			Spec: v1.MiddlewarePackageSpec{
 				Name:        pkg.Metadata.Name,
@@ -184,7 +316,9 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 			}
 
 			var enabledSecrets *corev1.SecretList
-			enabledSecrets, err = k8s.GetSecrets(ctx, cli, packages.DataNamespace, client.MatchingLabels{
+			enabledSecrets, err = k8s.GetSecrets(ctx, cli, packages.DataNamespace, client.MatchingLabelsSelector{
+				Selector: consts.OpenSaolaProjectSelector(v1.LabelProject),
+			}, client.MatchingLabels{
 				v1.LabelEnabled:   "true",
 				v1.LabelComponent: secret.Labels[v1.LabelComponent],
 			})
@@ -199,6 +333,10 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 					continue
 				}
 				delete(item.Labels, v1.LabelEnabled)
+				if item.Labels == nil {
+					item.Labels = map[string]string{}
+				}
+				item.Labels[v1.LabelProject] = consts.ProjectOpenSaola
 				err = k8s.UpdateSecret(ctx, cli, &item)
 			}
 
@@ -222,7 +360,11 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 				return err
 			}
 
+			if secret.Labels == nil {
+				secret.Labels = map[string]string{}
+			}
 			secret.Labels[v1.LabelEnabled] = "true"
+			secret.Labels[v1.LabelProject] = consts.ProjectOpenSaola
 			delete(secret.Annotations, v1.LabelInstall)
 			delete(secret.Annotations, v1.AnnotationInstallDigest)
 			delete(secret.Annotations, v1.AnnotationInstallError)
@@ -232,14 +374,40 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 				return err
 			}
 		} else if _, ok = secret.Annotations[v1.LabelUnInstall]; ok {
+			usages, usageErr := findPackageUsages(ctx, cli, secret.Name)
+			if usageErr != nil {
+				return usageErr
+			}
+			if len(usages) > 0 {
+				if secret.Annotations == nil {
+					secret.Annotations = map[string]string{}
+				}
+				secret.Annotations[v1.AnnotationUninstallError] = truncateBytes(formatPackageUsageMessage(secret.Name, usages), 1024)
+				delete(secret.Annotations, v1.LabelUnInstall)
+				if secret.Labels == nil {
+					secret.Labels = map[string]string{}
+				}
+				secret.Labels[v1.LabelProject] = consts.ProjectOpenSaola
+				if err = k8s.UpdateSecret(ctx, cli, secret); err != nil {
+					log.FromContext(ctx).Error(err, "failed to update package uninstall error", "name", secret.Name)
+					return err
+				}
+				return nil
+			}
+
 			err = HandleResource(ctx, cli, consts.HandleActionDelete, secret.Name)
 			if err != nil {
 				return err
 			}
+			if secret.Labels == nil {
+				secret.Labels = map[string]string{}
+			}
 			secret.Labels[v1.LabelEnabled] = "false"
+			secret.Labels[v1.LabelProject] = consts.ProjectOpenSaola
 			delete(secret.Annotations, v1.LabelUnInstall)
 			delete(secret.Annotations, v1.AnnotationInstallDigest)
 			delete(secret.Annotations, v1.AnnotationInstallError)
+			delete(secret.Annotations, v1.AnnotationUninstallError)
 			err = k8s.UpdateSecret(ctx, cli, secret)
 			if err != nil {
 				log.FromContext(ctx).Error(err, "failed to update package resource", "name", secret.Name)
@@ -471,49 +639,60 @@ func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAct
 		}
 	case consts.HandleActionDelete:
 		// Delete middleware baselines
+		var deleteErr error
 		for _, baseline := range middlewareBaseline {
-			log.FromContext(ctx).Info("start deleting MiddlewareBaseline", "name", baseline.Name)
-			err = k8s.DeleteMiddlewareBaseline(ctx, cli, baseline)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "failed to delete MiddlewareBaseline", "name", baseline.Name)
-				continue
+			if itemErr := deletePackageResource(ctx, "MiddlewareBaseline", baseline.Name, func() error {
+				return k8s.DeleteMiddlewareBaseline(ctx, cli, baseline)
+			}); itemErr != nil && deleteErr == nil {
+				deleteErr = itemErr
 			}
-			log.FromContext(ctx).Info("finished deleting MiddlewareBaseline", "name", baseline.Name)
 		}
 
 		// Delete middleware operator baselines
 		for _, operatorBaseline := range middlewareOperatorBaseline {
-			log.FromContext(ctx).Info("start deleting MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
-			err = k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaseline)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "failed to delete MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
-				continue
+			if itemErr := deletePackageResource(ctx, "MiddlewareOperatorBaseline", operatorBaseline.Name, func() error {
+				return k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaseline)
+			}); itemErr != nil && deleteErr == nil {
+				deleteErr = itemErr
 			}
-			log.FromContext(ctx).Info("finished deleting MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
 		}
 
 		// Delete action baselines
 		for _, actionBaseline := range middlewareActionBaselines {
-			log.FromContext(ctx).Info("start deleting MiddlewareActionBaseline", "name", actionBaseline.Name)
-			err = k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaseline)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "failed to delete MiddlewareActionBaseline", "name", actionBaseline.Name)
-				continue
+			if itemErr := deletePackageResource(ctx, "MiddlewareActionBaseline", actionBaseline.Name, func() error {
+				return k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaseline)
+			}); itemErr != nil && deleteErr == nil {
+				deleteErr = itemErr
 			}
-			log.FromContext(ctx).Info("finished deleting MiddlewareActionBaseline", "name", actionBaseline.Name)
 		}
 
 		// Delete configurations
 		for _, configuration := range configurations {
-			log.FromContext(ctx).Info("start deleting MiddlewareConfiguration", "name", configuration.Name)
-			err = k8s.DeleteMiddlewareConfiguration(ctx, cli, configuration)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "failed to delete MiddlewareConfiguration", "name", configuration.Name)
-				continue
+			if itemErr := deletePackageResource(ctx, "MiddlewareConfiguration", configuration.Name, func() error {
+				return k8s.DeleteMiddlewareConfiguration(ctx, cli, configuration)
+			}); itemErr != nil && deleteErr == nil {
+				deleteErr = itemErr
 			}
-			log.FromContext(ctx).Info("finished deleting MiddlewareConfiguration", "name", configuration.Name)
+		}
+		if deleteErr != nil {
+			err = deleteErr
+			return err
 		}
 
 	}
+	return nil
+}
+
+func deletePackageResource(ctx context.Context, kind, name string, deleteFn func() error) error {
+	log.FromContext(ctx).Info("start deleting "+kind, "name", name)
+	if err := deleteFn(); err != nil {
+		if apiErrors.IsNotFound(err) {
+			log.FromContext(ctx).Info(kind+" already absent", "name", name)
+			return nil
+		}
+		log.FromContext(ctx).Error(err, "failed to delete "+kind, "name", name)
+		return err
+	}
+	log.FromContext(ctx).Info("finished deleting "+kind, "name", name)
 	return nil
 }

@@ -50,6 +50,19 @@ type MiddlewareReconciler struct {
 	Recorder record.EventRecorder
 }
 
+func currentFalseCondition(conditions []metav1.Condition, generation int64) (metav1.Condition, bool) {
+	for _, condition := range conditions {
+		if condition.Status != metav1.ConditionFalse {
+			continue
+		}
+		if condition.ObservedGeneration < generation {
+			continue
+		}
+		return condition, true
+	}
+	return metav1.Condition{}, false
+}
+
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewares,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewares/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewares/finalizers,verbs=update
@@ -57,8 +70,7 @@ type MiddlewareReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
-	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
-	ctx = log.IntoContext(ctx, l)
+	ctx = withReconcileLogger(ctx, "middleware", "Middleware", req)
 
 	log.FromContext(ctx).V(1).Info("start processing middleware", "req", req)
 
@@ -216,12 +228,9 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 		}
 
-		for _, condition := range mid.Status.Conditions {
-			if condition.Status == metav1.ConditionFalse {
-				state = v1.StateUnavailable
-				reason = condition.Message
-				break
-			}
+		if condition, ok := currentFalseCondition(mid.Status.Conditions, mid.Generation); ok {
+			state = v1.StateUnavailable
+			reason = condition.Message
 		}
 
 		// If this reconcile failed but no condition is marked False yet, fall back to writing the error as reason.
@@ -251,9 +260,12 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 		}
 
-		err = k8s.UpdateMiddlewareStatus(ctx, r.Client, mid)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "failed to update middleware status", "namespace", mid.Namespace, "name", mid.Name)
+		statusErr := k8s.UpdateMiddlewareStatus(ctx, r.Client, mid)
+		if statusErr != nil {
+			log.FromContext(ctx).Error(statusErr, "failed to update middleware status", "namespace", mid.Namespace, "name", mid.Name)
+			if retErr == nil {
+				retErr = statusErr
+			}
 		}
 	}()
 

@@ -35,7 +35,10 @@ rules:
   - events
   verbs:
   - create
+  - get
+  - list
   - patch
+  - watch
 - apiGroups:
   - ""
   resources:
@@ -91,14 +94,6 @@ rules:
   verbs:
   - update
 - apiGroups:
-  - apps
-  resources:
-  - deployments/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
   - middleware.cn
   resources:
   - middlewareactionbaselines
@@ -148,10 +143,23 @@ rules:
 - apiGroups:
   - rbac.authorization.k8s.io
   resources:
-  - clusterrolebindings
   - clusterroles
-  - rolebindings
   - roles
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+  - bind
+  - escalate
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterrolebindings
+  - rolebindings
   verbs:
   - create
   - delete
@@ -246,8 +254,8 @@ roleRef:
 # Role（数据命名空间）：MiddlewarePackage Secret 协调。
 # Operator only reads and manages Secrets in .Values.config.dataNamespace.
 # 控制器只会在 .Values.config.dataNamespace 中读取和管理 Secret。
-# It never manages Secrets cluster-wide.
-# 不会进行集群级 Secret 管理。
+# The wildcard ClusterRole above still allows package templates to manage arbitrary resources, including Secrets.
+# 上面的通配 ClusterRole 仍允许包模板管理任意资源，包括 Secret。
 # If dataNamespace != Release.Namespace and config.createDataNamespace=false,
 # 如果 dataNamespace != Release.Namespace，且 config.createDataNamespace=false，
 # that namespace must already exist before helm install.
@@ -270,20 +278,6 @@ rules:
   - list
   - patch
   - watch
-- apiGroups:
-  - ""
-  resources:
-  - secrets/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - ""
-  resources:
-  - secrets/status
-  verbs:
-  - get
-  - patch
-  - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

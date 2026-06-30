@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -57,15 +56,12 @@ const secretRequestPrefix = "__secret__/"
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewarepackages/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewarepackages/finalizers,verbs=update
 //+kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
-//+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
-//+kubebuilder:rbac:groups=core,resources=secrets/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=core,resources=secrets/finalizers,verbs=update
+//+kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;patch
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *MiddlewarePackageReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
-	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
-	ctx = log.IntoContext(ctx, l)
+	ctx = withReconcileLogger(ctx, "middlewarepackage", "MiddlewarePackage", req)
 
 	if strings.HasPrefix(req.Name, secretRequestPrefix) {
 		secretName := strings.TrimPrefix(req.Name, secretRequestPrefix)
@@ -161,7 +157,7 @@ func (r *MiddlewarePackageReconciler) isOpenSaolaSecret(object client.Object) bo
 	if object == nil {
 		return false
 	}
-	return object.GetLabels()[v1.LabelProject] == consts.ProjectOpenSaola
+	return consts.IsOpenSaolaProject(object.GetLabels()[v1.LabelProject])
 }
 
 func (r *MiddlewarePackageReconciler) secretPredicate() predicate.Predicate {
@@ -188,6 +184,9 @@ func (r *MiddlewarePackageReconciler) secretPredicate() predicate.Predicate {
 			oldSecret, okOld := e.ObjectOld.(*corev1.Secret)
 			newSecret, okNew := e.ObjectNew.(*corev1.Secret)
 			if !okOld || !okNew {
+				return true
+			}
+			if (oldSecret.GetDeletionTimestamp() == nil) != (newSecret.GetDeletionTimestamp() == nil) {
 				return true
 			}
 

@@ -113,13 +113,15 @@ func GetSecret(ctx context.Context, cli client.Client, name, namespace string) (
 }
 
 // GetSecrets retrieves a list of Secret resources.
-func GetSecrets(ctx context.Context, cli client.Client, namespace string, labelSelector client.MatchingLabels) (*corev1.SecretList, error) {
+func GetSecrets(ctx context.Context, cli client.Client, namespace string, listOptions ...client.ListOption) (*corev1.SecretList, error) {
 	if cli == nil {
 		return nil, fmt.Errorf("k8s client is nil")
 	}
 	list := new(corev1.SecretList)
 
-	err := cli.List(ctx, list, client.InNamespace(namespace), labelSelector)
+	opts := []client.ListOption{client.InNamespace(namespace)}
+	opts = append(opts, listOptions...)
+	err := cli.List(ctx, list, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("list %s error: %w", list.Kind, err)
 	}

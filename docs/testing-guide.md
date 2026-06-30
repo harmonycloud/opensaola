@@ -188,9 +188,11 @@ Packages **with** tests:
 |---------|-----------|
 | `internal/controller` | 12 |
 | `pkg/tools` | 6 |
-| `internal/k8s` | 4 |
+| `internal/k8s` | 5 |
+| `internal/service/middlewareoperator` | 4 |
 | `internal/service/packages` | 3 |
-| `internal/service/middlewareoperator` | 3 |
+| `internal/service/middleware` | 2 |
+| `internal/service/synchronizer` | 2 |
 | `test/e2e` | 2 |
 | `api/v1` | 1 |
 | `internal/cache` | 1 |
@@ -200,7 +202,6 @@ Packages **with** tests:
 | `internal/resource/logger` | 1 |
 | `internal/service/consts` | 1 |
 | `internal/service/customresource` | 1 |
-| `internal/service/middleware` | 1 |
 | `internal/service/middlewareaction` | 1 |
 | `internal/service/middlewareactionbaseline` | 1 |
 | `internal/service/middlewarebaseline` | 1 |
@@ -208,10 +209,8 @@ Packages **with** tests:
 | `internal/service/middlewareoperatorbaseline` | 1 |
 | `internal/service/middlewarepackage` | 1 |
 | `internal/service/status` | 1 |
-| `internal/service/synchronizer` | 1 |
 | `internal/service/watcher` | 1 |
 | `pkg/config` | 1 |
-| `pkg/metrics` | 1 |
 | `pkg/tools/ctxkeys` | 1 |
 
 Packages **without** tests:

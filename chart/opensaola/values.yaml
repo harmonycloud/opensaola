@@ -23,7 +23,7 @@ imagePullSecrets: []
 
 # -- Number of operator replicas
 # -- 控制器副本数
-replicas: 1
+replicas: 2
 
 # -- CRD installation via kubectl job
 # -- 通过 kubectl Job 安装 CRD
@@ -34,10 +34,10 @@ kubectl:
   # -- kubectl image for CRD install job
   # -- CRD 安装 Job 使用的 kubectl 镜像
   image:
-    # -- Kubectl image registry. Kept separate from image.registry so operator image overrides do not affect the hook job.
-    # -- kubectl 镜像仓库地址。与 image.registry 分开配置，避免控制器镜像覆盖影响钩子 Job。
-    registry: "registry.k8s.io"
-    repository: kubectl
+    # -- Kubectl image registry. Defaults to GHCR for environments that cannot access registry.k8s.io; kept separate from image.registry so operator image overrides do not affect the hook job.
+    # -- kubectl 镜像仓库地址。默认使用 GHCR，适配无法访问 registry.k8s.io 的环境；与 image.registry 分开配置，避免控制器镜像覆盖影响钩子 Job。
+    registry: "ghcr.io"
+    repository: harmonycloud/kubectl
     tag: "v1.30.14"
     pullPolicy: IfNotPresent
   # -- Optional labels for the CRD install Job pod
@@ -70,7 +70,7 @@ config:
   createDataNamespace: false
   # -- Log level (0=debug, 1=info, 2=warn, 3=error)
   # -- 日志级别（0=debug，1=info，2=warn，3=error）
-  logLevel: 0
+  logLevel: 1
   # -- Log format: "console" (human-readable) or "json" (structured)
   # -- 日志格式："console"（便于阅读）或 "json"（结构化）
   logFormat: "console"
@@ -128,6 +128,28 @@ tolerations: []
 # -- Affinity rules for pod scheduling
 # -- Pod 调度使用的亲和性规则
 affinity: {}
+
+# -- Metrics endpoint configuration (controller-runtime built-in metrics over HTTP)
+# -- 指标端点配置（通过 HTTP 暴露 controller-runtime 内置指标）
+metrics:
+  # -- Enable the metrics HTTP endpoint and container port
+  # -- 是否启用指标 HTTP 端点和容器端口
+  enabled: true
+  # -- Port the metrics endpoint binds to
+  # -- 指标端点监听的端口
+  port: 8081
+  # -- ServiceMonitor for Prometheus auto-discovery (requires prometheus-operator)
+  # -- 供 Prometheus 自动发现的 ServiceMonitor（需要 prometheus-operator）
+  serviceMonitor:
+    # -- Enable ServiceMonitor creation
+    # -- 是否创建 ServiceMonitor
+    enabled: false
+    # -- Scrape interval
+    # -- 抓取间隔
+    interval: 30s
+    # -- Extra labels for the ServiceMonitor (e.g. to match the Prometheus selector)
+    # -- ServiceMonitor 的额外标签（例如用于匹配 Prometheus 的选择器）
+    labels: {}
 
 # -- Extra labels for the operator pod
 # -- 控制器 Pod 的额外标签

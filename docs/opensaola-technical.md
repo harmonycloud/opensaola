@@ -701,13 +701,13 @@ MiddlewareAction (Namespaced) -- 引用 --> MiddlewareActionBaseline
     |
     |-- 否 --> [判断 Generation vs ObservedGeneration]
                    |
-                   |-- generation == observedGeneration && 未初始化完成 || observedGeneration == 0
+                   |-- observedGeneration == 0
                    |       --> [HandleResource(Publish)]
                    |
                    |-- generation > observedGeneration || state == Updating
                    |       --> [HandleResource(Update)]
                    |
-                   |-- 其他（已初始化 && generation == observedGeneration && state != Updating）
+                   |-- 其他（generation == observedGeneration && state != Updating）
                    |       --> 仅同步状态（defer 中根据 Conditions 计算 State）
                    |       注：这是稳态运行的主要路径
                    
@@ -774,10 +774,11 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 | 触发事件 | 影响的 CRD | 行为 |
 |----------|-----------|------|
 | Spec 变更（Generation 增加） | 所有 CRD | 重新 Reconcile |
-| Status 变更 | Middleware | **被忽略**（Predicate 过滤） |
+| Status 变更 | Middleware, MiddlewareOperator | **被忽略**（Predicate 过滤） |
 | 添加 `middleware.cn/update` 注解 | Middleware, MiddlewareOperator | 触发升级流程 |
 | 添加 `middleware.cn/install` 注解到 Secret | MiddlewarePackage | 触发包安装 |
-| 添加 `middleware.cn/uninstall` 注解到 Secret | MiddlewarePackage | 触发包卸载 |
+| 添加 `middleware.cn/uninstall` 注解到 Secret | MiddlewarePackage | 触发兼容软卸载：清理包资源并设置 `enabled=false` |
+| 删除带 `middleware.cn/package-secret-cleanup` finalizer 的 Secret | MiddlewarePackage | 触发真实包卸载：清理包资源、删除 MiddlewarePackage、移除 finalizer 后让 Secret 删除 |
 | Deployment 变更 | MiddlewareOperator（Owns Deployment） | 同步 Deployment 状态并比较差异 |
 | Secret 创建/更新/删除（带 project 标签） | MiddlewarePackage（Watches Secret） | 创建/更新/删除 MiddlewarePackage |
 | CR 对象删除 | Middleware（通过 Watcher） | 自动重建 CR |
@@ -807,7 +808,8 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 | `middleware.cn/update` | 升级目标版本 | 用户触发升级时设置 | `2.0.0` |
 | `middleware.cn/baseline` | 升级目标基线名称 | 用户触发升级时设置 | `redis-baseline-v2` |
 | `middleware.cn/install` | 安装标记 | 用户触发安装时设置 | 存在即触发 |
-| `middleware.cn/uninstall` | 卸载标记 | 用户触发卸载时设置 | 存在即触发 |
+| `middleware.cn/uninstall` | 兼容软卸载标记 | 旧客户端触发卸载时设置 | 存在即触发软卸载 |
+| `middleware.cn/uninstallError` | 卸载失败原因 | 卸载被占用资源阻断时由 Operator 设置 | 错误信息 |
 | `middleware.cn/configurations` | 关联的 Configuration 名称 | Configuration 发布时设置 | `redis-configmap` |
 | `middleware.cn/disasterSyncer` | 灾备同步器 GVK/Name | 用户配置 | `group/version/kind/name` |
 | `middleware.cn/dataSyncer` | 数据同步器 GVK/Name | 用户配置 | `group/version/kind/name` |
@@ -821,17 +823,11 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 
 **Watch 资源**：`v1.Middleware`（自身）  
 **Predicate 过滤器**：忽略仅 Status 字段变更的 Update 事件  
-**全局变量**：`MiddlewareInitializationCompleted` - 标记是否完成初始化
-
-> **MiddlewareInitializationCompleted 边界说明**：
-> 1. 作用：确保 Operator 启动时对已存在的 Middleware 做一次全量 Publish（即使 generation == observedGeneration，也会执行 HandleResource(Publish)）
-> 2. 仅第一个成功执行的 Reconcile 会将此标志设为 true，后续 Reconcile 进入正常的 generation 比较逻辑
-> 3. 新创建的 Middleware（observedGeneration == 0）不受此标志影响，因为 `observedGeneration == 0` 条件独立于此标志，始终会触发 Publish
 
 **Reconcile 主逻辑**：
 
 1. **获取 Middleware**：通过 `k8s.GetMiddleware` 获取
-   - 如果 NotFound：从 `MiddlewareCache` 获取缓存副本，调用 `HandleResource(Delete)` 删除关联资源，清除缓存
+   - 如果 NotFound：忽略并退出
    - 如果其他错误：返回错误
 
 2. **defer 状态更新**：
@@ -846,7 +842,7 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
    - 检查 `middleware.cn/update` 注解是否存在
 
 5. **Generation 判断**：
-   - `generation == observedGeneration && !初始化完成` 或 `observedGeneration == 0`：调用 `HandleResource(Publish)`
+   - `observedGeneration == 0`：调用 `HandleResource(Publish)`
    - `generation > observedGeneration` 或 `state == Updating`：调用 `HandleResource(Update)`
 
 **HandleResource 调用链**：
@@ -870,15 +866,15 @@ HandleResource(Publish/Update/Delete)
 ### 5.3 MiddlewareOperator Controller
 
 **Watch 资源**：`v1.MiddlewareOperator`（自身），`appsv1.Deployment`（Owns）  
-**全局变量**：`MiddlewareOperatorInitializationCompleted`
+**Predicate 过滤器**：忽略 MiddlewareOperator 仅 Status 字段变更的 Update 事件；Deployment ownership 使用 `GenerationChangedPredicate`
 
-> **注意**：与 Middleware Controller 不同，MiddlewareOperator 的 `SetupWithManager` **未配置** Status 变更过滤的 Predicate，因此 Status 变更也会触发 Reconcile。Middleware Controller 使用了自定义 `predicate.Funcs` 过滤掉仅 Status 变化的 Update 事件，而 MiddlewareOperator Controller 直接使用默认行为。
+> **注意**：MiddlewareOperator 仍保留注解和元数据变更事件，因此即使过滤了仅 Status 更新，`middleware.cn/update` 仍能触发升级流程。
 
 **Reconcile 主逻辑**（分两阶段）：
 
 **阶段 1 - handleMiddlewareOperator**：
 1. 获取 MiddlewareOperator
-   - NotFound：从缓存获取 -> HandleResource(Delete) -> 清缓存
+   - NotFound：忽略并退出
 2. defer 状态更新（与 Middleware 相同逻辑）
 3. Check 校验：验证 baseline 不为空
 4. ReplacePackage 升级检查
@@ -924,12 +920,19 @@ HandleResource(Publish/Update/Delete)
 1. 获取 MiddlewarePackage
 2. 调用 `middlewarepackage.Check` - 设置 Checked=True
 
+### Finalizers
+
+| Key | 用途 | 设置时机 |
+|-----|------|----------|
+| `middleware.cn/package-secret-cleanup` | 包 Secret 删除保护，用于真实卸载时保留 Secret.Data 供 Operator 清理包资源 | `saola uninstall` 发起删除前设置 |
+
 **HandleSecret**（由 Secret Watch 触发）：
 1. 获取 Secret
    - **存在**：
+     - Secret 正在删除且带 `package-secret-cleanup` finalizer：检查引用 -> HandleResource(Delete) -> 删除 MiddlewarePackage -> 移除 finalizer
      - 解析包 -> 创建/更新 MiddlewarePackage
      - 有 `install` 注解：禁用同组件的其他已启用包 -> HandleResource(Publish)（发布 Baseline/Config/Action） -> 设置 enabled=true
-     - 有 `uninstall` 注解：HandleResource(Delete) -> 设置 enabled=false
+     - 有 `uninstall` 注解：兼容软卸载路径，检查引用 -> HandleResource(Delete) -> 设置 enabled=false
    - **不存在**（删除事件）：
      - 删除对应的 MiddlewarePackage
 
@@ -1240,13 +1243,16 @@ Checked=True?
 
 ### 9.3 MiddlewarePackage 卸载
 
-通过 Secret 的 `middleware.cn/uninstall` 注解触发：
-1. 调用 `HandleResource(Delete)`
+通过删除带 `middleware.cn/package-secret-cleanup` finalizer 的 Secret 触发：
+1. 检查是否仍有 Middleware / MiddlewareOperator 通过 `middleware.cn/packagename` 引用该包
+   - 若存在引用：写入 `middleware.cn/uninstallError`，保留 finalizer，不清理资源；删除引用后由后续重试继续处理
+2. 调用 `HandleResource(Delete)`
    - 删除所有 MiddlewareBaseline
    - 删除所有 MiddlewareOperatorBaseline
    - 删除所有 MiddlewareActionBaseline
    - 删除所有 MiddlewareConfiguration
-2. 设置 `enabled=false`，删除 `uninstall` 注解
+3. 删除对应的 MiddlewarePackage
+4. 移除 Secret 上的 `middleware.cn/package-secret-cleanup` finalizer，由 Kubernetes 完成 Secret 删除
 
 ### 9.4 Secret 删除
 
@@ -1443,7 +1449,7 @@ type TarInfo struct {
 |------|------|
 | 使用 sync.Map 缓存 Baseline/Configuration/OperatorBaseline/ActionBaseline | 避免频繁从 Secret 解压读取包内容；配合定时清理（cache_cleanup_interval，默认 1800 秒） |
 | Middleware 删除时从 Cache 获取对象 | 已删除的对象无法从 API Server 获取，需要依赖缓存进行资源清理 |
-| Middleware Controller 使用 Predicate 过滤 Status 更新 | 避免 Status 更新触发无限循环 Reconcile |
+| Middleware 和 MiddlewareOperator Controller 使用 Predicate 过滤 Status 更新 | 避免 Status 更新触发无限循环 Reconcile，同时保留 spec、metadata 和 annotation 变更 |
 | MiddlewareAction 的一次性执行语义（State 非空即跳过） | Action 是操作而非声明式状态，执行完毕后不应重复执行 |
 | CR 被删除时自动重建 | 保护中间件实例不被意外删除；通过 Watcher DeleteFunc 实现 |
 | MiddlewareOperator 比较 Deployment 差异并恢复 | 防止 Deployment 被外部修改（如 kubectl edit），确保与 Spec 声明一致 |

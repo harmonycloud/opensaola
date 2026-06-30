@@ -701,13 +701,13 @@ Create/Update
     |
     |-- no --> [Compare Generation vs ObservedGeneration]
                    |
-                   |-- generation == observedGeneration && not initialized || observedGeneration == 0
+                   |-- observedGeneration == 0
                    |       --> [HandleResource(Publish)]
                    |
                    |-- generation > observedGeneration || state == Updating
                    |       --> [HandleResource(Update)]
                    |
-                   |-- other (initialized && generation == observedGeneration && state != Updating)
+                   |-- other (generation == observedGeneration && state != Updating)
                    |       --> sync state only (defer computes State based on Conditions)
                    |       Note: this is the primary path during steady-state operation
                    
@@ -774,10 +774,11 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 | Trigger Event | Affected CRDs | Behavior |
 |---------------|---------------|----------|
 | Spec change (Generation increases) | All CRDs | Re-Reconcile |
-| Status change | Middleware | **Ignored** (filtered by Predicate) |
+| Status change | Middleware, MiddlewareOperator | **Ignored** (filtered by Predicate) |
 | Adding `middleware.cn/update` annotation | Middleware, MiddlewareOperator | Triggers upgrade flow |
 | Adding `middleware.cn/install` annotation to Secret | MiddlewarePackage | Triggers package installation |
-| Adding `middleware.cn/uninstall` annotation to Secret | MiddlewarePackage | Triggers package uninstallation |
+| Adding `middleware.cn/uninstall` annotation to Secret | MiddlewarePackage | Triggers compatible soft uninstall: clean package resources and set `enabled=false` |
+| Deleting a Secret with the `middleware.cn/package-secret-cleanup` finalizer | MiddlewarePackage | Triggers real package uninstall: clean package resources, delete MiddlewarePackage, remove finalizer, then let the Secret be deleted |
 | Deployment change | MiddlewareOperator (Owns Deployment) | Syncs Deployment status and compares differences |
 | Secret create/update/delete (with project label) | MiddlewarePackage (Watches Secret) | Creates/updates/deletes MiddlewarePackage |
 | CR object deletion | Middleware (via Watcher) | Automatically rebuilds the CR |
@@ -807,7 +808,8 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 | `middleware.cn/update` | Upgrade target version | Set when user triggers an upgrade | `2.0.0` |
 | `middleware.cn/baseline` | Upgrade target baseline name | Set when user triggers an upgrade | `redis-baseline-v2` |
 | `middleware.cn/install` | Install marker | Set when user triggers installation | Presence triggers installation |
-| `middleware.cn/uninstall` | Uninstall marker | Set when user triggers uninstallation | Presence triggers uninstallation |
+| `middleware.cn/uninstall` | Compatible soft-uninstall marker | Set by older clients when triggering uninstallation | Presence triggers soft uninstall |
+| `middleware.cn/uninstallError` | Uninstall failure reason | Set by the operator when uninstall is blocked by in-use resources | Error message |
 | `middleware.cn/configurations` | Associated Configuration names | Set during Configuration publishing | `redis-configmap` |
 | `middleware.cn/disasterSyncer` | Disaster recovery syncer GVK/Name | Configured by user | `group/version/kind/name` |
 | `middleware.cn/dataSyncer` | Data syncer GVK/Name | Configured by user | `group/version/kind/name` |
@@ -821,17 +823,11 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 
 **Watch Resource**: `v1.Middleware` (itself)  
 **Predicate Filter**: Ignores Update events where only Status fields changed  
-**Global Variable**: `MiddlewareInitializationCompleted` - Marks whether initialization is complete
-
-> **MiddlewareInitializationCompleted boundary notes**:
-> 1. Purpose: Ensures a full Publish for all existing Middleware instances when the Operator starts up (HandleResource(Publish) is executed even when generation == observedGeneration)
-> 2. Only the first successfully executed Reconcile sets this flag to true; subsequent Reconciles enter the normal generation comparison logic
-> 3. Newly created Middleware (observedGeneration == 0) is not affected by this flag, because the `observedGeneration == 0` condition is independent of this flag and always triggers a Publish
 
 **Reconcile Main Logic**:
 
 1. **Get Middleware**: Retrieved via `k8s.GetMiddleware`
-   - If NotFound: Get cached copy from `MiddlewareCache`, call `HandleResource(Delete)` to delete associated resources, clear cache
+   - If NotFound: Ignore and exit
    - If other error: Return error
 
 2. **Deferred status update**:
@@ -846,7 +842,7 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
    - Check whether `middleware.cn/update` annotation exists
 
 5. **Generation comparison**:
-   - `generation == observedGeneration && !initialized` or `observedGeneration == 0`: Call `HandleResource(Publish)`
+   - `observedGeneration == 0`: Call `HandleResource(Publish)`
    - `generation > observedGeneration` or `state == Updating`: Call `HandleResource(Update)`
 
 **HandleResource Call Chain**:
@@ -870,15 +866,15 @@ HandleResource(Publish/Update/Delete)
 ### 5.3 MiddlewareOperator Controller
 
 **Watch Resource**: `v1.MiddlewareOperator` (itself), `appsv1.Deployment` (Owns)  
-**Global Variable**: `MiddlewareOperatorInitializationCompleted`
+**Predicate Filter**: Ignores MiddlewareOperator Update events where only Status fields changed; Deployment ownership uses `GenerationChangedPredicate`
 
-> **Note**: Unlike the Middleware Controller, MiddlewareOperator's `SetupWithManager` does **not** configure a Predicate to filter Status changes, so Status changes also trigger a Reconcile. The Middleware Controller uses a custom `predicate.Funcs` to filter out Update events where only Status changed, while the MiddlewareOperator Controller uses the default behavior.
+> **Note**: MiddlewareOperator keeps annotation and metadata changes in the event stream, so `middleware.cn/update` can still trigger upgrades even though status-only updates are filtered.
 
 **Reconcile Main Logic** (two phases):
 
 **Phase 1 - handleMiddlewareOperator**:
 1. Get MiddlewareOperator
-   - NotFound: Get from cache -> HandleResource(Delete) -> clear cache
+   - NotFound: Ignore and exit
 2. Deferred status update (same logic as Middleware)
 3. Check validation: Verify baseline is not empty
 4. ReplacePackage upgrade check
@@ -924,12 +920,19 @@ HandleResource(Publish/Update/Delete)
 1. Get MiddlewarePackage
 2. Call `middlewarepackage.Check` - Set Checked=True
 
+### Finalizers
+
+| Key | Purpose | When Set |
+|-----|---------|----------|
+| `middleware.cn/package-secret-cleanup` | Protects package Secret deletion so the operator can still read Secret.Data while cleaning package resources | Set by `saola uninstall` before deleting the Secret |
+
 **HandleSecret** (triggered by Secret Watch):
 1. Get Secret
    - **Exists**:
+     - Secret is being deleted and has the `package-secret-cleanup` finalizer: check references -> HandleResource(Delete) -> delete MiddlewarePackage -> remove finalizer
      - Parse package -> create/update MiddlewarePackage
      - Has `install` annotation: Disable other enabled packages of the same component -> HandleResource(Publish) (publish Baseline/Config/Action) -> set enabled=true
-     - Has `uninstall` annotation: HandleResource(Delete) -> set enabled=false
+     - Has `uninstall` annotation: compatible soft-uninstall path, check references -> HandleResource(Delete) -> set enabled=false
    - **Does not exist** (delete event):
      - Delete the corresponding MiddlewarePackage
 
@@ -1240,13 +1243,16 @@ When a MiddlewareOperator is deleted:
 
 ### 9.3 MiddlewarePackage Uninstallation
 
-Triggered via the `middleware.cn/uninstall` annotation on the Secret:
-1. Call `HandleResource(Delete)`
+Triggered by deleting a Secret that has the `middleware.cn/package-secret-cleanup` finalizer:
+1. Check whether any Middleware / MiddlewareOperator still references the package via `middleware.cn/packagename`
+   - If references exist: write `middleware.cn/uninstallError`, keep the finalizer, and do not clean resources; after references are deleted, a later retry continues cleanup
+2. Call `HandleResource(Delete)`
    - Delete all MiddlewareBaselines
    - Delete all MiddlewareOperatorBaselines
    - Delete all MiddlewareActionBaselines
    - Delete all MiddlewareConfigurations
-2. Set `enabled=false`, remove `uninstall` annotation
+3. Delete the corresponding MiddlewarePackage
+4. Remove the `middleware.cn/package-secret-cleanup` finalizer from the Secret so Kubernetes completes Secret deletion
 
 ### 9.4 Secret Deletion
 
@@ -1443,7 +1449,7 @@ Provides `CreatePatch`, `ApplyPatch`, `ValidatePatch` methods
 |----------|-----------|
 | Use sync.Map to cache Baseline/Configuration/OperatorBaseline/ActionBaseline | Avoid frequent decompression reads from Secrets; paired with periodic cleanup (cache_cleanup_interval, default 1800 seconds) |
 | Get object from Cache when Middleware is deleted | Deleted objects cannot be retrieved from the API Server; cache is needed for resource cleanup |
-| Middleware Controller uses Predicate to filter Status updates | Prevents Status updates from triggering infinite Reconcile loops |
+| Middleware and MiddlewareOperator controllers use Predicate to filter Status updates | Prevents Status updates from triggering infinite Reconcile loops while preserving spec, metadata, and annotation changes |
 | One-time execution semantics for MiddlewareAction (skip if State is non-empty) | Actions are operations, not declarative state; they should not be re-executed after completion |
 | Automatically rebuild CR when deleted | Protects middleware instances from accidental deletion; implemented via Watcher DeleteFunc |
 | MiddlewareOperator compares Deployment differences and restores | Prevents Deployments from being externally modified (e.g., kubectl edit); ensures consistency with the declared Spec |

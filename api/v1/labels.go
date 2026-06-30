@@ -32,13 +32,24 @@ const (
 	LabelInstall   = "middleware.cn/install"
 	LabelUnInstall = "middleware.cn/uninstall"
 
-	AnnotationInstallDigest = "middleware.cn/installDigest"
-	AnnotationInstallError  = "middleware.cn/installError"
+	AnnotationInstallDigest  = "middleware.cn/installDigest"
+	AnnotationInstallError   = "middleware.cn/installError"
+	AnnotationUninstallError = "middleware.cn/uninstallError"
+
+	AnnotationConfigurationOwnershipPolicy = "middleware.cn/configurationOwnershipPolicy"
+	AnnotationConfigurationDeletePolicy    = "middleware.cn/configurationDeletePolicy"
 
 	LabelSource     = "middleware.cn/source"
 	LabelSourceName = "middleware.cn/sourcename"
 
 	LabelNoOperator = "middleware.cn/nooperator"
+)
+
+const (
+	ConfigurationOwnershipPolicyManaged = "managed"
+
+	ConfigurationDeletePolicyDelete = "delete"
+	ConfigurationDeletePolicyOrphan = "orphan"
 )
 
 const (
@@ -51,6 +62,7 @@ const (
 const (
 	FinalizerMiddleware         = "middleware.cn/middleware-cleanup"
 	FinalizerMiddlewareOperator = "middleware.cn/middlewareoperator-cleanup"
+	FinalizerPackageSecret      = "middleware.cn/package-secret-cleanup"
 )
 
 const (

@@ -68,6 +68,75 @@ func targetUpgradeBaseline(m *v1.Middleware) string {
 	return m.Spec.Baseline
 }
 
+func middlewareObjectRef(m *v1.Middleware) status.ObjectRef {
+	if m == nil {
+		return status.ObjectRef{APIVersion: v1.GroupVersion.String(), Kind: "Middleware"}
+	}
+	return status.ObjectRef{
+		APIVersion: v1.GroupVersion.String(),
+		Kind:       "Middleware",
+		Namespace:  m.Namespace,
+		Name:       m.Name,
+	}
+}
+
+func missingNecessaryDiagnostic(m *v1.Middleware, baseline v1.MiddlewareBaseline, fieldPath, expected, actual string) error {
+	return &status.Diagnostic{
+		Phase:              status.PhaseConfigValidation,
+		Controller:         "middleware",
+		Resource:           middlewareObjectRef(m),
+		FieldPath:          fieldPath,
+		Expected:           expected,
+		Actual:             actual,
+		Generation:         m.Generation,
+		ObservedGeneration: m.Status.ObservedGeneration,
+		Cause:              fmt.Errorf("required parameter missing: %s", fieldPath),
+		Next: fmt.Sprintf(
+			"set %s on Middleware %s/%s or provide a default in MiddlewareBaseline %s/%s spec.necessary",
+			fieldPath,
+			m.Namespace,
+			m.Name,
+			m.Labels[v1.LabelPackageName],
+			baseline.Name,
+		),
+	}
+}
+
+func missingNecessaryFieldPath(required, actual map[string]any, prefix string) (fieldPath, expected, actualValue string, missing bool) {
+	for key, requiredValue := range required {
+		isIgnore := false
+		for _, ignore := range NecessaryIgnore {
+			if key == ignore {
+				isIgnore = true
+				break
+			}
+		}
+		if isIgnore {
+			continue
+		}
+
+		path := prefix + "." + key
+		actualNested, ok := actual[key]
+		if !ok {
+			return path, "present", "missing", true
+		}
+
+		requiredMap, requiredIsMap := requiredValue.(map[string]any)
+		if !requiredIsMap {
+			continue
+		}
+
+		actualMap, actualIsMap := actualNested.(map[string]any)
+		if !actualIsMap {
+			return path, "object", fmt.Sprintf("%T", actualNested), true
+		}
+		if nestedPath, nestedExpected, nestedActual, nestedMissing := missingNecessaryFieldPath(requiredMap, actualMap, path); nestedMissing {
+			return nestedPath, nestedExpected, nestedActual, true
+		}
+	}
+	return "", "", "", false
+}
+
 func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) error {
 	// If the upgrade annotation exists, start the upgrade flow
 	_, ok := m.GetAnnotations()[v1.LabelUpdate]
@@ -108,7 +177,7 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 		if conditionChecked.Status == metav1.ConditionTrue {
 			// Get the new package
 			var mp []v1.MiddlewarePackage
-			mp, err = k8s.ListMiddlewarePackages(ctx, cli, client.MatchingLabels{
+			mp, err = packages.ListCompatibleMiddlewarePackages(ctx, cli, client.MatchingLabels{
 				v1.LabelComponent:      m.Labels[v1.LabelComponent],
 				v1.LabelPackageVersion: m.Annotations[v1.LabelUpdate],
 			})
@@ -211,7 +280,21 @@ func TemplateParseWithBaseline(ctx context.Context, cli client.Client, m *v1.Mid
 	conditionTemplateParseWithBaseline := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeTemplateParseWithBaseline)
 	defer func() {
 		if err != nil {
-			log.FromContext(ctx).Error(err, "TemplateParseWithBaseline error")
+			err = status.WrapDiagnostic(err, status.Diagnostic{
+				Phase:              status.PhaseTemplateRender,
+				Controller:         "middleware",
+				Resource:           middlewareObjectRef(m),
+				Generation:         m.Generation,
+				ObservedGeneration: m.Status.ObservedGeneration,
+				Next: fmt.Sprintf(
+					"check Middleware %s/%s, MiddlewareBaseline %s/%s, and rendered template inputs under spec.parameters/spec.configurations",
+					m.Namespace,
+					m.Name,
+					m.Labels[v1.LabelPackageName],
+					m.Spec.Baseline,
+				),
+			})
+			log.FromContext(ctx).Error(err, "TemplateParseWithBaseline error", status.DiagnosticLogValues(err)...)
 			conditionTemplateParseWithBaseline.Failed(ctx, err.Error(), m.Generation)
 		} else {
 			log.FromContext(ctx).Info("TemplateParseWithBaseline finished")
@@ -294,20 +377,8 @@ func TemplateParseWithBaseline(ctx context.Context, cli client.Client, m *v1.Mid
 		return fmt.Errorf("unmarshal necessary error: %w", err)
 	}
 
-	for k := range necessaryBaselineMap {
-		var isIgnore bool
-		for _, ignore := range NecessaryIgnore {
-			if k == ignore {
-				isIgnore = true
-				break
-			}
-		}
-		if isIgnore {
-			continue
-		}
-		if _, ok := necessaryMap[k]; !ok {
-			return errors.New("required parameter missing: " + k)
-		}
+	if fieldPath, expected, actual, missing := missingNecessaryFieldPath(necessaryBaselineMap, necessaryMap, "spec.necessary"); missing {
+		return missingNecessaryDiagnostic(m, baseline, fieldPath, expected, actual)
 	}
 
 	var parametersYamlBytes []byte

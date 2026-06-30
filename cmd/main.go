@@ -42,7 +42,6 @@ import (
 	"github.com/go-logr/zerologr"
 	"github.com/spf13/viper"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -71,6 +70,7 @@ func init() {
 
 // nolint:gocyclo
 func main() {
+	var metricsAddr string
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var enableLeaderElection bool
 	var leaderElectionLeaseDuration time.Duration
@@ -83,6 +83,8 @@ func main() {
 	var probeAddr string
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8081", "The address the metrics endpoint binds to. "+
+		"Serves controller-runtime built-in metrics over plain HTTP; use 0 to disable.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8080", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager. "+
@@ -189,9 +191,9 @@ func main() {
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
-		// Metrics HTTP server is disabled (BindAddress "0") to drop the Prometheus dependency.
-		// Metrics HTTP 服务器通过 BindAddress "0" 关闭监听，同时移除 Prometheus 依赖。
-		Metrics:                metricsserver.Options{BindAddress: "0"},
+		// Metrics HTTP server exposes controller-runtime built-in metrics on metricsAddr over plain HTTP.
+		// Metrics HTTP 服务器在 metricsAddr 上以明文 HTTP 暴露 controller-runtime 内置指标。
+		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
@@ -201,9 +203,7 @@ func main() {
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
 				&corev1.Secret{}: {
-					Label: labels.SelectorFromSet(labels.Set{
-						v1.LabelProject: consts.ProjectOpenSaola,
-					}),
+					Label: consts.OpenSaolaProjectSelector(v1.LabelProject),
 					Transform: func(obj interface{}) (interface{}, error) {
 						if secret, ok := obj.(*corev1.Secret); ok {
 							secret.Data = nil

@@ -56,22 +56,42 @@ func TestMiddlewareOperatorNameFromDeployment(t *testing.T) {
 		}
 	})
 
-	// Verifies observability: hasMiddlewareOperatorOwner passes this through the predicate,
-	// but middlewareOperatorNameFromDeployment must still reject it as anomalous.
-	t.Run("returns error when multiple ownerReferences even if one is MiddlewareOperator", func(t *testing.T) {
+	t.Run("returns controller MiddlewareOperator owner when extra non-controller ownerReferences exist", func(t *testing.T) {
+		controller := true
 		deployment := &appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "demo",
 				Namespace: "default",
 				OwnerReferences: []metav1.OwnerReference{
 					{Kind: "StatefulSet", Name: "foo"},
-					{Kind: "MiddlewareOperator", Name: "demo-mo"},
+					{Kind: "MiddlewareOperator", Name: "demo-mo", Controller: &controller},
+				},
+			},
+		}
+		got, err := middlewareOperatorNameFromDeployment(deployment)
+		if err != nil {
+			t.Fatalf("expected extra non-controller owner to be tolerated, got %v", err)
+		}
+		if got != "demo-mo" {
+			t.Fatalf("middlewareOperatorNameFromDeployment() = %q, want %q", got, "demo-mo")
+		}
+	})
+
+	t.Run("returns error when multiple controller MiddlewareOperator ownerReferences exist", func(t *testing.T) {
+		controller := true
+		deployment := &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "demo",
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{
+					{Kind: "MiddlewareOperator", Name: "demo-mo-a", Controller: &controller},
+					{Kind: "MiddlewareOperator", Name: "demo-mo-b", Controller: &controller},
 				},
 			},
 		}
 		_, err := middlewareOperatorNameFromDeployment(deployment)
 		if err == nil {
-			t.Fatal("expected error when multiple ownerReferences present")
+			t.Fatal("expected error when multiple controller owners are present")
 		}
 	})
 }

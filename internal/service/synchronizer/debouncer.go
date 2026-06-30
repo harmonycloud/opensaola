@@ -207,6 +207,22 @@ func (r *NsDebounceRegistry) NotifyNamespace(ns string) {
 	}
 }
 
+// NotifyMiddleware notifies the Debouncer registered for a single Middleware.
+// It returns false when no Debouncer is registered for the target.
+func (r *NsDebounceRegistry) NotifyMiddleware(ns, midName string) bool {
+	key := registryKey(ns, midName)
+
+	r.mu.RLock()
+	d, ok := r.debouncers[key]
+	if !ok {
+		r.mu.RUnlock()
+		return false
+	}
+	d.Notify()
+	r.mu.RUnlock()
+	return true
+}
+
 // StopAll stops every registered Debouncer and clears the registry.
 // Typically called on controller shutdown.
 func (r *NsDebounceRegistry) StopAll() {
@@ -244,6 +260,12 @@ func UnregisterDebouncer(ns, midName string) {
 // NotifyNamespace notifies all Debouncers in the given namespace via the global registry.
 func NotifyNamespace(ns string) {
 	globalDebounceRegistry.NotifyNamespace(ns)
+}
+
+// NotifyMiddleware notifies the Debouncer for a single Middleware.
+// It returns false when no Debouncer is registered for the target.
+func NotifyMiddleware(ns, midName string) bool {
+	return globalDebounceRegistry.NotifyMiddleware(ns, midName)
 }
 
 // StopAllDebouncers stops every Debouncer in the global registry.

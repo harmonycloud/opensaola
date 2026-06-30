@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"runtime"
 	"strings"
@@ -37,37 +36,6 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// sanitizeHeaders returns a copy of headers with sensitive values redacted.
-func sanitizeHeaders(headers map[string]string) map[string]string {
-	if headers == nil {
-		return nil
-	}
-	sensitiveKeys := map[string]bool{
-		"authorization":       true,
-		"cookie":              true,
-		"x-api-key":           true,
-		"x-auth-token":        true,
-		"proxy-authorization": true,
-	}
-	safe := make(map[string]string, len(headers))
-	for k, v := range headers {
-		if sensitiveKeys[strings.ToLower(k)] {
-			safe[k] = "***"
-		} else {
-			safe[k] = v
-		}
-	}
-	return safe
-}
-
-// truncateBody returns the first maxLen bytes of body, appending "..." if truncated.
-func truncateBody(body string, maxLen int) string {
-	if len(body) <= maxLen {
-		return body
-	}
-	return body[:maxLen] + "..."
-}
-
 // executeHTTP executes an HTTP step
 func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.MiddlewareAction) (err error) {
 	conditionExecuteHttp := status.GetCondition(*ctx, &m.Status.Conditions, fmt.Sprintf("STEP-%s", step.Name))
@@ -81,9 +49,9 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 		}
 
 		if err != nil {
-			conditionExecuteHttp.Failed(*ctx, err.Error(), m.Generation)
+			conditionExecuteHttp.Failed(*ctx, safeActionDiagnosticMessage(err.Error()), m.Generation)
 		} else {
-			conditionExecuteHttp.SuccessWithMsg(*ctx, msg, m.Generation)
+			conditionExecuteHttp.SuccessWithMsg(*ctx, safeActionDiagnosticMessage(msg), m.Generation)
 		}
 		if updateErr := k8s.UpdateMiddlewareActionStatus(*ctx, cli, m); updateErr != nil {
 			log.FromContext(*ctx).Error(updateErr, "update middleware action status error")
@@ -108,7 +76,7 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 		var request *http.Request
 		request, err = http.NewRequest(step.HTTP.Method, step.HTTP.URL, strings.NewReader(step.HTTP.Body))
 		if err != nil {
-			return err
+			return httpStepError("request build", step.HTTP.Method, step.HTTP.URL, 0, nil, nil)
 		}
 		for k, v := range step.HTTP.Header {
 			request.Header.Set(k, v)
@@ -119,20 +87,23 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 		httpClient.Timeout = 60 * time.Second
 		resp, err = httpClient.Do(request)
 		if err != nil {
-			return err
+			return httpStepError("request", step.HTTP.Method, step.HTTP.URL, 0, nil, nil)
 		}
 		defer func() {
 			_ = resp.Body.Close()
 		}()
 
 		var output []byte
-		output, err = io.ReadAll(resp.Body)
+		var truncated bool
+		output, truncated, err = readBoundedActionOutput(resp.Body)
 		if err != nil {
-			return fmt.Errorf("execute http error: %w output: %s method: %s url: %s header: %v body: %s", err, string(output), step.HTTP.Method, step.HTTP.URL, sanitizeHeaders(step.HTTP.Header), truncateBody(step.HTTP.Body, 200))
-
+			return httpStepError("response read", step.HTTP.Method, step.HTTP.URL, resp.StatusCode, output, err)
+		}
+		if truncated {
+			return httpStepError("response too large", step.HTTP.Method, step.HTTP.URL, resp.StatusCode, output, fmt.Errorf("response exceeds %d bytes", maxActionOutputBytes))
 		}
 
-		msg = fmt.Sprintf("output: %s method: %s url: %s header: %v body: %s", string(output), step.HTTP.Method, step.HTTP.URL, sanitizeHeaders(step.HTTP.Header), truncateBody(step.HTTP.Body, 200))
+		msg = httpStepSuccessMessage(step.HTTP.Method, step.HTTP.URL, resp.StatusCode, output)
 
 		if step.Output.Expose {
 			stepMap := ctxkeys.StepFrom(*ctx)
@@ -144,13 +115,13 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 			case "json":
 				err = json.Unmarshal(output, &outputMap)
 				if err != nil {
-					return err
+					return parseExposedOutputError(step.Output.Type, step.Name)
 				}
 				stepEntry["output"] = outputMap
 			case "yaml":
 				err = yaml.Unmarshal(output, &outputMap)
 				if err != nil {
-					return err
+					return parseExposedOutputError(step.Output.Type, step.Name)
 				}
 				stepEntry["output"] = outputMap
 			case "string":

@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"runtime"
-	"strings"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/build"
@@ -60,9 +59,9 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 		}
 
 		if err != nil {
-			conditionExecuteCue.Failed(*ctx, err.Error(), m.Generation)
+			conditionExecuteCue.Failed(*ctx, safeActionDiagnosticMessage(err.Error()), m.Generation)
 		} else {
-			conditionExecuteCue.SuccessWithMsg(*ctx, msg, m.Generation)
+			conditionExecuteCue.SuccessWithMsg(*ctx, safeActionDiagnosticMessage(msg), m.Generation)
 		}
 		if updateErr := k8s.UpdateMiddlewareActionStatus(*ctx, cli, m); updateErr != nil {
 			log.FromContext(*ctx).Error(updateErr, "update middleware action status error")
@@ -169,10 +168,10 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 				Tty:    false,
 			})
 			if err != nil {
-				return fmt.Errorf("execute kubectl error: %s output: %s command: %s", stderr.String(), stdout.String(), strings.Join(execCommand, " "))
+				return kubectlExecError(err, execCommand, stdout.Bytes(), stderr.Bytes())
 			}
 
-			msg = fmt.Sprintf("output: %s command: %s", stdout.String(), strings.Join(execCommand, " "))
+			msg = kubectlExecSuccessMessage(execCommand, stdout.Bytes())
 
 			output := stdout.Bytes()
 			if step.Output.Expose {
@@ -185,13 +184,13 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 				case "json":
 					err = json.Unmarshal(output, &outputMap)
 					if err != nil {
-						return err
+						return parseExposedOutputError(step.Output.Type, step.Name)
 					}
 					stepEntry["output"] = outputMap
 				case "yaml":
 					err = yaml.Unmarshal(output, &outputMap)
 					if err != nil {
-						return err
+						return parseExposedOutputError(step.Output.Type, step.Name)
 					}
 					stepEntry["output"] = outputMap
 				case "string":

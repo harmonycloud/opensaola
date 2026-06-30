@@ -423,6 +423,10 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 			Name: key,
 		})
 	}
+	if diagnostic := deriveMiddlewareReadinessDiagnostic(nowMid, nowCr, pods, pvcs); diagnostic != "" {
+		nowMid.Status.CustomResources.Phase = v1.PhaseFailed
+		nowMid.Status.CustomResources.Reason = diagnostic
+	}
 
 	// Disaster sync — unchanged from V1, still reads from API server via k8s helpers.
 	nowMid.Status.CustomResources.Disaster = new(v1.Disaster)

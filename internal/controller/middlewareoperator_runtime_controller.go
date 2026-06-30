@@ -24,12 +24,15 @@ import (
 	"github.com/harmonycloud/opensaola/internal/concurrency"
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
@@ -42,9 +45,14 @@ type MiddlewareOperatorRuntimeReconciler struct {
 
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewareoperators,verbs=get;list;watch
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewareoperators/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
+//+kubebuilder:rbac:groups=apps,resources=deployments;replicasets,verbs=get;list;watch
+//+kubebuilder:rbac:groups="",resources=pods;persistentvolumeclaims;events,verbs=get;list;watch
 
 func (r *MiddlewareOperatorRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	ctx = withReconcileLogger(ctx, "middlewareoperator-runtime", "Deployment", req)
+
+	log.FromContext(ctx).V(1).Info("start processing MiddlewareOperator runtime Deployment", "req", req)
+
 	deployment := &appsv1.Deployment{}
 	if err := r.Get(ctx, req.NamespacedName, deployment); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -72,14 +80,16 @@ func (r *MiddlewareOperatorRuntimeReconciler) Reconcile(ctx context.Context, req
 	}
 	operatorStatus[deployment.Name] = deployment.Status
 
+	snapshot := r.collectRuntimeObjects(ctx, deployment)
+	runtime := deriveRuntimeDiagnostic(moName, deployment, snapshot.replicaSets, snapshot.pods, snapshot.pvcs, snapshot.events, snapshot.err)
+	ready := deploymentRuntimeReady(deployment) && runtime == "Ready"
+
 	if err := k8s.UpdateMiddlewareOperatorRuntimeStatus(
 		ctx, r.Client, moName, deployment.Namespace,
 		operatorStatus,
 		fmt.Sprintf("%d/%d", deployment.Status.AvailableReplicas, deployment.Status.Replicas),
-		deployment.Status.ReadyReplicas > 0 &&
-			deployment.Status.ReadyReplicas == deployment.Status.Replicas &&
-			deployment.Status.AvailableReplicas > 0,
-		deriveRuntimePhase(&deployment.Status),
+		ready,
+		runtime,
 	); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -107,6 +117,55 @@ func (r *MiddlewareOperatorRuntimeReconciler) SetupWithManager(mgr ctrl.Manager)
 			DeleteFunc:  func(event.DeleteEvent) bool { return false },
 			GenericFunc: func(event.GenericEvent) bool { return false },
 		})).
+		Watches(
+			&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(r.runtimePodToDeploymentRequests),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc: func(e event.CreateEvent) bool {
+					return e.Object != nil
+				},
+				UpdateFunc: func(e event.UpdateEvent) bool {
+					oldPod, oldOK := e.ObjectOld.(*corev1.Pod)
+					newPod, newOK := e.ObjectNew.(*corev1.Pod)
+					return oldOK && newOK && runtimePodChanged(oldPod, newPod)
+				},
+				DeleteFunc:  func(event.DeleteEvent) bool { return false },
+				GenericFunc: func(event.GenericEvent) bool { return false },
+			}),
+		).
+		Watches(
+			&corev1.PersistentVolumeClaim{},
+			handler.EnqueueRequestsFromMapFunc(r.runtimePVCToDeploymentRequests),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc: func(e event.CreateEvent) bool {
+					return e.Object != nil
+				},
+				UpdateFunc: func(e event.UpdateEvent) bool {
+					oldPVC, oldOK := e.ObjectOld.(*corev1.PersistentVolumeClaim)
+					newPVC, newOK := e.ObjectNew.(*corev1.PersistentVolumeClaim)
+					return oldOK && newOK && !reflect.DeepEqual(oldPVC.Status, newPVC.Status)
+				},
+				DeleteFunc:  func(event.DeleteEvent) bool { return false },
+				GenericFunc: func(event.GenericEvent) bool { return false },
+			}),
+		).
+		Watches(
+			&corev1.Event{},
+			handler.EnqueueRequestsFromMapFunc(r.runtimeEventToDeploymentRequests),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc: func(e event.CreateEvent) bool {
+					eventObj, ok := e.Object.(*corev1.Event)
+					return ok && eventObj != nil && isInterestingEvent(*eventObj)
+				},
+				UpdateFunc: func(e event.UpdateEvent) bool {
+					oldEvent, oldOK := e.ObjectOld.(*corev1.Event)
+					newEvent, newOK := e.ObjectNew.(*corev1.Event)
+					return oldOK && newOK && isInterestingEvent(*newEvent) && runtimeEventChanged(oldEvent, newEvent)
+				},
+				DeleteFunc:  func(event.DeleteEvent) bool { return false },
+				GenericFunc: func(event.GenericEvent) bool { return false },
+			}),
+		).
 		Named("middlewareoperator-runtime").
 		WithOptions(concurrency.ControllerOptions("MIDDLEWAREOPERATOR_RUNTIME", 1)).
 		Complete(r)
@@ -128,17 +187,36 @@ func hasMiddlewareOperatorOwner(deployment *appsv1.Deployment) bool {
 
 func middlewareOperatorNameFromDeployment(deployment *appsv1.Deployment) (string, error) {
 	ownerReferences := deployment.GetOwnerReferences()
-	if len(ownerReferences) != 1 {
-		return "", fmt.Errorf("expected exactly 1 ownerReference, got %d", len(ownerReferences))
+	var controllerOwners []metav1.OwnerReference
+	var middlewareOperatorOwners []metav1.OwnerReference
+	for _, ownerReference := range ownerReferences {
+		if ownerReference.Kind != "MiddlewareOperator" {
+			continue
+		}
+		middlewareOperatorOwners = append(middlewareOperatorOwners, ownerReference)
+		if ownerReference.Controller != nil && *ownerReference.Controller {
+			controllerOwners = append(controllerOwners, ownerReference)
+		}
 	}
-	ownerReference := ownerReferences[0]
-	if ownerReference.Kind != "MiddlewareOperator" {
-		return "", fmt.Errorf("unexpected owner kind %q", ownerReference.Kind)
+	if len(controllerOwners) > 1 {
+		return "", fmt.Errorf("expected at most 1 controller MiddlewareOperator ownerReference, got %d", len(controllerOwners))
 	}
-	if ownerReference.Name == "" {
-		return "", fmt.Errorf("ownerReference name is empty")
+	if len(controllerOwners) == 1 {
+		if controllerOwners[0].Name == "" {
+			return "", fmt.Errorf("controller MiddlewareOperator ownerReference name is empty")
+		}
+		return controllerOwners[0].Name, nil
 	}
-	return ownerReference.Name, nil
+	if len(middlewareOperatorOwners) == 0 {
+		return "", fmt.Errorf("missing MiddlewareOperator ownerReference")
+	}
+	if len(middlewareOperatorOwners) > 1 {
+		return "", fmt.Errorf("expected exactly 1 MiddlewareOperator ownerReference when controller owner is absent, got %d", len(middlewareOperatorOwners))
+	}
+	if middlewareOperatorOwners[0].Name == "" {
+		return "", fmt.Errorf("MiddlewareOperator ownerReference name is empty")
+	}
+	return middlewareOperatorOwners[0].Name, nil
 }
 
 func deploymentRuntimeStatusChanged(oldDeployment, newDeployment *appsv1.Deployment) bool {

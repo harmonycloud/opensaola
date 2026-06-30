@@ -35,6 +35,8 @@ package controller
 // K8s layer: pod.go — pod listing for sync; k8s.go — exec commands in containers
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 //+kubebuilder:rbac:groups=core,resources=pods/exec,verbs=create
+// Controller/runtime diagnostics — read Kubernetes events for describe/status diagnostics
+//+kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;patch
 
 // K8s layer: pvc.go, sts.go, daemonsets.go, replica_set.go — read workload resources for state sync
 //+kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch

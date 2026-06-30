@@ -195,7 +195,7 @@ func executePreActionCue(ctx context.Context, cueString string, obj *unstructure
 	conditionExecuteCue := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeExecuteCue)
 	defer func() {
 		if err != nil {
-			conditionExecuteCue.Failed(ctx, err.Error(), m.Generation)
+			conditionExecuteCue.Failed(ctx, safeActionDiagnosticMessage(err.Error()), m.Generation)
 		} else {
 			conditionExecuteCue.Success(ctx, m.Generation)
 		}
@@ -225,7 +225,27 @@ func executePreActionCue(ctx context.Context, cueString string, obj *unstructure
 	}
 
 	if obj.GetAPIVersion() != apiversion || obj.GetKind() != kind || obj.GetName() != name || obj.GetNamespace() != namespace {
-		return fmt.Errorf("resource mismatch error: %w", err)
+		return &status.Diagnostic{
+			Phase:        status.PhaseConfigValidation,
+			Controller:   "middlewareaction",
+			FailedObject: status.ObjectRefFromObject(obj, obj.GroupVersionKind()),
+			FieldPath:    "parameters.resource",
+			Expected: fmt.Sprintf("apiVersion=%s kind=%s namespace=%s name=%s",
+				apiversion,
+				kind,
+				namespace,
+				name,
+			),
+			Actual: fmt.Sprintf("apiVersion=%s kind=%s namespace=%s name=%s",
+				obj.GetAPIVersion(),
+				obj.GetKind(),
+				obj.GetNamespace(),
+				obj.GetName(),
+			),
+			Generation: m.Generation,
+			Cause:      fmt.Errorf("pre action CUE target resource does not match input object"),
+			Next:       "check the pre-action CUE parameters.resource block and the MiddlewareAction target object metadata",
+		}
 	}
 
 	cueJson, err := inst.LookupPath(cue.ParsePath("output")).MarshalJSON()

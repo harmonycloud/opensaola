@@ -68,8 +68,7 @@ var errMiddlewareOperatorFinalizerAdded = errors.New("middlewareoperator finaliz
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.20.2/pkg/reconcile
 func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
-	l := log.FromContext(ctx).WithValues("reconcileID", fmt.Sprintf("%s/%d", req.Name, time.Now().UnixMilli()))
-	ctx = log.IntoContext(ctx, l)
+	ctx = withReconcileLogger(ctx, "middlewareoperator", "MiddlewareOperator", req)
 
 	log.FromContext(ctx).V(1).Info("start processing middlewareOperator", "req", req)
 
@@ -240,12 +239,9 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 				}
 			}
 
-			for _, condition := range mo.Status.Conditions {
-				if condition.Status == metav1.ConditionFalse {
-					state = v1.StateUnavailable
-					reason = condition.Message
-					break
-				}
+			if condition, ok := currentFalseCondition(mo.Status.Conditions, mo.Generation); ok {
+				state = v1.StateUnavailable
+				reason = condition.Message
 			}
 
 			// When reconcile returns an error but no condition is marked False yet, fall back to writing Unavailable with the error.
@@ -335,8 +331,25 @@ func (r *MiddlewareOperatorReconciler) handleDeployment(ctx context.Context, req
 			return fmt.Errorf("failed to compare deployment with published deployment: %w", err)
 		}
 	} else if apiErrors.IsNotFound(err) {
-		conditionApplyOperator := status.GetCondition(ctx, new(mo.Status.Conditions), v1.CondTypeApplyOperator)
+		conditionApplyOperator := status.GetCondition(ctx, &mo.Status.Conditions, v1.CondTypeApplyOperator)
 		if conditionApplyOperator.Status == metav1.ConditionTrue {
+			message := fmt.Sprintf(
+				"Deployment apps/v1 %s/%s is missing for MiddlewareOperator %s/%s; expected ownerRef kind=MiddlewareOperator name=%s. Regenerating operator resources.",
+				req.Namespace,
+				req.Name,
+				mo.Namespace,
+				mo.Name,
+				mo.Name,
+			)
+			r.Recorder.Event(mo, "Warning", "DeploymentMissing", message)
+			log.FromContext(ctx).Info("MiddlewareOperator deployment missing, regenerating resources",
+				"namespace", mo.Namespace,
+				"name", mo.Name,
+				"deploymentNamespace", req.Namespace,
+				"deploymentName", req.Name,
+				"expectedOwnerKind", "MiddlewareOperator",
+				"expectedOwnerName", mo.Name,
+			)
 			// Regenerate resources
 			if err = middlewareoperator.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionPublish, mo); err != nil {
 				r.Recorder.Event(mo, "Warning", "BuildResource", err.Error())
@@ -389,7 +402,10 @@ func deriveRuntimePhase(status *appsv1.DeploymentStatus) string {
 	}
 
 	// Check if all replicas are ready
-	if status.ReadyReplicas == status.Replicas && status.AvailableReplicas > 0 {
+	if status.ReadyReplicas == status.Replicas &&
+		status.AvailableReplicas > 0 &&
+		(status.UpdatedReplicas == 0 || status.UpdatedReplicas == status.Replicas) &&
+		status.UnavailableReplicas == 0 {
 		return "Ready"
 	}
 

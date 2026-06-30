@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,7 +37,7 @@ func newMiddlewareOperatorTestClient(t *testing.T, objects ...client.Object) cli
 		t.Fatalf("add middleware scheme: %v", err)
 	}
 
-	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	return fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1.MiddlewareOperator{}).WithObjects(objects...).Build()
 }
 
 func TestCreateMiddlewareOperatorCreatesWhenAbsent(t *testing.T) {
@@ -102,5 +103,72 @@ func TestCreateMiddlewareOperatorDoesNotTreatSameNamedMiddlewareAsExisting(t *te
 
 	if _, err := GetMiddlewareOperator(ctx, cli, mo.Name, mo.Namespace); err != nil {
 		t.Fatalf("expected MiddlewareOperator to be created despite same-named Middleware: %v", err)
+	}
+}
+
+func TestUpdateMiddlewareOperatorStatus_PreservesRuntimeOwnedFields(t *testing.T) {
+	ctx := context.Background()
+	diagnostic := "phase=workload-readiness; failedObject=v1/Pod middleware-operator/opensaola-install-crds; causeCategory=RegistryTLS; cause=x509: certificate signed by unknown authority"
+	existing := &v1.MiddlewareOperator{
+		ObjectMeta: metav1.ObjectMeta{Name: "opensaola", Namespace: "middleware-operator"},
+		Status: v1.MiddlewareOperatorStatus{
+			ObservedGeneration: 11,
+			State:              v1.StateUnavailable,
+			Reason:             diagnostic,
+			Conditions: []metav1.Condition{{
+				Type:               v1.CondTypeApplyOperator,
+				Status:             metav1.ConditionFalse,
+				Reason:             "ApplyOperatorFailed",
+				Message:            diagnostic,
+				ObservedGeneration: 11,
+			}},
+			OperatorStatus: map[string]appsv1.DeploymentStatus{
+				"opensaola-controller-manager": {Replicas: 1, ReadyReplicas: 0},
+			},
+			OperatorAvailable: "0/1",
+			Ready:             false,
+			Runtime:           "phase=workload-readiness; failedObject=v1/Pod middleware-operator/opensaola-install-crds",
+		},
+	}
+	cli := newMiddlewareOperatorTestClient(t, existing)
+
+	update := existing.DeepCopy()
+	update.Status.State = v1.StateAvailable
+	update.Status.Reason = "main controller converged"
+	update.Status.Conditions = []metav1.Condition{{
+		Type:               v1.CondTypeApplyOperator,
+		Status:             metav1.ConditionTrue,
+		Reason:             "ApplyOperatorSucceed",
+		Message:            "operator applied",
+		ObservedGeneration: 12,
+	}}
+	update.Status.ObservedGeneration = 12
+	update.Status.OperatorStatus = nil
+	update.Status.OperatorAvailable = ""
+	update.Status.Ready = true
+	update.Status.Runtime = ""
+
+	if err := UpdateMiddlewareOperatorStatus(ctx, cli, update); err != nil {
+		t.Fatalf("UpdateMiddlewareOperatorStatus returned error: %v", err)
+	}
+
+	got, err := GetMiddlewareOperator(ctx, cli, existing.Name, existing.Namespace)
+	if err != nil {
+		t.Fatalf("get updated MiddlewareOperator: %v", err)
+	}
+	if got.Status.ObservedGeneration != 12 {
+		t.Fatalf("expected main observedGeneration to update, got %d", got.Status.ObservedGeneration)
+	}
+	if got.Status.State != v1.StateAvailable || got.Status.Reason != "main controller converged" {
+		t.Fatalf("expected main-owned fields to update, got state=%q reason=%q", got.Status.State, got.Status.Reason)
+	}
+	if got.Status.OperatorAvailable != "0/1" || got.Status.Ready {
+		t.Fatalf("expected runtime-owned availability fields to be preserved, got available=%q ready=%v", got.Status.OperatorAvailable, got.Status.Ready)
+	}
+	if _, ok := got.Status.OperatorStatus["opensaola-controller-manager"]; !ok {
+		t.Fatalf("expected runtime-owned OperatorStatus to be preserved, got %#v", got.Status.OperatorStatus)
+	}
+	if got.Status.Runtime == "" || got.Status.Runtime != existing.Status.Runtime {
+		t.Fatalf("expected runtime diagnostic to be preserved, got %q", got.Status.Runtime)
 	}
 }

@@ -196,7 +196,7 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 	}()
 
 	var (
-		errorList []string
+		errorList []error
 		mcs       []*v1.MiddlewareConfiguration
 	)
 
@@ -219,12 +219,12 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 		for _, mc := range mcs {
 			err = middlewareconfiguration.Handle(ctx, cli, m, act, mc)
 			if err != nil {
-				errorList = append(errorList, fmt.Sprintf("%s middleware configuration %s error: %v", act, mc.Name, err))
+				errorList = append(errorList, fmt.Errorf("%s middleware configuration %s error: %w", act, mc.Name, err))
 			}
 		}
 	}
 	if len(errorList) > 0 {
-		err = errors.New(strings.Join(errorList, ";"))
+		err = errors.Join(errorList...)
 		return err
 	}
 
@@ -277,13 +277,40 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 		}
 		err = ctrl.SetControllerReference(m, cr, scheme)
 		if err != nil {
-			log.FromContext(ctx).Error(err, "CustomResource set controller reference error")
+			err = status.WrapDiagnostic(err, status.Diagnostic{
+				Phase:              status.PhaseRuntimeReconcile,
+				Controller:         "middleware",
+				Resource:           middlewareObjectRef(m),
+				FailedObject:       status.ObjectRefFromObject(cr, cr.GroupVersionKind()),
+				Owner:              middlewareObjectRef(m),
+				Generation:         m.Generation,
+				ObservedGeneration: m.Status.ObservedGeneration,
+				Next:               "check the rendered custom resource metadata.ownerReferences and Middleware controller scheme registration",
+			})
+			log.FromContext(ctx).Error(err, "CustomResource set controller reference error", status.DiagnosticLogValues(err)...)
 			return err
 		}
 		err = k8s.CreateOrPatchCustomResource(ctx, cli, cr)
 		if err != nil && !apiErrors.IsAlreadyExists(err) {
 			// Stop watching
-			log.FromContext(ctx).Error(err, "create or patch custom resource error")
+			err = status.WrapDiagnostic(err, status.Diagnostic{
+				Phase:              status.PhaseRuntimeReconcile,
+				Controller:         "middleware",
+				Resource:           middlewareObjectRef(m),
+				FailedObject:       status.ObjectRefFromObject(cr, cr.GroupVersionKind()),
+				Owner:              middlewareObjectRef(m),
+				Generation:         m.Generation,
+				ObservedGeneration: m.Status.ObservedGeneration,
+				Next: fmt.Sprintf(
+					"run kubectl describe %s %s -n %s and kubectl get events -n %s --field-selector involvedObject.name=%s",
+					strings.ToLower(cr.GetKind()),
+					cr.GetName(),
+					cr.GetNamespace(),
+					cr.GetNamespace(),
+					cr.GetName(),
+				),
+			})
+			log.FromContext(ctx).Error(err, "create or patch custom resource error", status.DiagnosticLogValues(err)...)
 			watcher.CloseCRWatcher(ctx, cr)
 			return err
 		}
@@ -305,7 +332,15 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 				v1.LabelComponent: cr.GetLabels()[v1.LabelComponent],
 			})
 			if err != nil {
-				return err
+				return status.WrapDiagnostic(err, status.Diagnostic{
+					Phase:              status.PhaseRuntimeReconcile,
+					Controller:         "middleware",
+					Resource:           middlewareObjectRef(m),
+					FailedObject:       status.ObjectRefFromObject(cr, cr.GroupVersionKind()),
+					Generation:         m.Generation,
+					ObservedGeneration: m.Status.ObservedGeneration,
+					Next:               "check whether the target CRD is installed and whether the controller service account can list this resource",
+				})
 			}
 			cw, ok = cwCache.(*watcher.CustomResourceWatcher)
 			if !ok {

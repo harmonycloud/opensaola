@@ -26,9 +26,7 @@ OpenSaola 已安装成功！
    从源码检出目录升级当前发布实例：
    helm upgrade --install {{ .Release.Name }} ./chart/opensaola \
      --namespace {{ .Release.Namespace }} \
-     --create-namespace \
-     --wait \
-     --timeout 5m
+     --create-namespace
 
 6. To deploy middleware, you need a middleware package first.
    部署中间件前，需要先安装中间件包。

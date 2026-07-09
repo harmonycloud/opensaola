@@ -34,6 +34,7 @@ endif
 HELM_AUTO_NAMESPACE ?= true
 HELM_NAMESPACE_FROM_DEFAULT := $(if $(filter file,$(origin HELM_NAMESPACE)),$(if $(filter true,$(HELM_NAMESPACE_FROM_ALIAS)),false,true),false)
 HELM_CHART ?= chart/opensaola
+HELM_WAIT ?= false
 HELM_TIMEOUT ?= 5m
 HELM_IMAGE_REGISTRY ?= ghcr.io
 HELM_IMAGE_REPOSITORY ?= harmonycloud/opensaola
@@ -386,16 +387,19 @@ helm-upgrade: sync-helm-image ## Install or upgrade OpenSaola from the local Hel
 		kubectl_image_args+=(--set kubectl.image.tag="$(HELM_KUBECTL_IMAGE_TAG)"); \
 		kubectl_image_args+=(--set kubectl.image.pullPolicy="$(HELM_KUBECTL_IMAGE_PULL_POLICY)"); \
 	fi; \
+	wait_args=(); \
+	if [ "$(HELM_WAIT)" = "true" ]; then \
+		wait_args+=(--wait --timeout "$(HELM_TIMEOUT)"); \
+	fi; \
 	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
 		--namespace "$$release_namespace" \
 		--create-namespace \
-		--wait \
-		--timeout $(HELM_TIMEOUT) \
 		--set image.registry="$(HELM_TARGET_IMAGE_REGISTRY)" \
 		--set image.repository="$(HELM_TARGET_IMAGE_REPOSITORY)" \
 		--set image.pullPolicy="$(HELM_IMAGE_PULL_POLICY)" \
 		"$${tag_args[@]}" \
 		"$${kubectl_image_args[@]}" \
+		"$${wait_args[@]}" \
 		$(HELM_EXTRA_ARGS)
 
 .PHONY: helm-upgrade-dev

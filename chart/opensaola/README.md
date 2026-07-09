@@ -11,9 +11,7 @@ From the repository root:
 ```bash
 helm upgrade --install opensaola ./chart/opensaola \
   --namespace opensaola-system \
-  --create-namespace \
-  --wait \
-  --timeout 5m
+  --create-namespace
 ```
 
 For source checkouts, prefer the Makefile wrapper below. It uses an exact `v*` tag when the current commit is a release tag; otherwise long-lived branches (`dev`, `master`, or `main`) deploy the current commit image tag (`sha-<shortsha>`). When using Helm directly, set `image.tag` and `image.pullPolicy` explicitly.
@@ -23,6 +21,8 @@ Or use the Makefile wrapper:
 ```bash
 make helm-deploy
 ```
+
+The Makefile wrapper returns after submitting the Helm release by default. Set `HELM_WAIT=true` when you want Helm to wait for resources to become ready, for example `make helm-deploy HELM_WAIT=true HELM_TIMEOUT=10m`.
 
 When `HELM_NAMESPACE` is not set, the wrapper reuses the namespace of an existing `opensaola` release found by `helm list -A`; otherwise it installs into `opensaola-system`. Use `n=<namespace>` (or `HELM_NAMESPACE=<namespace>`) to choose a namespace explicitly.
 
@@ -79,9 +79,7 @@ Tagged releases publish this chart to GHCR:
 helm upgrade --install opensaola oci://ghcr.io/harmonycloud/charts/opensaola \
   --version <release-version> \
   --namespace opensaola-system \
-  --create-namespace \
-  --wait \
-  --timeout 5m
+  --create-namespace
 ```
 
 By default, middleware package Secrets are read from the Helm release namespace. To use a separate data namespace:
@@ -91,9 +89,7 @@ helm upgrade --install opensaola ./chart/opensaola \
   --namespace opensaola-system \
   --create-namespace \
   --set config.dataNamespace=middleware-operator \
-  --set config.createDataNamespace=true \
-  --wait \
-  --timeout 5m
+  --set config.createDataNamespace=true
 ```
 
 ## RBAC Scope

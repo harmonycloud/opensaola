@@ -11,9 +11,7 @@
 ```bash
 helm upgrade --install opensaola ./chart/opensaola \
   --namespace opensaola-system \
-  --create-namespace \
-  --wait \
-  --timeout 5m
+  --create-namespace
 ```
 
 从源码目录部署时，建议优先使用下面的 Makefile 包装命令。如果当前提交正好是 `v*` 发布 tag，它会使用该正式 tag；否则在长期分支（`dev`、`master` 或 `main`）上部署当前提交镜像 tag（`sha-<shortsha>`）。直接使用 Helm 命令部署时，请显式设置 `image.tag` 和 `image.pullPolicy`。
@@ -23,6 +21,8 @@ helm upgrade --install opensaola ./chart/opensaola \
 ```bash
 make helm-deploy
 ```
+
+Makefile 封装命令默认在提交 Helm release 后返回，不等待资源就绪。需要显式等待时设置 `HELM_WAIT=true`，例如 `make helm-deploy HELM_WAIT=true HELM_TIMEOUT=10m`。
 
 未设置 `HELM_NAMESPACE` 时，封装命令会通过 `helm list -A` 复用已有 `opensaola` release 所在命名空间；没有已有 release 时才安装到 `opensaola-system`。需要显式指定命名空间时可用 `n=<namespace>`，也可继续用 `HELM_NAMESPACE=<namespace>`。
 
@@ -79,9 +79,7 @@ make helm-deploy-dev
 helm upgrade --install opensaola oci://ghcr.io/harmonycloud/charts/opensaola \
   --version <release-version> \
   --namespace opensaola-system \
-  --create-namespace \
-  --wait \
-  --timeout 5m
+  --create-namespace
 ```
 
 默认情况下，中间件包 Secret 会从 Helm 发布实例所在命名空间读取。如果需要使用独立的数据命名空间：
@@ -91,9 +89,7 @@ helm upgrade --install opensaola ./chart/opensaola \
   --namespace opensaola-system \
   --create-namespace \
   --set config.dataNamespace=middleware-operator \
-  --set config.createDataNamespace=true \
-  --wait \
-  --timeout 5m
+  --set config.createDataNamespace=true
 ```
 
 ## RBAC 权限范围

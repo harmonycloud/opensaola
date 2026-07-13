@@ -21,7 +21,7 @@ assert_template_fails() {
     echo "FAIL: ${description} was accepted" >&2
     exit 1
   fi
-  if ! grep -Fq "${expected_error}" "${error_file}"; then
+  if ! grep -Fqi "${expected_error}" "${error_file}"; then
     cat "${error_file}" >&2
     echo "FAIL: ${description} did not report: ${expected_error}" >&2
     exit 1

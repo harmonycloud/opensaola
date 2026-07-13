@@ -147,6 +147,7 @@ main_repo_root="$(cd "${main_git_dir}/.." && pwd)"
 test_source_repo="${SAOLA_CLI_TEST_REPOSITORY:-$(dirname "${main_repo_root}")/saola-cli}"
 if ! git -C "${test_source_repo}" cat-file -e "${build_commit}^{commit}" 2>/dev/null; then
   test_source_repo="${tmp_dir}/saola-cli-source"
+  mkdir -p "${test_source_repo}"
   git -C "${test_source_repo}" init -q
   git -C "${test_source_repo}" remote add origin https://github.com/harmonycloud/saola-cli.git
   git -C "${test_source_repo}" fetch -q --depth=1 origin "${build_commit}"

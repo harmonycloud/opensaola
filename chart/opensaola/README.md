@@ -34,21 +34,23 @@ git pull --ff-only && make helm-deploy
 
 This deploys `ghcr.io/harmonycloud/opensaola:sha-<shortsha>` for the checked-out commit. Wait for the GitHub Docker workflow of that commit to finish before running it.
 
-If the cluster pulls GHCR slowly, set only the internal Harbor registry and OpenSaola repository path. The Makefile deploys the internal image and does not sync images by default:
+If the cluster pulls GHCR slowly, set only the internal Harbor registry and shared repository prefix. The Makefile deploys the internal images and does not sync them by default:
 
 ```bash
 git pull --ff-only && \
 HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
-HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_INTERNAL_REPOSITORY=middleware \
 make helm-deploy
 ```
 
-This keeps the default tag selection, so no manual tag is needed. To sync the OpenSaola image and the kubectl image used by the CRD hook Job before upgrading, add `HELM_SYNC_IMAGE=true`:
+`HELM_INTERNAL_REPOSITORY=middleware` produces `10.10.102.124:443/middleware/opensaola` and `10.10.102.124:443/middleware/kubectl`; the fixed component names are appended automatically.
+
+Existing custom values ending in `/opensaola` or `/kubectl` must remove that suffix. This keeps the default tag selection, so no manual tag is needed. To sync the OpenSaola image and the kubectl image used by the CRD hook Job before upgrading, add `HELM_SYNC_IMAGE=true`:
 
 ```bash
 git pull --ff-only && \
 HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
-HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_INTERNAL_REPOSITORY=middleware \
 HELM_SYNC_IMAGE=true \
 make helm-deploy
 ```
@@ -57,7 +59,7 @@ To sync images ahead of time without running a Helm upgrade, use:
 
 ```bash
 HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
-HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_INTERNAL_REPOSITORY=middleware \
 make helm-sync-image
 ```
 
@@ -70,6 +72,28 @@ make helm-deploy-dev
 ```
 
 This uses `image.tag=dev`, `image.pullPolicy=Always`, and updates `podAnnotations.redeployAt` so Kubernetes rolls the Deployment even when the image tag string is unchanged.
+
+## Image Prefixes
+
+The global values define the shared registry and repository prefixes:
+
+```yaml
+global:
+  registry: ghcr.io
+  repository: harmonycloud
+```
+
+The chart appends the fixed component names `opensaola` and `kubectl`, producing `ghcr.io/harmonycloud/opensaola` and `ghcr.io/harmonycloud/kubectl`. Component-level `image.registry` / `image.repository` and `kubectl.image.registry` / `kubectl.image.repository` override only that component's prefix; empty values inherit `global.*`. For example, the following copyable values use separate repository prefixes while retaining the global registry:
+
+```yaml
+image:
+  repository: operators
+kubectl:
+  image:
+    repository: platform-tools
+```
+
+These values resolve to `ghcr.io/operators/opensaola` and `ghcr.io/platform-tools/kubectl`. Repository values must remain prefixes; do not include the fixed component name.
 
 ## Install A Released OCI Chart
 

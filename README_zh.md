@@ -95,21 +95,23 @@ git pull --ff-only && make helm-deploy
 
 请在 GitHub Docker workflow 已经发布该提交对应的 `sha-<shortsha>` 镜像后执行。
 
-如果集群拉取 GHCR 较慢，只需要指定内部 Harbor 地址和 OpenSaola 仓库路径，Makefile 会使用内部镜像升级；默认不会同步镜像：
+如果集群拉取 GHCR 较慢，只需要指定内部 Harbor 地址和共享仓库前缀，Makefile 会使用内部镜像升级；默认不会同步镜像：
 
 ```bash
 git pull --ff-only && \
 HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
-HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_INTERNAL_REPOSITORY=middleware \
 make helm-deploy
 ```
 
-该模式会沿用默认镜像 tag 规则，不需要手动指定 tag。如果需要在升级前同步 OpenSaola 和 CRD hook Job 使用的 kubectl 镜像，加上 `HELM_SYNC_IMAGE=true`：
+`HELM_INTERNAL_REPOSITORY=middleware` 会生成 `10.10.102.124:443/middleware/opensaola` 和 `10.10.102.124:443/middleware/kubectl`，固定组件名会自动追加。
+
+已有自定义值如果以 `/opensaola` 或 `/kubectl` 结尾，必须移除该后缀。该模式会沿用默认镜像 tag 规则，不需要手动指定 tag。如果需要在升级前同步 OpenSaola 和 CRD hook Job 使用的 kubectl 镜像，加上 `HELM_SYNC_IMAGE=true`：
 
 ```bash
 git pull --ff-only && \
 HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
-HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_INTERNAL_REPOSITORY=middleware \
 HELM_SYNC_IMAGE=true \
 make helm-deploy
 ```
@@ -118,7 +120,7 @@ make helm-deploy
 
 ```bash
 HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
-HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_INTERNAL_REPOSITORY=middleware \
 make helm-sync-image
 ```
 
@@ -184,13 +186,36 @@ resources:
     cpu: 500m
     memory: 512Mi
 
-# 镜像
-image:
+# 共享镜像前缀
+global:
   registry: "ghcr.io"
-  repository: "harmonycloud/opensaola"
+  repository: "harmonycloud"
+
+# OpenSaola 镜像；前缀为空时继承 global.*
+image:
+  registry: ""
+  repository: ""
   tag: ""                              # 留空时默认使用 Chart appVersion；正式发布会从 Git tag 覆盖
   pullPolicy: IfNotPresent             # 只有使用 dev/master/latest 等浮动 tag 时才需要覆盖为 Always
+
+# CRD hook 的 kubectl 镜像；前缀为空时继承 global.*
+kubectl:
+  image:
+    registry: ""
+    repository: ""
 ```
+
+仓库值表示前缀，Chart 始终自动追加固定名称 `opensaola` 和 `kubectl`。因此上述默认值会生成 `ghcr.io/harmonycloud/opensaola` 和 `ghcr.io/harmonycloud/kubectl`。组件级 `registry` 和 `repository` 只覆盖对应组件的前缀，例如：
+
+```yaml
+image:
+  repository: operators
+kubectl:
+  image:
+    repository: platform-tools
+```
+
+在默认全局 registry 下，这些覆盖值会生成 `ghcr.io/operators/opensaola` 和 `ghcr.io/platform-tools/kubectl`。仓库前缀中不要包含固定组件名。
 
 完整配置项参见 [`chart/opensaola/values.yaml`](chart/opensaola/values.yaml)。
 

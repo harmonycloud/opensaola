@@ -95,21 +95,23 @@ git pull --ff-only && make helm-deploy
 
 Run it after the GitHub Docker workflow for that commit has published the matching `sha-<shortsha>` image.
 
-If the cluster pulls GHCR slowly, set only the internal Harbor registry and OpenSaola repository path. The Makefile deploys the internal image and does not sync images by default:
+If the cluster pulls GHCR slowly, set only the internal Harbor registry and shared repository prefix. The Makefile deploys the internal images and does not sync them by default:
 
 ```bash
 git pull --ff-only && \
 HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
-HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_INTERNAL_REPOSITORY=middleware \
 make helm-deploy
 ```
 
-This keeps the default tag selection, so no manual tag is needed. To sync the OpenSaola image and the kubectl image used by the CRD hook Job before upgrading, add `HELM_SYNC_IMAGE=true`:
+`HELM_INTERNAL_REPOSITORY=middleware` produces `10.10.102.124:443/middleware/opensaola` and `10.10.102.124:443/middleware/kubectl`; the fixed component names are appended automatically.
+
+Existing custom values ending in `/opensaola` or `/kubectl` must remove that suffix. This keeps the default tag selection, so no manual tag is needed. To sync the OpenSaola image and the kubectl image used by the CRD hook Job before upgrading, add `HELM_SYNC_IMAGE=true`:
 
 ```bash
 git pull --ff-only && \
 HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
-HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_INTERNAL_REPOSITORY=middleware \
 HELM_SYNC_IMAGE=true \
 make helm-deploy
 ```
@@ -118,7 +120,7 @@ To sync images ahead of time without running a Helm upgrade, use:
 
 ```bash
 HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
-HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_INTERNAL_REPOSITORY=middleware \
 make helm-sync-image
 ```
 
@@ -184,13 +186,36 @@ resources:
     cpu: 500m
     memory: 512Mi
 
-# Image
-image:
+# Shared image prefixes
+global:
   registry: "ghcr.io"
-  repository: "harmonycloud/opensaola"
+  repository: "harmonycloud"
+
+# OpenSaola image; empty prefixes inherit global.*
+image:
+  registry: ""
+  repository: ""
   tag: ""                              # empty defaults to Chart appVersion; releases override it from the Git tag
   pullPolicy: IfNotPresent             # use Always only for floating tags such as dev/master/latest
+
+# CRD hook kubectl image; empty prefixes inherit global.*
+kubectl:
+  image:
+    registry: ""
+    repository: ""
 ```
+
+Repository values are prefixes: the chart always appends the fixed names `opensaola` and `kubectl`. The defaults above therefore resolve to `ghcr.io/harmonycloud/opensaola` and `ghcr.io/harmonycloud/kubectl`. Component-level `registry` and `repository` values override only that component's prefix; for example:
+
+```yaml
+image:
+  repository: operators
+kubectl:
+  image:
+    repository: platform-tools
+```
+
+With the default global registry, these overrides resolve to `ghcr.io/operators/opensaola` and `ghcr.io/platform-tools/kubectl`. Do not include the fixed component name in a repository prefix.
 
 See [`chart/opensaola/values.yaml`](chart/opensaola/values.yaml) for all available options.
 

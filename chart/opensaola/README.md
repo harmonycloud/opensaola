@@ -10,7 +10,7 @@ From the repository root:
 
 ```bash
 helm upgrade --install opensaola ./chart/opensaola \
-  --namespace opensaola-system \
+  --namespace middleware-operator \
   --create-namespace
 ```
 
@@ -24,7 +24,7 @@ make helm-deploy
 
 The Makefile wrapper returns after submitting the Helm release by default. Set `HELM_WAIT=true` when you want Helm to wait for resources to become ready, for example `make helm-deploy HELM_WAIT=true HELM_TIMEOUT=10m`.
 
-When `HELM_NAMESPACE` is not set, the wrapper reuses the namespace of an existing `opensaola` release found by `helm list -A`; otherwise it installs into `opensaola-system`. Use `n=<namespace>` (or `HELM_NAMESPACE=<namespace>`) to choose a namespace explicitly.
+When `HELM_NAMESPACE` is not set, the wrapper reuses the namespace of an existing `opensaola` release found by `helm list -A`; otherwise it installs into `middleware-operator`. Use `n=<namespace>` (or `HELM_NAMESPACE=<namespace>`) to choose a namespace explicitly.
 
 For a server that tracks the `dev` branch, the preferred one-command upgrade is:
 
@@ -78,7 +78,7 @@ Tagged releases publish this chart to GHCR:
 ```bash
 helm upgrade --install opensaola oci://ghcr.io/harmonycloud/charts/opensaola \
   --version <release-version> \
-  --namespace opensaola-system \
+  --namespace middleware-operator \
   --create-namespace
 ```
 
@@ -86,9 +86,9 @@ By default, middleware package Secrets are read from the Helm release namespace.
 
 ```bash
 helm upgrade --install opensaola ./chart/opensaola \
-  --namespace opensaola-system \
+  --namespace middleware-operator \
   --create-namespace \
-  --set config.dataNamespace=middleware-operator \
+  --set config.dataNamespace=middleware-packages \
   --set config.createDataNamespace=true
 ```
 
@@ -101,9 +101,9 @@ Package catalog Secrets are watched in `config.dataNamespace`. The chart grants 
 ## Verify
 
 ```bash
-kubectl get pods -n opensaola-system -l app.kubernetes.io/name=opensaola
+kubectl get pods -n middleware-operator -l app.kubernetes.io/name=opensaola
 kubectl get crds | grep middleware.cn
-kubectl logs -n opensaola-system -l app.kubernetes.io/name=opensaola -f
+kubectl logs -n middleware-operator -l app.kubernetes.io/name=opensaola -f
 ```
 
 ## Local Checks

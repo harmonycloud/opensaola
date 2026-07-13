@@ -73,7 +73,7 @@ Each resource is driven through a state machine (`Checking → Creating → Runn
 
 ```bash
 helm upgrade --install opensaola ./chart/opensaola \
-  --namespace opensaola-system \
+  --namespace middleware-operator \
   --create-namespace
 ```
 
@@ -85,7 +85,7 @@ make helm-deploy
 
 The Makefile deploy target returns after submitting the Helm release by default. Set `HELM_WAIT=true` when you want Helm to wait for resources to become ready, for example `make helm-deploy HELM_WAIT=true HELM_TIMEOUT=10m`.
 
-If `HELM_NAMESPACE` is not set explicitly, the wrapper first looks for an existing `opensaola` release across all namespaces and upgrades it in place. If no release exists, it installs into `opensaola-system`. Set `n=<namespace>` (or `HELM_NAMESPACE=<namespace>`) to force a specific namespace.
+If `HELM_NAMESPACE` is not set explicitly, the wrapper first looks for an existing `opensaola` release across all namespaces and upgrades it in place. If no release exists, it installs into `middleware-operator`. Set `n=<namespace>` (or `HELM_NAMESPACE=<namespace>`) to force a specific namespace.
 
 For a server tracking `dev`, upgrade to the image built from the checked-out commit with:
 
@@ -134,7 +134,7 @@ make helm-deploy-dev
 
 ```bash
 # Check operator is running
-kubectl get pods -n opensaola-system
+kubectl get pods -n middleware-operator
 
 # Check CRDs are installed
 kubectl get crds | grep middleware.cn

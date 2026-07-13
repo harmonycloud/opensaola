@@ -10,6 +10,18 @@
     "fullnameOverride": {
       "type": "string"
     },
+    "global": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "registry": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        }
+      }
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,
@@ -18,8 +30,7 @@
           "type": "string"
         },
         "repository": {
-          "type": "string",
-          "minLength": 1
+          "type": "string"
         },
         "tag": {
           "type": "string"
@@ -56,8 +67,7 @@
               "type": "string"
             },
             "repository": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             },
             "tag": {
               "type": "string",

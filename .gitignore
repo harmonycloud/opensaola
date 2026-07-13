@@ -30,3 +30,6 @@ vendor/
 # Test
 *.test
 *.out
+
+# Local Superpowers design and execution artifacts
+/docs/superpowers/

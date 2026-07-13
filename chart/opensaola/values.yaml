@@ -1,15 +1,21 @@
 # OpenSaola Helm Chart Values
 # OpenSaola Helm Chart 配置项
 
+# -- Global image prefix configuration
+# -- 全局镜像前缀配置
+global:
+  registry: "ghcr.io"
+  repository: harmonycloud
+
 # -- Container image configuration
 # -- 容器镜像配置
 image:
-  # -- Image registry
-  # -- 镜像仓库地址
-  registry: "ghcr.io"
-  # -- Image repository
-  # -- 镜像仓库
-  repository: harmonycloud/opensaola
+  # -- Image registry prefix override only. Empty uses global.registry.
+  # -- 仅覆盖镜像仓库地址前缀。为空时使用 global.registry。
+  registry: ""
+  # -- Image repository prefix override only. Empty uses global.repository.
+  # -- 仅覆盖镜像仓库路径前缀。为空时使用 global.repository。
+  repository: ""
   # -- Image tag. Empty defaults to Chart appVersion; release workflows package `v*` tags with the matching appVersion.
   # -- 镜像标签。为空时默认使用 Helm 包 appVersion；发行工作流会用匹配的 appVersion 打包 `v*` 标签。
   tag: ""
@@ -34,10 +40,12 @@ kubectl:
   # -- kubectl image for CRD install job
   # -- CRD 安装 Job 使用的 kubectl 镜像
   image:
-    # -- Kubectl image registry. Defaults to GHCR for environments that cannot access registry.k8s.io; kept separate from image.registry so operator image overrides do not affect the hook job.
-    # -- kubectl 镜像仓库地址。默认使用 GHCR，适配无法访问 registry.k8s.io 的环境；与 image.registry 分开配置，避免控制器镜像覆盖影响钩子 Job。
-    registry: "ghcr.io"
-    repository: harmonycloud/kubectl
+    # -- Kubectl image registry prefix override only. Empty uses global.registry.
+    # -- 仅覆盖 kubectl 镜像仓库地址前缀。为空时使用 global.registry。
+    registry: ""
+    # -- Kubectl image repository prefix override only. Empty uses global.repository.
+    # -- 仅覆盖 kubectl 镜像仓库路径前缀。为空时使用 global.repository。
+    repository: ""
     tag: "v1.30.14"
     pullPolicy: IfNotPresent
   # -- Optional labels for the CRD install Job pod

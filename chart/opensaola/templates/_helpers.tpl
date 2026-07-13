@@ -53,7 +53,11 @@ Operator image.
 控制器镜像。
 */}}
 {{- define "opensaola.image" -}}
-{{- if .Values.image.registry }}{{ .Values.image.registry }}/{{ end }}{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}
+{{- $registry := default .Values.global.registry .Values.image.registry | trim | trimAll "/" -}}
+{{- $repository := default .Values.global.repository .Values.image.repository | trim | trimAll "/" -}}
+{{- $registry = required "manager image registry is required" $registry -}}
+{{- $repository = required "manager image repository prefix is required" $repository -}}
+{{- printf "%s/%s/opensaola:%s" $registry $repository (.Values.image.tag | default .Chart.AppVersion) -}}
 {{- end }}
 
 {{/*
@@ -61,7 +65,11 @@ Kubectl image used by the CRD hook job.
 CRD 钩子 Job 使用的 kubectl 镜像。
 */}}
 {{- define "opensaola.kubectlImage" -}}
-{{- if .Values.kubectl.image.registry }}{{ .Values.kubectl.image.registry }}/{{ end }}{{ .Values.kubectl.image.repository }}:{{ .Values.kubectl.image.tag }}
+{{- $registry := default .Values.global.registry .Values.kubectl.image.registry | trim | trimAll "/" -}}
+{{- $repository := default .Values.global.repository .Values.kubectl.image.repository | trim | trimAll "/" -}}
+{{- $registry = required "kubectl image registry is required" $registry -}}
+{{- $repository = required "kubectl image repository prefix is required" $repository -}}
+{{- printf "%s/%s/kubectl:%s" $registry $repository .Values.kubectl.image.tag -}}
 {{- end }}
 
 {{/*

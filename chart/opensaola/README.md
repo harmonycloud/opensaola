@@ -10,7 +10,7 @@ From the repository root:
 
 ```bash
 helm upgrade --install opensaola ./chart/opensaola \
-  --namespace opensaola-system \
+  --namespace middleware-operator \
   --create-namespace
 ```
 
@@ -24,7 +24,7 @@ make helm-deploy
 
 The Makefile wrapper returns after submitting the Helm release by default. Set `HELM_WAIT=true` when you want Helm to wait for resources to become ready, for example `make helm-deploy HELM_WAIT=true HELM_TIMEOUT=10m`.
 
-When `HELM_NAMESPACE` is not set, the wrapper reuses the namespace of an existing `opensaola` release found by `helm list -A`; otherwise it installs into `opensaola-system`. Use `n=<namespace>` (or `HELM_NAMESPACE=<namespace>`) to choose a namespace explicitly.
+When `HELM_NAMESPACE` is not set, the wrapper reuses the namespace of an existing `opensaola` release found by `helm list -A`; otherwise it installs into `middleware-operator`. Use `n=<namespace>` (or `HELM_NAMESPACE=<namespace>`) to choose a namespace explicitly.
 
 For a server that tracks the `dev` branch, the preferred one-command upgrade is:
 
@@ -34,21 +34,23 @@ git pull --ff-only && make helm-deploy
 
 This deploys `ghcr.io/harmonycloud/opensaola:sha-<shortsha>` for the checked-out commit. Wait for the GitHub Docker workflow of that commit to finish before running it.
 
-If the cluster pulls GHCR slowly, set only the internal Harbor registry and OpenSaola repository path. The Makefile deploys the internal image and does not sync images by default:
+If the cluster pulls GHCR slowly, set only the internal Harbor registry and shared repository prefix. The Makefile deploys the internal images and does not sync them by default:
 
 ```bash
 git pull --ff-only && \
 HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
-HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_INTERNAL_REPOSITORY=middleware \
 make helm-deploy
 ```
 
-This keeps the default tag selection, so no manual tag is needed. To sync the OpenSaola image and the kubectl image used by the CRD hook Job before upgrading, add `HELM_SYNC_IMAGE=true`:
+`HELM_INTERNAL_REPOSITORY=middleware` produces `10.10.102.124:443/middleware/opensaola` and `10.10.102.124:443/middleware/kubectl`; the fixed component names are appended automatically.
+
+Existing custom values ending in `/opensaola` or `/kubectl` must remove that suffix. This keeps the default tag selection, so no manual tag is needed. To sync the OpenSaola image and the kubectl image used by the CRD hook Job before upgrading, add `HELM_SYNC_IMAGE=true`:
 
 ```bash
 git pull --ff-only && \
 HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
-HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_INTERNAL_REPOSITORY=middleware \
 HELM_SYNC_IMAGE=true \
 make helm-deploy
 ```
@@ -57,7 +59,7 @@ To sync images ahead of time without running a Helm upgrade, use:
 
 ```bash
 HELM_INTERNAL_REGISTRY=10.10.102.124:443 \
-HELM_INTERNAL_REPOSITORY=middleware/opensaola \
+HELM_INTERNAL_REPOSITORY=middleware \
 make helm-sync-image
 ```
 
@@ -71,6 +73,28 @@ make helm-deploy-dev
 
 This uses `image.tag=dev`, `image.pullPolicy=Always`, and updates `podAnnotations.redeployAt` so Kubernetes rolls the Deployment even when the image tag string is unchanged.
 
+## Image Prefixes
+
+The global values define the shared registry and repository prefixes:
+
+```yaml
+global:
+  registry: ghcr.io
+  repository: harmonycloud
+```
+
+The chart appends the fixed component names `opensaola` and `kubectl`, producing `ghcr.io/harmonycloud/opensaola` and `ghcr.io/harmonycloud/kubectl`. Component-level `image.registry` / `image.repository` and `kubectl.image.registry` / `kubectl.image.repository` override only that component's prefix; empty values inherit `global.*`. For example, the following copyable values use separate repository prefixes while retaining the global registry:
+
+```yaml
+image:
+  repository: operators
+kubectl:
+  image:
+    repository: platform-tools
+```
+
+These values resolve to `ghcr.io/operators/opensaola` and `ghcr.io/platform-tools/kubectl`. Repository values must remain prefixes; do not include the fixed component name.
+
 ## Install A Released OCI Chart
 
 Tagged releases publish this chart to GHCR:
@@ -78,7 +102,7 @@ Tagged releases publish this chart to GHCR:
 ```bash
 helm upgrade --install opensaola oci://ghcr.io/harmonycloud/charts/opensaola \
   --version <release-version> \
-  --namespace opensaola-system \
+  --namespace middleware-operator \
   --create-namespace
 ```
 
@@ -86,9 +110,9 @@ By default, middleware package Secrets are read from the Helm release namespace.
 
 ```bash
 helm upgrade --install opensaola ./chart/opensaola \
-  --namespace opensaola-system \
+  --namespace middleware-operator \
   --create-namespace \
-  --set config.dataNamespace=middleware-operator \
+  --set config.dataNamespace=middleware-packages \
   --set config.createDataNamespace=true
 ```
 
@@ -101,9 +125,9 @@ Package catalog Secrets are watched in `config.dataNamespace`. The chart grants 
 ## Verify
 
 ```bash
-kubectl get pods -n opensaola-system -l app.kubernetes.io/name=opensaola
+kubectl get pods -n middleware-operator -l app.kubernetes.io/name=opensaola
 kubectl get crds | grep middleware.cn
-kubectl logs -n opensaola-system -l app.kubernetes.io/name=opensaola -f
+kubectl logs -n middleware-operator -l app.kubernetes.io/name=opensaola -f
 ```
 
 ## Local Checks

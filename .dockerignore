@@ -1,5 +1,7 @@
 .git/
+.saola-cli-source/
 bin/
+build/
 vendor/
 .idea/
 .vscode/

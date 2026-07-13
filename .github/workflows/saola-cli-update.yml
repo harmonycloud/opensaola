@@ -1,0 +1,293 @@
+name: Saola CLI Update
+
+on:
+  repository_dispatch:
+    types: [saola-cli-dev, saola-cli-stable]
+  workflow_dispatch:
+    inputs:
+      event_type:
+        description: Immutable release event type
+        required: true
+        type: choice
+        options: [saola-cli-dev, saola-cli-stable]
+      repository:
+        description: Source repository
+        required: true
+        default: harmonycloud/saola-cli
+      channel:
+        description: Release channel
+        required: true
+        type: choice
+        options: [dev, stable]
+      version:
+        description: dev-SHORTSHA or stable SemVer tag
+        required: true
+      commit:
+        description: Full source commit SHA
+        required: true
+      source_date_epoch:
+        description: Reproducible source timestamp
+        required: true
+      amd64_sha256:
+        description: linux/amd64 artifact SHA-256
+        required: true
+      arm64_sha256:
+        description: linux/arm64 artifact SHA-256
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: saola-cli-update-dev
+  cancel-in-progress: false
+
+jobs:
+  validate-source:
+    name: Validate untrusted source and artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      repository: ${{ steps.identity.outputs.repository }}
+      channel: ${{ steps.identity.outputs.channel }}
+      version: ${{ steps.identity.outputs.version }}
+      commit: ${{ steps.identity.outputs.commit }}
+      source_date_epoch: ${{ steps.identity.outputs.source_date_epoch }}
+      amd64_sha256: ${{ steps.identity.outputs.amd64_sha256 }}
+      arm64_sha256: ${{ steps.identity.outputs.arm64_sha256 }}
+      release_id: ${{ steps.identity.outputs.release_id }}
+    env:
+      EVENT_TYPE: ${{ github.event.action || inputs.event_type }}
+      CLI_REPOSITORY: ${{ github.event.client_payload.repository || inputs.repository }}
+      CLI_CHANNEL: ${{ github.event.client_payload.channel || inputs.channel }}
+      CLI_VERSION: ${{ github.event.client_payload.version || inputs.version }}
+      CLI_COMMIT: ${{ github.event.client_payload.commit || inputs.commit }}
+      CLI_SOURCE_DATE_EPOCH: ${{ github.event.client_payload.source_date_epoch || inputs.source_date_epoch }}
+      CLI_AMD64_SHA256: ${{ github.event.client_payload.checksums['linux/amd64'] || inputs.amd64_sha256 }}
+      CLI_ARM64_SHA256: ${{ github.event.client_payload.checksums['linux/arm64'] || inputs.arm64_sha256 }}
+    steps:
+      - name: Validate immutable event payload
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_id=''
+          test "${CLI_REPOSITORY}" = 'harmonycloud/saola-cli'
+          [[ "${CLI_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CLI_SOURCE_DATE_EPOCH}" =~ ^(0|[1-9][0-9]*)$ ]]
+          [[ "${CLI_AMD64_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${CLI_ARM64_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          commit_date="$(gh api "repos/${CLI_REPOSITORY}/commits/${CLI_COMMIT}" --jq '.commit.committer.date')"
+          commit_epoch="$(date -u -d "${commit_date}" +%s)"
+          [[ "${commit_epoch}" = "${CLI_SOURCE_DATE_EPOCH}" ]] || {
+            echo 'source_date_epoch does not match the commit committer timestamp' >&2
+            exit 1
+          }
+          case "${EVENT_TYPE}:${CLI_CHANNEL}" in
+            saola-cli-dev:dev)
+              [[ "${CLI_VERSION}" =~ ^dev-[0-9a-f]{12}$ ]]
+              [[ "${CLI_VERSION#dev-}" = "${CLI_COMMIT:0:12}" ]]
+              remote_commit="$(git ls-remote --refs "https://github.com/${CLI_REPOSITORY}.git" refs/heads/main | awk 'NR == 1 { print $1 }')"
+              [[ "${remote_commit}" = "${CLI_COMMIT}" ]] || {
+                echo 'dev event commit is not the current refs/heads/main commit' >&2
+                exit 1
+              }
+              ;;
+            saola-cli-stable:stable)
+              semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+              [[ "${CLI_VERSION}" =~ ${semver} ]]
+              tag_refs="$(git ls-remote "https://github.com/${CLI_REPOSITORY}.git" \
+                "refs/tags/${CLI_VERSION}" "refs/tags/${CLI_VERSION}^{}")"
+              tag_commit="$(awk '$2 ~ /\^\{\}$/ { print $1; found=1 } END { if (!found) exit 1 }' <<<"${tag_refs}" || true)"
+              if [[ -z "${tag_commit}" ]]; then
+                tag_commit="$(awk -v ref="refs/tags/${CLI_VERSION}" '$2 == ref { print $1 }' <<<"${tag_refs}")"
+              fi
+              [[ -n "${tag_commit}" && "${tag_commit}" = "${CLI_COMMIT}" ]] || {
+                echo 'stable event commit does not match the peeled same-name tag' >&2
+                exit 1
+              }
+              releases="$(gh api --paginate --slurp \
+                "repos/${CLI_REPOSITORY}/releases?per_page=100")"
+              latest_release="$(jq -c 'flatten | [.[] | select(.draft == false and .prerelease == false)] | max_by(.published_at)' <<<"${releases}")"
+              [[ "$(jq -r '.tag_name' <<<"${latest_release}")" = "${CLI_VERSION}" ]] || {
+                echo 'stable event is not the latest published final release' >&2
+                exit 1
+              }
+              release_id="$(jq -r '.id' <<<"${latest_release}")"
+              [[ "${release_id}" =~ ^[1-9][0-9]*$ ]]
+              release_dir="$(mktemp -d)"
+              gh release download "${CLI_VERSION}" --repo "${CLI_REPOSITORY}" \
+                --pattern SHA256SUMS --dir "${release_dir}"
+              release_amd64="$(awk '$2 == "saola-linux-amd64" { print $1 }' "${release_dir}/SHA256SUMS")"
+              release_arm64="$(awk '$2 == "saola-linux-arm64" { print $1 }' "${release_dir}/SHA256SUMS")"
+              [[ "${release_amd64}" = "${CLI_AMD64_SHA256}" ]]
+              [[ "${release_arm64}" = "${CLI_ARM64_SHA256}" ]]
+              ;;
+            *)
+              echo 'event type and channel do not match an allowed route' >&2
+              exit 1
+              ;;
+          esac
+          [[ "${CLI_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CLI_SOURCE_DATE_EPOCH}" =~ ^(0|[1-9][0-9]*)$ ]]
+          [[ "${CLI_AMD64_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${CLI_ARM64_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          echo "repository=${CLI_REPOSITORY}" >>"${GITHUB_OUTPUT}"
+          echo "channel=${CLI_CHANNEL}" >>"${GITHUB_OUTPUT}"
+          echo "version=${CLI_VERSION}" >>"${GITHUB_OUTPUT}"
+          echo "commit=${CLI_COMMIT}" >>"${GITHUB_OUTPUT}"
+          echo "source_date_epoch=${CLI_SOURCE_DATE_EPOCH}" >>"${GITHUB_OUTPUT}"
+          echo "amd64_sha256=${CLI_AMD64_SHA256}" >>"${GITHUB_OUTPUT}"
+          echo "arm64_sha256=${CLI_ARM64_SHA256}" >>"${GITHUB_OUTPUT}"
+          echo "release_id=${release_id}" >>"${GITHUB_OUTPUT}"
+      - name: Check out the exact Saola CLI source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: harmonycloud/saola-cli
+          ref: ${{ env.CLI_COMMIT }}
+          path: saola-cli-source
+          persist-credentials: false
+      - name: Set up Go for checksum reconstruction
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: saola-cli-source/go.mod
+          cache-dependency-path: saola-cli-source/go.sum
+      - name: Rebuild and verify both published checksums
+        id: verified
+        run: |
+          set -euo pipefail
+          env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+            make -C saola-cli-source \
+            VERSION="${CLI_VERSION}" \
+            GIT_COMMIT="${CLI_COMMIT}" \
+            SOURCE_DATE_EPOCH="${CLI_SOURCE_DATE_EPOCH}" \
+            release-build release-checksums
+          actual_amd64="$(awk '$2 == "saola-linux-amd64" { print $1 }' saola-cli-source/dist/SHA256SUMS)"
+          actual_arm64="$(awk '$2 == "saola-linux-arm64" { print $1 }' saola-cli-source/dist/SHA256SUMS)"
+          [[ "${actual_amd64}" = "${CLI_AMD64_SHA256}" ]] || {
+            echo 'rebuilt linux/amd64 checksum does not match the event' >&2
+            exit 1
+          }
+          [[ "${actual_arm64}" = "${CLI_ARM64_SHA256}" ]] || {
+            echo 'rebuilt linux/arm64 checksum does not match the event' >&2
+            exit 1
+          }
+
+  update-dev:
+    name: Update dev lock after source verification
+    needs: validate-source
+    runs-on: ubuntu-latest
+    env:
+      CLI_REPOSITORY: ${{ needs.validate-source.outputs.repository }}
+      CLI_CHANNEL: ${{ needs.validate-source.outputs.channel }}
+      CLI_VERSION: ${{ needs.validate-source.outputs.version }}
+      CLI_COMMIT: ${{ needs.validate-source.outputs.commit }}
+      CLI_SOURCE_DATE_EPOCH: ${{ needs.validate-source.outputs.source_date_epoch }}
+      CLI_AMD64_SHA256: ${{ needs.validate-source.outputs.amd64_sha256 }}
+      CLI_ARM64_SHA256: ${{ needs.validate-source.outputs.arm64_sha256 }}
+      CLI_RELEASE_ID: ${{ needs.validate-source.outputs.release_id }}
+    steps:
+      - name: Revalidate trusted source outputs
+        run: |
+          set -euo pipefail
+          [[ "${CLI_REPOSITORY}" = harmonycloud/saola-cli ]]
+          [[ "${CLI_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${CLI_SOURCE_DATE_EPOCH}" =~ ^(0|[1-9][0-9]*)$ ]]
+          [[ "${CLI_AMD64_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          [[ "${CLI_ARM64_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          case "${CLI_CHANNEL}" in
+            dev)
+              [[ -z "${CLI_RELEASE_ID}" ]]
+              [[ "${CLI_VERSION}" =~ ^dev-[0-9a-f]{12}$ ]]
+              [[ "${CLI_VERSION#dev-}" = "${CLI_COMMIT:0:12}" ]]
+              ;;
+            stable)
+              [[ "${CLI_RELEASE_ID}" =~ ^[1-9][0-9]*$ ]]
+              [[ "${CLI_VERSION}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+              ;;
+            *) exit 1 ;;
+          esac
+      - name: Check out dev with read-only credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: dev
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Update the validated lock
+        id: lock
+        run: |
+          set -euo pipefail
+          git fetch origin dev
+          git reset --hard origin/dev
+          case "${CLI_CHANNEL}" in
+            dev) lock_path='build/saola-cli-dev.lock' ;;
+            stable) lock_path='build/saola-cli-stable-candidate.lock' ;;
+            *) exit 1 ;;
+          esac
+          candidate_lock="${RUNNER_TEMP}/saola-cli.lock"
+          printf '%s\n' \
+            "repository=${CLI_REPOSITORY}" \
+            "version=${CLI_VERSION}" \
+            "commit=${CLI_COMMIT}" \
+            "channel=${CLI_CHANNEL}" \
+            "source_date_epoch=${CLI_SOURCE_DATE_EPOCH}" \
+            >"${candidate_lock}"
+          [[ "$(wc -l <"${candidate_lock}" | tr -d ' ')" -eq 5 ]]
+          grep -Fxq "repository=${CLI_REPOSITORY}" "${candidate_lock}"
+          grep -Fxq "version=${CLI_VERSION}" "${candidate_lock}"
+          grep -Fxq "commit=${CLI_COMMIT}" "${candidate_lock}"
+          grep -Fxq "channel=${CLI_CHANNEL}" "${candidate_lock}"
+          grep -Fxq "source_date_epoch=${CLI_SOURCE_DATE_EPOCH}" "${candidate_lock}"
+          if [[ -f "${lock_path}" ]] &&
+             cmp -s "${candidate_lock}" "${lock_path}"; then
+            echo 'changed=false' >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          cp "${candidate_lock}" "${lock_path}"
+          cmp -s "${candidate_lock}" "${lock_path}"
+          echo 'changed=true' >>"${GITHUB_OUTPUT}"
+          echo "path=${lock_path}" >>"${GITHUB_OUTPUT}"
+      - name: Create auditable dev pull request and enable auto-merge
+        if: steps.lock.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.OPENSAOLA_AUTOMATION_TOKEN }}
+          LOCK_PATH: ${{ steps.lock.outputs.path }}
+        run: |
+          set -euo pipefail
+          test -n "${GH_TOKEN}" || {
+            echo 'OPENSAOLA_AUTOMATION_TOKEN is required; refusing to use GITHUB_TOKEN' >&2
+            exit 1
+          }
+          gh auth setup-git
+          safe_version="${CLI_VERSION//[^0-9A-Za-z._-]/-}"
+          branch="automation/saola-cli-${CLI_CHANNEL}-${safe_version}"
+          git config user.name 'opensaola-automation'
+          git config user.email 'opensaola-automation@users.noreply.github.com'
+          git -c core.hooksPath=/dev/null checkout -B "${branch}"
+          git add "${LOCK_PATH}"
+          git -c core.hooksPath=/dev/null commit --no-gpg-sign -m "build: update bundled saola CLI to ${CLI_VERSION}"
+          git -c core.hooksPath=/dev/null push --force-with-lease origin "HEAD:refs/heads/${branch}"
+          pr="$(gh pr list --state open --base dev --head "${branch}" --json number --jq '.[0].number // empty')"
+          body="$(printf '%s\n' \
+            'Automated immutable Saola CLI lock update.' \
+            '' \
+            "- Repository: \`${CLI_REPOSITORY}\`" \
+            "- Channel: \`${CLI_CHANNEL}\`" \
+            "- Version: \`${CLI_VERSION}\`" \
+            "- Commit: \`${CLI_COMMIT}\`" \
+            "- SOURCE_DATE_EPOCH: \`${CLI_SOURCE_DATE_EPOCH}\`" \
+            "- GitHub Release ID: \`${CLI_RELEASE_ID:-not-applicable}\`" \
+            "- linux/amd64 SHA-256: \`${CLI_AMD64_SHA256}\`" \
+            "- linux/arm64 SHA-256: \`${CLI_ARM64_SHA256}\`")"
+          if [[ -z "${pr}" ]]; then
+            pr="$(gh pr create --base dev --head "${branch}" \
+              --title "build: update bundled saola CLI to ${CLI_VERSION}" \
+              --body "${body}")"
+          else
+            gh pr edit "${pr}" --body "${body}"
+          fi
+          if [[ "${CLI_CHANNEL}" = stable ]]; then
+            gh pr edit "${pr}" --add-label 'automation:saola-cli-stable'
+          fi
+          gh pr merge "${pr}" --auto --squash

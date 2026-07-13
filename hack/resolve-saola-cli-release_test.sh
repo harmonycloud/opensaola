@@ -144,6 +144,8 @@ run_resolver resolve-latest "${tmp_dir}/large-resolved.lock"
 if grep -Fq 'tonumber' "${resolver}"; then
   fail 'release version ordering must not depend on jq tonumber precision'
 fi
+grep -Fq 'mkdir -p "${output_dir}"' "${resolver}" || fail 'resolver must create clone directory before git -C init'
+grep -Fq 'mkdir -p "$(dirname "${output_lock}")"' "${resolver}" || fail 'resolver must create the output lock parent directory'
 resolver_env[0]="SAOLA_CLI_RELEASES_JSON_FILE=${releases_json}"
 resolver_env[2]="SAOLA_CLI_RELEASE_DIR=${release_dir}"
 

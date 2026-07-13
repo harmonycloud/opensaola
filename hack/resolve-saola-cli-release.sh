@@ -135,6 +135,7 @@ source_repository() {
     return
   fi
 
+  mkdir -p "${output_dir}"
   git -C "${output_dir}" init -q
   git -C "${output_dir}" remote add origin "https://github.com/${repository}.git"
   git -C "${output_dir}" fetch -q --depth=1 origin "refs/tags/${version}:refs/tags/${version}" || die "failed to fetch ${version}"
@@ -311,6 +312,7 @@ resolve_latest() {
   validate_source_identity "${source_dir}" "${version}" "${commit}"
   source_date_epoch="$(commit_epoch "${source_dir}" "${commit}")"
 
+  mkdir -p "$(dirname "${output_lock}")"
   candidate="$(mktemp "${output_lock}.tmp.XXXXXX")" || die 'cannot create atomic lock candidate'
   trap 'rm -f "${candidate}"; cleanup' EXIT
   printf '%s\n' \

@@ -28,6 +28,30 @@ assert_template_fails() {
   fi
 }
 
+assert_template_fails_with_fragments() {
+  local description="$1"
+  shift
+
+  local expected_fragments=()
+  while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+    expected_fragments+=("$1")
+    shift
+  done
+  shift
+
+  if helm template opensaola "${chart}" "$@" >/dev/null 2>"${error_file}"; then
+    echo "FAIL: ${description} was accepted" >&2
+    exit 1
+  fi
+  for expected_fragment in "${expected_fragments[@]}"; do
+    if ! grep -Fqi "${expected_fragment}" "${error_file}"; then
+      cat "${error_file}" >&2
+      echo "FAIL: ${description} did not report fragment: ${expected_fragment}" >&2
+      exit 1
+    fi
+  done
+}
+
 rendered="$(helm template opensaola "${chart}" --namespace middleware-operator)"
 assert_image "${rendered}" 'ghcr.io/harmonycloud/opensaola:dev'
 assert_image "${rendered}" 'ghcr.io/harmonycloud/kubectl:v1.30.14'
@@ -76,9 +100,9 @@ assert_template_fails 'empty kubectl repository prefix' 'kubectl image repositor
   --set-string global.repository=/ \
   --set-string image.repository=operators \
   --set-string kubectl.image.repository=/
-assert_template_fails 'manager image name override' 'Additional property name is not allowed' \
+assert_template_fails_with_fragments 'manager image name override' 'name' 'not allowed' -- \
   --set-string image.name=manager-replacement
-assert_template_fails 'kubectl image name override' 'Additional property name is not allowed' \
+assert_template_fails_with_fragments 'kubectl image name override' 'name' 'not allowed' -- \
   --set-string kubectl.image.name=kubectl-replacement
 
 echo 'PASS: Helm image prefixes resolve with fixed image names'

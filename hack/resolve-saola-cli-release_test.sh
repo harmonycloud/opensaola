@@ -65,6 +65,10 @@ GIT_AUTHOR_DATE='2025-01-02T03:04:05Z' GIT_COMMITTER_DATE='2025-01-02T03:04:05Z'
 GIT_COMMITTER_DATE='2025-01-02T03:04:05Z' git -C "${source_repo}" tag -a v1.10.0 -m v1.10.0
 release_commit="$(git -C "${source_repo}" rev-parse HEAD)"
 release_epoch="$(git -C "${source_repo}" show -s --format=%ct "${release_commit}")"
+GIT_COMMITTER_DATE='2025-01-02T03:04:05Z' \
+  git -C "${source_repo}" tag -a v9007199254740993.0.0 -m v9007199254740993.0.0
+GIT_COMMITTER_DATE='2025-01-02T03:04:05Z' \
+  git -C "${source_repo}" tag -a v9007199254740992.0.0 -m v9007199254740992.0.0
 git -C "${source_repo}" show-ref --dereference --tags >"${tag_refs}"
 
 cat >"${releases_json}" <<'EOF'
@@ -114,6 +118,34 @@ channel=stable
 source_date_epoch=${release_epoch}
 EOF
 cmp -s "${tmp_dir}/expected.lock" "${tmp_dir}/resolved.lock" || fail 'lock fields or order are not deterministic'
+
+large_version='v9007199254740993.0.0'
+smaller_float_equal_version='v9007199254740992.0.0'
+large_releases_json="${tmp_dir}/large-releases.json"
+large_release_dir="${tmp_dir}/large-release"
+mkdir -p "${large_release_dir}"
+cat >"${large_releases_json}" <<EOF
+[
+  {"tag_name":"${large_version}","draft":false,"prerelease":false},
+  {"tag_name":"${smaller_float_equal_version}","draft":false,"prerelease":false}
+]
+EOF
+env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+  make -s -C "${source_repo}" VERSION="${large_version}" GIT_COMMIT="${release_commit}" \
+  SOURCE_DATE_EPOCH="${release_epoch}" release-build release-checksums
+cp "${source_repo}/dist/SHA256SUMS" \
+  "${source_repo}/dist/saola-linux-amd64" \
+  "${source_repo}/dist/saola-linux-arm64" \
+  "${large_release_dir}/"
+resolver_env[0]="SAOLA_CLI_RELEASES_JSON_FILE=${large_releases_json}"
+resolver_env[2]="SAOLA_CLI_RELEASE_DIR=${large_release_dir}"
+run_resolver resolve-latest "${tmp_dir}/large-resolved.lock"
+[[ "$("${lock_helper}" get "${tmp_dir}/large-resolved.lock" version)" = "${large_version}" ]] || fail 'precision loss selected a smaller stable release'
+if grep -Fq 'tonumber' "${resolver}"; then
+  fail 'release version ordering must not depend on jq tonumber precision'
+fi
+resolver_env[0]="SAOLA_CLI_RELEASES_JSON_FILE=${releases_json}"
+resolver_env[2]="SAOLA_CLI_RELEASE_DIR=${release_dir}"
 
 no_eligible_json="${tmp_dir}/no-eligible.json"
 cat >"${no_eligible_json}" <<'EOF'

@@ -73,13 +73,17 @@ latest_stable_version() {
       | ($tag | capture("^v(?<major>0|[1-9][0-9]*)\\.(?<minor>0|[1-9][0-9]*)\\.(?<patch>0|[1-9][0-9]*)$")) as $tuple
       | {
           tag: $tag,
-          major: ($tuple.major | tonumber),
-          minor: ($tuple.minor | tonumber),
-          patch: ($tuple.patch | tonumber)
+          major: $tuple.major,
+          minor: $tuple.minor,
+          patch: $tuple.patch
         }
     ]
     | if length == 0 then error("no eligible final Release")
-      else sort_by(.major, .minor, .patch)[-1].tag
+      else sort_by(
+        (.major | length), .major,
+        (.minor | length), .minor,
+        (.patch | length), .patch
+      )[-1].tag
       end
   ' "${releases_file}" || die 'no eligible final Release'
 }

@@ -1,0 +1,5 @@
+repository=harmonycloud/saola-cli
+version=v1.0.0
+commit=5a729a9df862b62d05bff2de105f365aedac8994
+channel=stable
+source_date_epoch=1783946493

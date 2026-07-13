@@ -1,13 +1,6 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
 
-# Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
-ifeq (,$(shell go env GOBIN))
-GOBIN=$(shell go env GOPATH)/bin
-else
-GOBIN=$(shell go env GOBIN)
-endif
-
 # CONTAINER_TOOL defines the container tool to be used for building images.
 # Be aware that the target commands are only tested with Docker which is
 # scaffolded by default. However, you might want to replace it to use other
@@ -70,7 +63,7 @@ ifneq ($(origin n),undefined)
   HELM_NAMESPACE ?= $(n)
   HELM_NAMESPACE_FROM_ALIAS := true
 else
-HELM_NAMESPACE ?= opensaola-system
+HELM_NAMESPACE ?= middleware-operator
 endif
 HELM_AUTO_NAMESPACE ?= true
 HELM_NAMESPACE_FROM_DEFAULT := $(if $(filter file,$(origin HELM_NAMESPACE)),$(if $(filter true,$(HELM_NAMESPACE_FROM_ALIAS)),false,true),false)
@@ -166,8 +159,12 @@ vet: ## Run go vet against code.
 #   make coverage      -- Unit tests with HTML coverage report
 # ---------------------------------------------------------------
 
+.PHONY: test-makefile
+test-makefile: ## Test Makefile targets that must not require the Go toolchain.
+	bash hack/make-helm-deploy_test.sh
+
 .PHONY: test
-test: manifests generate fmt vet ## Run tests.
+test: test-makefile manifests generate fmt vet ## Run tests.
 	go test $$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v '^$$' | grep -v /e2e | grep -v /internal/controller) -coverprofile cover.out
 
 .PHONY: coverage

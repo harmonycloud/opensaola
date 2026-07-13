@@ -135,7 +135,15 @@ fi
   [[ "$("${helper}" get "${stable_lock_file}" channel)" = stable ]] || fail 'stable lock channel is not stable'
 }
 common_dir="$(git -C "${repo_root}" rev-parse --path-format=absolute --git-common-dir)"
-main_repo_root="$(cd "${common_dir}/.." && pwd)"
+case "${common_dir}" in
+  */.git/worktrees/*)
+    main_git_dir="${common_dir%%/.git/worktrees/*}/.git"
+    ;;
+  *)
+    main_git_dir="${common_dir}"
+    ;;
+esac
+main_repo_root="$(cd "${main_git_dir}/.." && pwd)"
 test_source_repo="${SAOLA_CLI_TEST_REPOSITORY:-$(dirname "${main_repo_root}")/saola-cli}"
 if ! git -C "${test_source_repo}" cat-file -e "${build_commit}^{commit}" 2>/dev/null; then
   test_source_repo="${tmp_dir}/saola-cli-source"

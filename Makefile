@@ -78,6 +78,17 @@ HELM_KUBECTL_IMAGE_REGISTRY ?=
 HELM_KUBECTL_IMAGE_REPOSITORY ?=
 override HELM_MANAGER_IMAGE_NAME := opensaola
 override HELM_KUBECTL_IMAGE_NAME := kubectl
+trim-leading-slashes = $(if $(filter /%,$(1)),$(call trim-leading-slashes,$(patsubst /%,%,$(1))),$(1))
+trim-trailing-slashes = $(if $(filter %/,$(1)),$(call trim-trailing-slashes,$(patsubst %/,%,$(1))),$(1))
+normalize-image-prefix = $(call trim-trailing-slashes,$(call trim-leading-slashes,$(strip $(1))))
+HELM_GLOBAL_IMAGE_REGISTRY_NORMALIZED := $(call normalize-image-prefix,$(HELM_GLOBAL_IMAGE_REGISTRY))
+HELM_GLOBAL_IMAGE_REPOSITORY_NORMALIZED := $(call normalize-image-prefix,$(HELM_GLOBAL_IMAGE_REPOSITORY))
+HELM_IMAGE_REGISTRY_NORMALIZED := $(call normalize-image-prefix,$(HELM_IMAGE_REGISTRY))
+HELM_IMAGE_REPOSITORY_NORMALIZED := $(call normalize-image-prefix,$(HELM_IMAGE_REPOSITORY))
+HELM_KUBECTL_IMAGE_REGISTRY_NORMALIZED := $(call normalize-image-prefix,$(HELM_KUBECTL_IMAGE_REGISTRY))
+HELM_KUBECTL_IMAGE_REPOSITORY_NORMALIZED := $(call normalize-image-prefix,$(HELM_KUBECTL_IMAGE_REPOSITORY))
+HELM_INTERNAL_REGISTRY_NORMALIZED := $(call normalize-image-prefix,$(HELM_INTERNAL_REGISTRY))
+HELM_INTERNAL_REPOSITORY_NORMALIZED := $(call normalize-image-prefix,$(HELM_INTERNAL_REPOSITORY))
 HELM_GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-')
 HELM_GIT_SHA ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null)
 HELM_GIT_TAG ?= $(shell git describe --exact-match --tags --match 'v[0-9]*' HEAD 2>/dev/null)
@@ -88,12 +99,12 @@ HELM_INTERNAL_REPOSITORY ?=
 HELM_KUBECTL_IMAGE_TAG ?= v1.30.14
 HELM_KUBECTL_IMAGE_PULL_POLICY ?= IfNotPresent
 HELM_USE_INTERNAL_IMAGE := $(if $(and $(strip $(HELM_INTERNAL_REGISTRY)),$(strip $(HELM_INTERNAL_REPOSITORY))),true,false)
-HELM_SOURCE_IMAGE_REGISTRY := $(if $(strip $(HELM_IMAGE_REGISTRY)),$(strip $(HELM_IMAGE_REGISTRY)),$(strip $(HELM_GLOBAL_IMAGE_REGISTRY)))
-HELM_SOURCE_IMAGE_REPOSITORY := $(if $(strip $(HELM_IMAGE_REPOSITORY)),$(strip $(HELM_IMAGE_REPOSITORY)),$(strip $(HELM_GLOBAL_IMAGE_REPOSITORY)))
-HELM_SOURCE_KUBECTL_IMAGE_REGISTRY := $(if $(strip $(HELM_KUBECTL_IMAGE_REGISTRY)),$(strip $(HELM_KUBECTL_IMAGE_REGISTRY)),$(strip $(HELM_GLOBAL_IMAGE_REGISTRY)))
-HELM_SOURCE_KUBECTL_IMAGE_REPOSITORY := $(if $(strip $(HELM_KUBECTL_IMAGE_REPOSITORY)),$(strip $(HELM_KUBECTL_IMAGE_REPOSITORY)),$(strip $(HELM_GLOBAL_IMAGE_REPOSITORY)))
-HELM_TARGET_IMAGE_REGISTRY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(strip $(HELM_INTERNAL_REGISTRY)),$(strip $(HELM_GLOBAL_IMAGE_REGISTRY)))
-HELM_TARGET_IMAGE_REPOSITORY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(strip $(HELM_INTERNAL_REPOSITORY)),$(strip $(HELM_GLOBAL_IMAGE_REPOSITORY)))
+HELM_SOURCE_IMAGE_REGISTRY := $(if $(strip $(HELM_IMAGE_REGISTRY)),$(HELM_IMAGE_REGISTRY_NORMALIZED),$(HELM_GLOBAL_IMAGE_REGISTRY_NORMALIZED))
+HELM_SOURCE_IMAGE_REPOSITORY := $(if $(strip $(HELM_IMAGE_REPOSITORY)),$(HELM_IMAGE_REPOSITORY_NORMALIZED),$(HELM_GLOBAL_IMAGE_REPOSITORY_NORMALIZED))
+HELM_SOURCE_KUBECTL_IMAGE_REGISTRY := $(if $(strip $(HELM_KUBECTL_IMAGE_REGISTRY)),$(HELM_KUBECTL_IMAGE_REGISTRY_NORMALIZED),$(HELM_GLOBAL_IMAGE_REGISTRY_NORMALIZED))
+HELM_SOURCE_KUBECTL_IMAGE_REPOSITORY := $(if $(strip $(HELM_KUBECTL_IMAGE_REPOSITORY)),$(HELM_KUBECTL_IMAGE_REPOSITORY_NORMALIZED),$(HELM_GLOBAL_IMAGE_REPOSITORY_NORMALIZED))
+HELM_TARGET_IMAGE_REGISTRY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(HELM_INTERNAL_REGISTRY_NORMALIZED),$(HELM_GLOBAL_IMAGE_REGISTRY_NORMALIZED))
+HELM_TARGET_IMAGE_REPOSITORY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(HELM_INTERNAL_REPOSITORY_NORMALIZED),$(HELM_GLOBAL_IMAGE_REPOSITORY_NORMALIZED))
 HELM_SOURCE_IMAGE := $(HELM_SOURCE_IMAGE_REGISTRY)/$(HELM_SOURCE_IMAGE_REPOSITORY)/$(HELM_MANAGER_IMAGE_NAME):$(HELM_IMAGE_TAG)
 HELM_TARGET_IMAGE := $(HELM_TARGET_IMAGE_REGISTRY)/$(HELM_TARGET_IMAGE_REPOSITORY)/$(HELM_MANAGER_IMAGE_NAME):$(HELM_IMAGE_TAG)
 HELM_SOURCE_KUBECTL_IMAGE := $(HELM_SOURCE_KUBECTL_IMAGE_REGISTRY)/$(HELM_SOURCE_KUBECTL_IMAGE_REPOSITORY)/$(HELM_KUBECTL_IMAGE_NAME):$(HELM_KUBECTL_IMAGE_TAG)
@@ -369,6 +380,30 @@ sync-helm-image:
 		echo "Internal image sync requires HELM_IMAGE_TAG to resolve to a concrete tag." >&2; \
 		exit 1; \
 	fi; \
+	if [ -z "$(HELM_SOURCE_IMAGE_REGISTRY)" ]; then \
+		echo "Manager source image registry is empty after trimming whitespace and slashes." >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$(HELM_SOURCE_IMAGE_REPOSITORY)" ]; then \
+		echo "Manager source image repository is empty after trimming whitespace and slashes." >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$(HELM_SOURCE_KUBECTL_IMAGE_REGISTRY)" ]; then \
+		echo "Kubectl source image registry is empty after trimming whitespace and slashes." >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$(HELM_SOURCE_KUBECTL_IMAGE_REPOSITORY)" ]; then \
+		echo "Kubectl source image repository is empty after trimming whitespace and slashes." >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$(HELM_TARGET_IMAGE_REGISTRY)" ]; then \
+		echo "Internal target image registry is empty after trimming whitespace and slashes." >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$(HELM_TARGET_IMAGE_REPOSITORY)" ]; then \
+		echo "Internal target image repository is empty after trimming whitespace and slashes." >&2; \
+		exit 1; \
+	fi; \
 	sync_image() { \
 		local source_image="$$1"; \
 		local target_image="$$2"; \
@@ -432,16 +467,16 @@ helm-upgrade: sync-helm-image ## Install or upgrade OpenSaola from the local Hel
 	kubectl_image_args=(); \
 	if [ "$(HELM_USE_INTERNAL_IMAGE)" != "true" ]; then \
 		if [ -n "$(strip $(HELM_IMAGE_REGISTRY))" ]; then \
-			manager_image_args+=(--set image.registry="$(strip $(HELM_IMAGE_REGISTRY))"); \
+			manager_image_args+=(--set image.registry="$(HELM_IMAGE_REGISTRY_NORMALIZED)"); \
 		fi; \
 		if [ -n "$(strip $(HELM_IMAGE_REPOSITORY))" ]; then \
-			manager_image_args+=(--set image.repository="$(strip $(HELM_IMAGE_REPOSITORY))"); \
+			manager_image_args+=(--set image.repository="$(HELM_IMAGE_REPOSITORY_NORMALIZED)"); \
 		fi; \
 		if [ -n "$(strip $(HELM_KUBECTL_IMAGE_REGISTRY))" ]; then \
-			kubectl_image_args+=(--set kubectl.image.registry="$(strip $(HELM_KUBECTL_IMAGE_REGISTRY))"); \
+			kubectl_image_args+=(--set kubectl.image.registry="$(HELM_KUBECTL_IMAGE_REGISTRY_NORMALIZED)"); \
 		fi; \
 		if [ -n "$(strip $(HELM_KUBECTL_IMAGE_REPOSITORY))" ]; then \
-			kubectl_image_args+=(--set kubectl.image.repository="$(strip $(HELM_KUBECTL_IMAGE_REPOSITORY))"); \
+			kubectl_image_args+=(--set kubectl.image.repository="$(HELM_KUBECTL_IMAGE_REPOSITORY_NORMALIZED)"); \
 		fi; \
 	else \
 		kubectl_image_args+=(--set kubectl.image.tag="$(HELM_KUBECTL_IMAGE_TAG)"); \

@@ -6,8 +6,7 @@ IMG ?= controller:latest
 # scaffolded by default. However, you might want to replace it to use other
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
-SAOLA_CLI_CHANNEL ?= dev
-SAOLA_CLI_LOCK ?= build/saola-cli-$(SAOLA_CLI_CHANNEL).lock
+SAOLA_CLI_LOCK ?= build/saola-cli-stable.lock
 SAOLA_CLI_LOCK_HELPER ?= hack/saola-cli-lock.sh
 override SAOLA_CLI_REPOSITORY = $(shell $(SAOLA_CLI_LOCK_HELPER) get $(SAOLA_CLI_LOCK) repository 2>/dev/null)
 override SAOLA_CLI_VERSION = $(shell $(SAOLA_CLI_LOCK_HELPER) get $(SAOLA_CLI_LOCK) version 2>/dev/null)
@@ -182,8 +181,13 @@ vet: ## Run go vet against code.
 test-makefile: ## Test Makefile targets that must not require the Go toolchain.
 	bash hack/make-helm-deploy_test.sh
 
+.PHONY: test-release-automation
+test-release-automation:
+	bash hack/resolve-saola-cli-release_test.sh
+	bash hack/saola-cli-lock_test.sh
+
 .PHONY: test
-test: test-makefile manifests generate fmt vet ## Run tests.
+test: test-makefile test-release-automation manifests generate fmt vet ## Run tests.
 	go test $$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v '^$$' | grep -v /e2e | grep -v /internal/controller) -coverprofile cover.out
 
 .PHONY: coverage

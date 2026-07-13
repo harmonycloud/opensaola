@@ -75,18 +75,8 @@ parse_lock() {
   [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || die 'commit must be a full lowercase 40-character SHA'
   [[ "${source_date_epoch}" =~ ^(0|[1-9][0-9]*)$ ]] || die 'source_date_epoch must be a non-negative integer'
 
-  case "${channel}" in
-    dev)
-      [[ "${version}" =~ ^dev-[0-9a-f]{12}$ ]] || die 'dev version must be dev- followed by a 12-character SHA'
-      [[ "${version#dev-}" == "${commit:0:12}" ]] || die 'dev version must match the commit prefix'
-      ;;
-    stable)
-      validate_stable_version "${version}" || die 'stable version must be a final vMAJOR.MINOR.PATCH release tag'
-      ;;
-    *)
-      die 'channel must be dev or stable'
-      ;;
-  esac
+  [[ "${channel}" = stable ]] || die 'channel must be stable'
+  validate_stable_version "${version}" || die 'stable version must be a final vMAJOR.MINOR.PATCH release tag'
 
   LOCK_REPOSITORY="${repository}"
   LOCK_VERSION="${version}"

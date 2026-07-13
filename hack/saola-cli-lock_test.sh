@@ -30,16 +30,16 @@ assert_rejected() {
 valid_lock="${tmp_dir}/valid.lock"
 write_lock "${valid_lock}" \
   'repository=harmonycloud/saola-cli' \
-  'version=dev-dfe685bacbeb' \
+  'version=v1.2.3' \
   "commit=${commit}" \
-  'channel=dev' \
+  'channel=stable' \
   'source_date_epoch=1782812176'
 
 "${helper}" validate "${valid_lock}"
 [[ "$("${helper}" get "${valid_lock}" repository)" == 'harmonycloud/saola-cli' ]] || fail 'repository extraction failed'
-[[ "$("${helper}" get "${valid_lock}" version)" == 'dev-dfe685bacbeb' ]] || fail 'version extraction failed'
+[[ "$("${helper}" get "${valid_lock}" version)" == 'v1.2.3' ]] || fail 'version extraction failed'
 [[ "$("${helper}" get "${valid_lock}" commit)" == "${commit}" ]] || fail 'commit extraction failed'
-[[ "$("${helper}" get "${valid_lock}" channel)" == 'dev' ]] || fail 'channel extraction failed'
+[[ "$("${helper}" get "${valid_lock}" channel)" == 'stable' ]] || fail 'channel extraction failed'
 [[ "$("${helper}" get "${valid_lock}" source_date_epoch)" == '1782812176' ]] || fail 'epoch extraction failed'
 
 duplicate="${tmp_dir}/duplicate.lock"
@@ -64,33 +64,28 @@ bad_channel="${tmp_dir}/bad-channel.lock"
 sed 's/^channel=.*/channel=preview/' "${valid_lock}" >"${bad_channel}"
 assert_rejected "${bad_channel}"
 
-bad_dev_version="${tmp_dir}/bad-dev-version.lock"
-sed 's/^version=.*/version=v1.2.3/' "${valid_lock}" >"${bad_dev_version}"
-assert_rejected "${bad_dev_version}"
+dev_channel="${tmp_dir}/dev-channel.lock"
+sed 's/^channel=.*/channel=dev/' "${valid_lock}" >"${dev_channel}"
+assert_rejected "${dev_channel}"
 
-stable_lock="${tmp_dir}/stable.lock"
-write_lock "${stable_lock}" \
-  'repository=harmonycloud/saola-cli' \
-  'version=v1.2.3' \
-  "commit=${commit}" \
-  'channel=stable' \
-  'source_date_epoch=1782812176'
-"${helper}" validate "${stable_lock}"
+dev_version="${tmp_dir}/dev-version.lock"
+sed 's/^version=.*/version=dev-dfe685bacbeb/' "${valid_lock}" >"${dev_version}"
+assert_rejected "${dev_version}"
 
 stable_prerelease="${tmp_dir}/stable-prerelease.lock"
-sed 's/^version=.*/version=v1.2.3-rc.1/' "${stable_lock}" >"${stable_prerelease}"
+sed 's/^version=.*/version=v1.2.3-rc.1/' "${valid_lock}" >"${stable_prerelease}"
 assert_rejected "${stable_prerelease}"
 
 bad_stable_version="${tmp_dir}/bad-stable-version.lock"
-sed 's/^version=.*/version=dev-dfe685bacbeb/' "${stable_lock}" >"${bad_stable_version}"
+sed 's/^version=.*/version=dev-dfe685bacbeb/' "${valid_lock}" >"${bad_stable_version}"
 assert_rejected "${bad_stable_version}"
 
 bad_stable_prerelease="${tmp_dir}/bad-stable-prerelease.lock"
-sed 's/^version=.*/version=v1.2.3-01/' "${stable_lock}" >"${bad_stable_prerelease}"
+sed 's/^version=.*/version=v1.2.3-01/' "${valid_lock}" >"${bad_stable_prerelease}"
 assert_rejected "${bad_stable_prerelease}"
 
 bad_stable_build_metadata="${tmp_dir}/bad-stable-build-metadata.lock"
-sed 's/^version=.*/version=v1.2.3+build.1/' "${stable_lock}" >"${bad_stable_build_metadata}"
+sed 's/^version=.*/version=v1.2.3+build.1/' "${valid_lock}" >"${bad_stable_build_metadata}"
 assert_rejected "${bad_stable_build_metadata}"
 
 bad_commit="${tmp_dir}/bad-commit.lock"
@@ -118,11 +113,19 @@ stable_lock_file="${repo_root}/build/saola-cli-stable.lock"
 stable_candidate_file="${repo_root}/build/saola-cli-stable-candidate.lock"
 [[ -f "${dev_lock_file}" ]] || fail 'missing dedicated dev lock'
 [[ ! -e "${repo_root}/build/saola-cli.lock" ]] || fail 'legacy shared lock still exists'
-"${helper}" validate "${dev_lock_file}"
-[[ "$("${helper}" get "${dev_lock_file}" channel)" = dev ]] || fail 'dev lock channel is not dev'
-build_version="$("${helper}" get "${dev_lock_file}" version)"
-build_commit="$("${helper}" get "${dev_lock_file}" commit)"
-build_epoch="$("${helper}" get "${dev_lock_file}" source_date_epoch)"
+assert_rejected "${dev_lock_file}"
+build_version='v1.2.3'
+build_commit="$(sed -n 's/^commit=//p' "${dev_lock_file}")"
+build_epoch="$(sed -n 's/^source_date_epoch=//p' "${dev_lock_file}")"
+build_lock_file="${tmp_dir}/build-stable.lock"
+write_lock "${build_lock_file}" \
+  'repository=harmonycloud/saola-cli' \
+  "version=${build_version}" \
+  "commit=${build_commit}" \
+  'channel=stable' \
+  "source_date_epoch=${build_epoch}"
+"${helper}" validate "${build_lock_file}"
+export SAOLA_CLI_LOCK="${build_lock_file}"
 grep -Eq '^SAOLA_CLI_LOCK \?= build/saola-cli-\$\(SAOLA_CLI_CHANNEL\)\.lock$' "${repo_root}/Makefile" || fail 'Makefile does not select a channel-specific lock'
 [[ ! -e "${stable_lock_file}" ]] || {
   "${helper}" validate "${stable_lock_file}"

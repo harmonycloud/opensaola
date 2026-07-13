@@ -53,36 +53,35 @@ helm package chart/opensaola \
 
 Helm Chart 默认 `image.pullPolicy` 为 `IfNotPresent`，保证正式版本部署可复现。Makefile 对不可变的 `sha-*` 和 `v*` tag 也使用 `IfNotPresent`；只有显式选择 `dev`、`master`、`main`、`latest` 等浮动 tag 时才切换为 `Always`。
 
-## 内置 Saola CLI 渠道
+## 内置 Saola CLI 解析
 
-`build/saola-cli-dev.lock` 是 dev 镜像输入，`build/saola-cli-stable-candidate.lock` 是可以保存在 `dev` 上等待观察的 stable 候选，`build/saola-cli-stable.lock` 才是 `master` 与正式 tag 唯一允许使用的 CLI 输入。普通 `dev -> master` 合并即使带入 candidate 文件，也不能改变 master 镜像选择的 CLI；只有 promotion workflow 会把精确候选复制为正式 stable lock。Docker workflow 使用固定到所选完整 commit 的 BuildKit named context 构建，并把 CLI 版本和 revision 写入 OCI labels。官方镜像平台仍严格限定为 `linux/amd64` 和 `linux/arm64`，同时生成 BuildKit provenance 与 SBOM attestations。
+Saola CLI 独立发布。OpenSaola 不需要下游 dispatch token、自动化 PAT、机器人登录名、label、定时晋级、候选锁或观察窗口。Docker workflow 在镜像构建开始时主动解析最高的已发布正式 SemVer Saola CLI Release，验证 tag、资产、checksum 和可复现重建结果，然后写入严格五字段 lock。
 
-`saola-cli` 仓库可以发送以下两种不可变事件：
+`build/saola-cli-stable.lock` 是唯一提交到仓库的 Saola CLI lock，字段为 `repository`、`version`、`commit`、`channel` 和 `source_date_epoch`。Docker 构建使用固定到完整 commit 的 BuildKit named context，并把 CLI 版本和 revision 写入 OCI labels。官方镜像平台仍严格限定为 `linux/amd64` 和 `linux/arm64`，同时生成 BuildKit provenance 与 SBOM attestations。
 
-| 事件 | 可接受的锁 | 目标 |
-|------|------------|------|
-| `saola-cli-dev` | `channel=dev`、`version=dev-<commit 前 12 位>` | 自动合并 PR 到 `dev` |
-| `saola-cli-stable` | `channel=stable`、最终版 `vMAJOR.MINOR.PATCH` tag | 更新 `dev` 上的 candidate lock，并添加 `automation:saola-cli-stable` label |
+不同 ref 的行为刻意区分：
 
-自动 dispatch 和手动 dispatch 都必须提供 `repository`、`channel`、`version`、完整 40 位 `commit`、`source_date_epoch`，以及两个 Linux 产物各自的小写 64 位 SHA-256。更新 workflow 会把 epoch 绑定到 commit 时间戳、重建两个产物；stable 还会把 payload 与 Release 的 `SHA256SUMS` 资产逐项比较，然后才写入严格五字段 lock。该 workflow 永不直接 push `dev` 或 `master`。
+| Git ref | 行为 |
+|---------|------|
+| `dev` | 解析最新符合条件的正式 Saola CLI Release。如果已提交的 stable lock 缺失或落后，专用同步 job 只用仓库 `GITHUB_TOKEN` 向 `dev` 提交 `build/saola-cli-stable.lock`，显式重新运行更新后 `dev` 上的 `docker.yml`，当前运行不发布镜像。 |
+| `master` | 只读解析最新符合条件的正式 Release，但不写仓库。如果已提交的 stable lock 缺失或落后，workflow 失败，必须先让 `dev` 同步 lock 后再向前合并。 |
+| `v*` tag | 不解析更新的 CLI。workflow 只验证 tag 所指提交中已有的 stable lock，并从这份不可变依赖记录构建。 |
+| Pull Request | 如果已有 committed stable lock，则用它构建；首个 Saola CLI 正式 Release 之前，缺少 lock 的 PR 会执行显式 bootstrap no-op，不发布镜像。 |
 
-stable 自动化只接受同名、非 draft、非 prerelease，且按 `published_at` 当前最新的最终版 GitHub Release；重放旧的合法 tag 也会 fail closed。每小时运行的晋级 workflow 会选择最新一个已合并、带稳定 label 的更新 PR，从该 PR 的精确 merge commit 中读取 `build/saola-cli-stable-candidate.lock`（不会读取之后继续前进的 `dev` HEAD），并从 `mergedAt` 起默认等待 24 小时。只有同一 merge SHA 上的 `CI`、Docker workflow 与具体的 `Build stable candidate` check 都成功后才允许晋级。仅当 `master` 已有逐字节一致的完整 stable lock 时才 no-op；否则只创建写入 `build/saola-cli-stable.lock` 的 PR。master PR check 会拒绝非指定机器人、非确定性 promotion 分支的 stable lock 改动。晋级过程绝不解析 `latest`、snapshot、prerelease 或其他浮动 CLI revision。
-
-首次启用采用显式 fail-closed bootstrap：可以先把 workflow 文件合入默认分支，而此时如果还没有 Saola CLI 正式 Release，master push 不发布镜像、正式 tag 直接失败，也绝不会回退到 dev lock。首个正式 Release 出现后，candidate、精确构建、观察期和 promotion 流程会自动创建 stable lock，不需要人工编辑文件。
+首次启用是 fail-closed：在首个 Saola CLI 正式 Release 出现且 `dev` 已同步 `build/saola-cli-stable.lock` 之前，`master` 不能发布镜像，正式 tag 会失败，绝不会回退到浮动 CLI revision。
 
 ### 必需的 GitHub 外部配置
 
-仅合入这些文件不会自动启用整条链路。仓库管理员还必须在 GitHub 外部完成以下配置：
+不需要跨仓库 secret。唯一写路径是隔离的 `dev` lock 同步 job，使用仓库 `GITHUB_TOKEN`，只授予 `contents: write` 和 `actions: write`，用于提交 stable lock 并显式触发后续 Docker 运行。
 
-- 发送 `repository_dispatch` 或等待 schedule 之前，必须先把 `saola-cli-update.yml` 和 `saola-cli-promote.yml` 部署到仓库默认分支 `master`；GitHub 只会把这两类事件路由给默认分支上已经存在的 workflow。bootstrap 期间缺少 `build/saola-cli-stable.lock` 会主动禁止 master 镜像发布并阻断 tag，绝不回退到 dev。
-- 创建 Actions secret `OPENSAOLA_AUTOMATION_TOKEN`，其值必须是专用机器人 fine-grained PAT。仓库权限至少包括 **Contents: read and write**、**Pull requests: read and write**、**Actions: read**，还需要 **Metadata: read** 以及施加预创建 stable label 的权限（fine-grained PAT 的 label 操作由 Pull requests write 与 Metadata read 覆盖）。缺少该 secret 时 workflow 会 fail closed，并且不会回退到 `GITHUB_TOKEN`，这样机器人 PR 才能正常触发后续 CI。
-- 开启 repository auto-merge，并把 `dev`、`master` 都设置成只允许 PR 的保护分支；要求相关 CI 与 Docker checks，且包括自动化机器人在内都禁止直接 push。
-- 预先创建固定 label `automation:saola-cli-stable`，并限制其施加权限；晋级 workflow 把它作为 stable 候选边界。
-- 设置仓库变量 `OPENSAOLA_AUTOMATION_LOGIN` 为专用机器人 login。candidate PR 的作者与 candidate-only diff 必须匹配；master check 也只允许该机器人从确定性 promotion 分支修改 `build/saola-cli-stable.lock`。
-- 定时任务保持默认 24 小时 soak。手动运行可为经授权的事故处置显式指定其他非负时长，但应保留可审计记录。
-- 启用前在 workflow 外建立 stable release denylist 或回滚决策流程。需要阻止候选时，应关闭 auto-merge、移除 stable label 或关闭 promotion PR。自动 stable 事件只接受最新 published release；回滚必须通过普通受审 lock-only PR 指向此前已验证的稳定版本，禁止把 lock 改成浮动 ref。
+仓库管理员仍应在正式依赖该链路前核验常规平台控制：
 
-本地验证无法证明 secret、token scope、label 策略、branch protection、auto-merge 或 hosted runner 行为已正确配置；正式依赖此链路前必须在 GitHub 上逐项核验。
+- 保护 `master`，只允许 PR 合并，并要求相关 CI、Docker 和 Helm checks。
+- 允许 Docker workflow 在 `dev` 上推送唯一的 stable-lock 提交；如果 `dev` 保护规则禁止 workflow push，则改用等价的 GitHub App 写路径。
+- 保持 release tag 不可变，且只在 `master` 带有最新 stable lock 并通过检查后打正式 tag。
+- 回滚到此前已验证的 Saola CLI 版本时使用普通受审 lock 改动；禁止把 lock 改成浮动 ref。
+
+本地验证能证明 workflow 契约和 lock 内容，但无法证明 hosted runner 权限或 branch protection 行为；正式依赖此链路前仍需在 GitHub 上核验这些设置。
 
 ## 本地 Helm 部署
 

@@ -40,6 +40,8 @@ grep -Fq 'ghcr.io/harmonycloud/kubectl:v1.30.14' <<<"${output}"
 internal_output="$(PATH="${minimal_path}" "${make_bin}" -C "${repo_root}" -n helm-deploy \
   HELM_INTERNAL_REGISTRY=registry.internal \
   HELM_INTERNAL_REPOSITORY=middleware \
+  HELM_MANAGER_IMAGE_NAME=manager-replacement \
+  HELM_KUBECTL_IMAGE_NAME=kubectl-replacement \
   HELM_IMAGE_TAG=test-tag \
   HELM_SYNC_IMAGE=true 2>&1)"
 grep -Fq 'registry.internal/middleware/opensaola' <<<"${internal_output}"
@@ -48,13 +50,17 @@ grep -Fq 'registry.internal/middleware/kubectl' <<<"${internal_output}"
 default_upgrade_output="$("${make_bin}" -s -C "${repo_root}" helm-deploy \
   HELM=echo \
   HELM_AUTO_NAMESPACE=false \
+  HELM_KUBECTL_IMAGE_TAG=public-tag \
+  HELM_KUBECTL_IMAGE_PULL_POLICY=Always \
   HELM_IMAGE_TAG=test-tag 2>&1)"
 if grep -Fq -- '--set image.registry=' <<<"${default_upgrade_output}" || \
   grep -Fq -- '--set image.repository=' <<<"${default_upgrade_output}" || \
   grep -Fq -- '--set kubectl.image.registry=' <<<"${default_upgrade_output}" || \
-  grep -Fq -- '--set kubectl.image.repository=' <<<"${default_upgrade_output}"; then
+  grep -Fq -- '--set kubectl.image.repository=' <<<"${default_upgrade_output}" || \
+  grep -Fq -- '--set kubectl.image.tag=' <<<"${default_upgrade_output}" || \
+  grep -Fq -- '--set kubectl.image.pullPolicy=' <<<"${default_upgrade_output}"; then
   printf '%s\n' "${default_upgrade_output}" >&2
-  echo 'FAIL: default deployment must use only the global image prefix' >&2
+  echo 'FAIL: public deployment must not override default component image values' >&2
   exit 1
 fi
 
@@ -80,9 +86,13 @@ internal_upgrade_output="$("${make_bin}" -s -C "${repo_root}" helm-deploy \
   HELM_IMAGE_REPOSITORY=operators \
   HELM_KUBECTL_IMAGE_REGISTRY=tools.example.com \
   HELM_KUBECTL_IMAGE_REPOSITORY=platform-tools \
+  HELM_KUBECTL_IMAGE_TAG=internal-tag \
+  HELM_KUBECTL_IMAGE_PULL_POLICY=Always \
   HELM_IMAGE_TAG=test-tag 2>&1)"
 grep -Fq -- '--set global.registry=registry.internal' <<<"${internal_upgrade_output}"
 grep -Fq -- '--set global.repository=middleware' <<<"${internal_upgrade_output}"
+grep -Fq -- '--set kubectl.image.tag=internal-tag' <<<"${internal_upgrade_output}"
+grep -Fq -- '--set kubectl.image.pullPolicy=Always' <<<"${internal_upgrade_output}"
 if grep -Fq -- '--set image.registry=' <<<"${internal_upgrade_output}" || \
   grep -Fq -- '--set image.repository=' <<<"${internal_upgrade_output}" || \
   grep -Fq -- '--set kubectl.image.registry=' <<<"${internal_upgrade_output}" || \
@@ -96,3 +106,5 @@ echo 'PASS: helm-deploy parses without Go in PATH'
 echo 'PASS: helm-deploy defaults to the middleware-operator namespace'
 echo 'PASS: helm-deploy resolves shared public and internal image prefixes'
 echo 'PASS: helm-deploy passes component prefixes only as public overrides'
+echo 'PASS: Helm image names cannot be replaced from the make command line'
+echo 'PASS: kubectl tag and pull policy are passed only for internal images'

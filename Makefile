@@ -76,8 +76,8 @@ HELM_IMAGE_REGISTRY ?=
 HELM_IMAGE_REPOSITORY ?=
 HELM_KUBECTL_IMAGE_REGISTRY ?=
 HELM_KUBECTL_IMAGE_REPOSITORY ?=
-HELM_MANAGER_IMAGE_NAME := opensaola
-HELM_KUBECTL_IMAGE_NAME := kubectl
+override HELM_MANAGER_IMAGE_NAME := opensaola
+override HELM_KUBECTL_IMAGE_NAME := kubectl
 HELM_GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-')
 HELM_GIT_SHA ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null)
 HELM_GIT_TAG ?= $(shell git describe --exact-match --tags --match 'v[0-9]*' HEAD 2>/dev/null)
@@ -443,9 +443,10 @@ helm-upgrade: sync-helm-image ## Install or upgrade OpenSaola from the local Hel
 		if [ -n "$(strip $(HELM_KUBECTL_IMAGE_REPOSITORY))" ]; then \
 			kubectl_image_args+=(--set kubectl.image.repository="$(strip $(HELM_KUBECTL_IMAGE_REPOSITORY))"); \
 		fi; \
+	else \
+		kubectl_image_args+=(--set kubectl.image.tag="$(HELM_KUBECTL_IMAGE_TAG)"); \
+		kubectl_image_args+=(--set kubectl.image.pullPolicy="$(HELM_KUBECTL_IMAGE_PULL_POLICY)"); \
 	fi; \
-	kubectl_image_args+=(--set kubectl.image.tag="$(HELM_KUBECTL_IMAGE_TAG)"); \
-	kubectl_image_args+=(--set kubectl.image.pullPolicy="$(HELM_KUBECTL_IMAGE_PULL_POLICY)"); \
 	wait_args=(); \
 	if [ "$(HELM_WAIT)" = "true" ]; then \
 		wait_args+=(--wait --timeout "$(HELM_TIMEOUT)"); \

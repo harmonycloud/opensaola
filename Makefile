@@ -13,6 +13,29 @@ endif
 # scaffolded by default. However, you might want to replace it to use other
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
+SAOLA_CLI_LOCK ?= build/saola-cli.lock
+SAOLA_CLI_LOCK_HELPER ?= hack/saola-cli-lock.sh
+override SAOLA_CLI_REPOSITORY = $(shell $(SAOLA_CLI_LOCK_HELPER) get $(SAOLA_CLI_LOCK) repository 2>/dev/null)
+override SAOLA_CLI_VERSION = $(shell $(SAOLA_CLI_LOCK_HELPER) get $(SAOLA_CLI_LOCK) version 2>/dev/null)
+override SAOLA_CLI_COMMIT = $(shell $(SAOLA_CLI_LOCK_HELPER) get $(SAOLA_CLI_LOCK) commit 2>/dev/null)
+override SAOLA_CLI_SOURCE_DATE_EPOCH = $(shell $(SAOLA_CLI_LOCK_HELPER) get $(SAOLA_CLI_LOCK) source_date_epoch 2>/dev/null)
+SAOLA_CLI_CONTEXT ?=
+export SAOLA_CLI_CONTEXT
+DOCKER_PLATFORM ?= linux/amd64
+override SAOLA_CLI_BUILD_ARGS = \
+	--build-arg SAOLA_CLI_VERSION=$(SAOLA_CLI_VERSION) \
+	--build-arg SAOLA_CLI_COMMIT=$(SAOLA_CLI_COMMIT) \
+	--build-arg SAOLA_CLI_SOURCE_DATE_EPOCH=$(SAOLA_CLI_SOURCE_DATE_EPOCH)
+
+define with-saola-cli-context
+	@source_repo="$${SAOLA_CLI_CONTEXT:-../saola-cli}"; \
+	tmp_context="$$(mktemp -d "$${TMPDIR:-/tmp}/opensaola-saola-cli.XXXXXX")"; \
+	trap 'rm -rf "$$tmp_context"' EXIT; \
+	git -C "$$source_repo" cat-file -e '$(SAOLA_CLI_COMMIT)^{commit}' || { echo 'locked saola-cli commit is unavailable in source repo' >&2; exit 1; }; \
+	git -C "$$source_repo" archive '$(SAOLA_CLI_COMMIT)' | tar -x -C "$$tmp_context" || { echo 'failed to export locked saola-cli commit' >&2; exit 1; }; \
+	context="$$tmp_context"; \
+	$(1)
+endef
 
 # Setting SHELL to bash allows bash commands to be executed by recipes.
 # Options are set to exit when a recipe line exits non-zero or a piped command fails.
@@ -228,8 +251,16 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
-docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+.PHONY: saola-cli-lock-validate
+saola-cli-lock-validate:
+	@$(SAOLA_CLI_LOCK_HELPER) validate $(SAOLA_CLI_LOCK)
+
+.PHONY: docker-platform-validate
+docker-platform-validate:
+	@case '$(DOCKER_PLATFORM)' in linux/amd64|linux/arm64) ;; *) echo 'DOCKER_PLATFORM must be linux/amd64 or linux/arm64' >&2; exit 1 ;; esac
+
+docker-build: saola-cli-lock-validate docker-platform-validate ## Build docker image with the manager.
+	$(call with-saola-cli-context,$(CONTAINER_TOOL) build --build-context "saola-cli=$$context" $(SAOLA_CLI_BUILD_ARGS) --platform=$(DOCKER_PLATFORM) -t ${IMG} .)
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -241,16 +272,10 @@ docker-push: ## Push docker image with the manager.
 # - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 # - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
-PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+override PLATFORMS = linux/amd64,linux/arm64
 .PHONY: docker-buildx
-docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name opensaola-builder
-	$(CONTAINER_TOOL) buildx use opensaola-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm opensaola-builder
-	rm Dockerfile.cross
+docker-buildx: saola-cli-lock-validate ## Build and push docker image for the manager for cross-platform support
+	$(call with-saola-cli-context,$(CONTAINER_TOOL) buildx build --build-context "saola-cli=$$context" $(SAOLA_CLI_BUILD_ARGS) --push --platform=$(PLATFORMS) --tag ${IMG} .)
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.

@@ -36,6 +36,33 @@ RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${TARGETOS}/${TAR
     && chmod 0555 kubectl \
     && rm kubectl.sha256
 
+# Build the architecture-matched saola CLI from the immutable named context.
+FROM --platform=$BUILDPLATFORM golang:1.26.4 AS saola-cli-builder
+
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ARG SAOLA_CLI_VERSION
+ARG SAOLA_CLI_COMMIT
+ARG SAOLA_CLI_SOURCE_DATE_EPOCH
+
+WORKDIR /workspace/saola-cli
+
+COPY --from=saola-cli go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+COPY --from=saola-cli . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    build_date="$(date -u -d "@${SAOLA_CLI_SOURCE_DATE_EPOCH}" +%Y-%m-%dT%H:%M:%SZ)" \
+    && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+      -trimpath \
+      -ldflags="-s -w \
+        -X github.com/harmonycloud/saola-cli/internal/version.Version=${SAOLA_CLI_VERSION} \
+        -X github.com/harmonycloud/saola-cli/internal/version.GitCommit=${SAOLA_CLI_COMMIT} \
+        -X github.com/harmonycloud/saola-cli/internal/version.BuildDate=${build_date}" \
+      -o /workspace/saola ./cmd/saola/
+
 # Runtime image - minimal Alpine with necessary tools (kubectl, curl, jq, sh)
 FROM alpine:3.20
 
@@ -69,6 +96,7 @@ RUN mkdir -p /app/logs && chown 65532:65532 /app/logs
 # Copy binaries from builder
 COPY --from=builder --chown=65532:65532 --chmod=0555 /workspace/manager .
 COPY --from=builder --chown=65532:65532 --chmod=0555 /workspace/kubectl /usr/bin/kubectl
+COPY --from=saola-cli-builder --chown=65532:65532 --chmod=0555 /workspace/saola /usr/local/bin/saola
 
 # Copy only the runtime config file (not dev config)
 COPY --chown=65532:65532 pkg/config/config.yaml /app/pkg/config/config.yaml

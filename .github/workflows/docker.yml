@@ -32,12 +32,28 @@ jobs:
     name: Build and Push
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Export locked Saola CLI metadata
+        id: cli
+        run: |
+          set -euo pipefail
+          hack/saola-cli-lock.sh validate build/saola-cli.lock
+          for key in repository version commit channel source_date_epoch; do
+            value="$(hack/saola-cli-lock.sh get build/saola-cli.lock "${key}")"
+            echo "${key}=${value}" >>"${GITHUB_OUTPUT}"
+          done
+      - name: Check out locked Saola CLI source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: harmonycloud/saola-cli
+          ref: ${{ steps.cli.outputs.commit }}
+          path: .saola-cli-source
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Login to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -54,7 +70,7 @@ jobs:
           }
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ${{ steps.image.outputs.name }}
           flavor: |
@@ -67,13 +83,26 @@ jobs:
             type=ref,event=pr
             type=sha,prefix=sha-
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.ref_type == 'tag' }}
+          labels: |
+            org.opensaola.saola-cli.repository=${{ steps.cli.outputs.repository }}
+            org.opensaola.saola-cli.version=${{ steps.cli.outputs.version }}
+            org.opensaola.saola-cli.revision=${{ steps.cli.outputs.commit }}
+            org.opensaola.saola-cli.channel=${{ steps.cli.outputs.channel }}
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
+          build-contexts: |
+            saola-cli=./.saola-cli-source
+          build-args: |
+            SAOLA_CLI_VERSION=${{ steps.cli.outputs.version }}
+            SAOLA_CLI_COMMIT=${{ steps.cli.outputs.commit }}
+            SAOLA_CLI_SOURCE_DATE_EPOCH=${{ steps.cli.outputs.source_date_epoch }}
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true

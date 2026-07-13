@@ -105,6 +105,10 @@ HELM_SOURCE_KUBECTL_IMAGE_REGISTRY := $(if $(strip $(HELM_KUBECTL_IMAGE_REGISTRY
 HELM_SOURCE_KUBECTL_IMAGE_REPOSITORY := $(if $(strip $(HELM_KUBECTL_IMAGE_REPOSITORY)),$(HELM_KUBECTL_IMAGE_REPOSITORY_NORMALIZED),$(HELM_GLOBAL_IMAGE_REPOSITORY_NORMALIZED))
 HELM_TARGET_IMAGE_REGISTRY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(HELM_INTERNAL_REGISTRY_NORMALIZED),$(HELM_GLOBAL_IMAGE_REGISTRY_NORMALIZED))
 HELM_TARGET_IMAGE_REPOSITORY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(HELM_INTERNAL_REPOSITORY_NORMALIZED),$(HELM_GLOBAL_IMAGE_REPOSITORY_NORMALIZED))
+HELM_DEPLOY_IMAGE_REGISTRY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(HELM_TARGET_IMAGE_REGISTRY),$(HELM_SOURCE_IMAGE_REGISTRY))
+HELM_DEPLOY_IMAGE_REPOSITORY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(HELM_TARGET_IMAGE_REPOSITORY),$(HELM_SOURCE_IMAGE_REPOSITORY))
+HELM_DEPLOY_KUBECTL_IMAGE_REGISTRY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(HELM_TARGET_IMAGE_REGISTRY),$(HELM_SOURCE_KUBECTL_IMAGE_REGISTRY))
+HELM_DEPLOY_KUBECTL_IMAGE_REPOSITORY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(HELM_TARGET_IMAGE_REPOSITORY),$(HELM_SOURCE_KUBECTL_IMAGE_REPOSITORY))
 HELM_SOURCE_IMAGE := $(HELM_SOURCE_IMAGE_REGISTRY)/$(HELM_SOURCE_IMAGE_REPOSITORY)/$(HELM_MANAGER_IMAGE_NAME):$(HELM_IMAGE_TAG)
 HELM_TARGET_IMAGE := $(HELM_TARGET_IMAGE_REGISTRY)/$(HELM_TARGET_IMAGE_REPOSITORY)/$(HELM_MANAGER_IMAGE_NAME):$(HELM_IMAGE_TAG)
 HELM_SOURCE_KUBECTL_IMAGE := $(HELM_SOURCE_KUBECTL_IMAGE_REGISTRY)/$(HELM_SOURCE_KUBECTL_IMAGE_REPOSITORY)/$(HELM_KUBECTL_IMAGE_NAME):$(HELM_KUBECTL_IMAGE_TAG)
@@ -443,7 +447,23 @@ sync-helm-image:
 
 .PHONY: helm-upgrade
 helm-upgrade: sync-helm-image ## Install or upgrade OpenSaola from the local Helm chart.
-	@release_namespace='$(HELM_NAMESPACE)'; \
+	@if [ -z "$(HELM_DEPLOY_IMAGE_REGISTRY)" ]; then \
+		echo "Manager deployment image registry is empty after trimming whitespace and slashes." >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$(HELM_DEPLOY_IMAGE_REPOSITORY)" ]; then \
+		echo "Manager deployment image repository is empty after trimming whitespace and slashes." >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$(HELM_DEPLOY_KUBECTL_IMAGE_REGISTRY)" ]; then \
+		echo "Kubectl deployment image registry is empty after trimming whitespace and slashes." >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$(HELM_DEPLOY_KUBECTL_IMAGE_REPOSITORY)" ]; then \
+		echo "Kubectl deployment image repository is empty after trimming whitespace and slashes." >&2; \
+		exit 1; \
+	fi; \
+	release_namespace='$(HELM_NAMESPACE)'; \
 	if [ "$(HELM_AUTO_NAMESPACE)" = "true" ] && [ "$(HELM_NAMESPACE_FROM_DEFAULT)" = "true" ]; then \
 		detected_namespaces="$$( $(HELM) list -A --no-headers 2>/dev/null | awk -v release='$(HELM_RELEASE)' '$$1 == release { print $$2 }' )"; \
 		detected_count="$$(printf '%s\n' "$$detected_namespaces" | sed '/^$$/d' | wc -l | tr -d '[:space:]')"; \

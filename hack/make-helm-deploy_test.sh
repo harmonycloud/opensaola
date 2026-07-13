@@ -17,7 +17,12 @@ cat >"${minimal_path}/skopeo" <<'EOF'
 printf '%s\n' "$*" >>"${NETWORK_LOG:?}"
 exit 99
 EOF
-chmod +x "${minimal_path}/skopeo"
+cat >"${minimal_path}/helm" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${HELM_LOG:?}"
+exit 0
+EOF
+chmod +x "${minimal_path}/skopeo" "${minimal_path}/helm"
 
 if output="$(PATH="${minimal_path}" "${make_bin}" -C "${repo_root}" -n helm-deploy \
   HELM_IMAGE_TAG=test-tag 2>&1)"; then
@@ -149,6 +154,53 @@ assert_sync_validation 'internal target repository' \
   HELM_INTERNAL_REGISTRY=registry.internal \
   HELM_INTERNAL_REPOSITORY=/
 
+helm_log="${minimal_path}/helm.log"
+assert_deploy_validation() {
+  local description="$1" expected_error="$2"
+  shift 2
+  : >"${helm_log}"
+  if invalid_deploy_output="$(HELM_LOG="${helm_log}" "${make_bin}" -s -C "${repo_root}" helm-deploy \
+    HELM="${minimal_path}/helm" \
+    HELM_IMAGE_TAG=test-tag \
+    "$@" 2>&1)"; then
+    printf '%s\n' "${invalid_deploy_output}" >&2
+    cat "${helm_log}" >&2
+    echo "FAIL: slash-only ${description} was accepted by public helm-deploy" >&2
+    exit 1
+  fi
+  if ! grep -Fq "${expected_error}" <<<"${invalid_deploy_output}"; then
+    printf '%s\n' "${invalid_deploy_output}" >&2
+    echo "FAIL: ${description} deploy validation error was not precise" >&2
+    exit 1
+  fi
+  if [[ -s "${helm_log}" ]]; then
+    cat "${helm_log}" >&2
+    echo "FAIL: ${description} validation ran after helm list/upgrade" >&2
+    exit 1
+  fi
+}
+
+assert_deploy_validation 'manager image registry' \
+  'Manager deployment image registry is empty after trimming whitespace and slashes.' \
+  HELM_IMAGE_REGISTRY=' /// '
+assert_deploy_validation 'manager image repository' \
+  'Manager deployment image repository is empty after trimming whitespace and slashes.' \
+  HELM_IMAGE_REPOSITORY=' /// '
+assert_deploy_validation 'kubectl image registry' \
+  'Kubectl deployment image registry is empty after trimming whitespace and slashes.' \
+  HELM_KUBECTL_IMAGE_REGISTRY=' /// '
+assert_deploy_validation 'kubectl image repository' \
+  'Kubectl deployment image repository is empty after trimming whitespace and slashes.' \
+  HELM_KUBECTL_IMAGE_REPOSITORY=' /// '
+assert_deploy_validation 'internal shared image registry' \
+  'Manager deployment image registry is empty after trimming whitespace and slashes.' \
+  HELM_INTERNAL_REGISTRY=' /// ' \
+  HELM_INTERNAL_REPOSITORY=middleware
+assert_deploy_validation 'internal shared image repository' \
+  'Manager deployment image repository is empty after trimming whitespace and slashes.' \
+  HELM_INTERNAL_REGISTRY=registry.internal \
+  HELM_INTERNAL_REPOSITORY=' /// '
+
 default_upgrade_output="$("${make_bin}" -s -C "${repo_root}" helm-deploy \
   HELM=echo \
   HELM_AUTO_NAMESPACE=false \
@@ -209,6 +261,7 @@ echo 'PASS: helm-deploy defaults to the middleware-operator namespace'
 echo 'PASS: helm-deploy resolves shared public and internal image prefixes'
 echo 'PASS: Make image prefixes trim surrounding whitespace and slashes'
 echo 'PASS: image sync rejects an empty source before network operations'
+echo 'PASS: helm-deploy rejects slash-only component overrides before Helm access'
 echo 'PASS: helm-deploy passes component prefixes only as public overrides'
 echo 'PASS: Helm image names cannot be replaced from the make command line'
 echo 'PASS: kubectl tag and pull policy are passed only for internal images'

@@ -74,9 +74,7 @@ Each resource is driven through a state machine (`Checking → Creating → Runn
 ```bash
 helm upgrade --install opensaola ./chart/opensaola \
   --namespace opensaola-system \
-  --create-namespace \
-  --wait \
-  --timeout 5m
+  --create-namespace
 ```
 
 From a source checkout, prefer the Makefile wrapper. It uses an exact `v*` tag when the current commit is a release tag; otherwise long-lived branches (`dev`, `master`, or `main`) deploy the current commit image tag (`sha-<shortsha>`). Short-lived feature branches fall back to `dev`. Override `HELM_IMAGE_TAG` when testing another release or SHA image:
@@ -84,6 +82,8 @@ From a source checkout, prefer the Makefile wrapper. It uses an exact `v*` tag w
 ```bash
 make helm-deploy
 ```
+
+The Makefile deploy target returns after submitting the Helm release by default. Set `HELM_WAIT=true` when you want Helm to wait for resources to become ready, for example `make helm-deploy HELM_WAIT=true HELM_TIMEOUT=10m`.
 
 If `HELM_NAMESPACE` is not set explicitly, the wrapper first looks for an existing `opensaola` release across all namespaces and upgrades it in place. If no release exists, it installs into `opensaola-system`. Set `n=<namespace>` (or `HELM_NAMESPACE=<namespace>`) to force a specific namespace.
 

@@ -23,7 +23,222 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
+
+func TestHasOwnerUID(t *testing.T) {
+	tests := []struct {
+		name     string
+		refs     []metav1.OwnerReference
+		ownerUID types.UID
+		want     bool
+	}{
+		{
+			name: "matches immutable uid even when type metadata is unavailable",
+			refs: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       "demo-exporter",
+				UID:        types.UID("deployment-uid"),
+			}},
+			ownerUID: types.UID("deployment-uid"),
+			want:     true,
+		},
+		{
+			name: "rejects same name with different uid",
+			refs: []metav1.OwnerReference{{
+				Name: "demo-exporter",
+				UID:  types.UID("old-deployment-uid"),
+			}},
+			ownerUID: types.UID("new-deployment-uid"),
+			want:     false,
+		},
+		{
+			name:     "rejects empty target uid",
+			refs:     []metav1.OwnerReference{{UID: types.UID("deployment-uid")}},
+			ownerUID: "",
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasOwnerUID(tt.refs, tt.ownerUID); got != tt.want {
+				t.Fatalf("hasOwnerUID() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOwnerReferencesMatchFollowsDeploymentReplicaSetPodChainWithoutTypeMeta(t *testing.T) {
+	deployment := appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "demo-exporter",
+			UID:  types.UID("deployment-uid"),
+		},
+	}
+	replicaSet := appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "demo-exporter-abc",
+			UID:  types.UID("replicaset-uid"),
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       deployment.Name,
+				UID:        deployment.UID,
+			}},
+		},
+	}
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "demo-exporter-abc-12345",
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "ReplicaSet",
+				Name:       replicaSet.Name,
+				UID:        replicaSet.UID,
+			}},
+		},
+	}
+
+	if deployment.APIVersion != "" || deployment.Kind != "" || replicaSet.APIVersion != "" || replicaSet.Kind != "" {
+		t.Fatal("test fixture must model informer LIST objects with empty TypeMeta")
+	}
+	deploymentCandidates := []ownerCandidate{{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       deployment.Name,
+		UID:        deployment.UID,
+	}}
+	replicaSets := collectOwnedReplicaSets([]appsv1.ReplicaSet{replicaSet}, deploymentCandidates)
+	gotReplicaSet, ok := replicaSets[replicaSet.Name]
+	if !ok {
+		t.Fatal("expected ReplicaSet to match Deployment by UID")
+	}
+	podCandidates := []ownerCandidate{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       gotReplicaSet.Name,
+		UID:        gotReplicaSet.UID,
+	}}
+	pods := collectOwnedPods([]corev1.Pod{pod}, podCandidates, "demo")
+	if _, ok := pods[pod.Name]; !ok {
+		t.Fatal("expected Pod to match ReplicaSet by UID")
+	}
+}
+
+func TestOwnerReferencesMatchRejectsRecreatedOwnerWithSameIdentity(t *testing.T) {
+	refs := []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       "demo-exporter",
+		UID:        types.UID("old-deployment-uid"),
+	}}
+
+	matched, conflicted := ownerReferencesMatch(refs, ownerCandidate{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       "demo-exporter",
+		UID:        types.UID("new-deployment-uid"),
+	})
+	if matched || !conflicted {
+		t.Fatalf("expected recreated owner to conflict, got matched=%v conflicted=%v", matched, conflicted)
+	}
+}
+
+func TestOwnerReferencesMatchAllowsFallbackForDifferentOwnerIdentity(t *testing.T) {
+	refs := []metav1.OwnerReference{{
+		APIVersion: "middleware.cn/v1",
+		Kind:       "Middleware",
+		Name:       "demo",
+		UID:        types.UID("middleware-uid"),
+	}}
+
+	matched, conflicted := ownerReferencesMatch(refs, ownerCandidate{
+		APIVersion: "psmdb.percona.com/v1",
+		Kind:       "PerconaServerMongoDB",
+		Name:       "demo",
+		UID:        types.UID("psmdb-uid"),
+	})
+	if matched || conflicted {
+		t.Fatalf("expected unrelated owner identity to allow fallback, got matched=%v conflicted=%v", matched, conflicted)
+	}
+}
+
+func TestOwnerReferencesMatchPrefersMiddlewareUIDAmongBaseCandidates(t *testing.T) {
+	refs := []metav1.OwnerReference{{
+		APIVersion: "middleware.cn/v1",
+		Kind:       "Middleware",
+		Name:       "demo",
+		UID:        types.UID("middleware-uid"),
+	}}
+	candidates := []ownerCandidate{
+		{
+			APIVersion: "psmdb.percona.com/v1",
+			Kind:       "PerconaServerMongoDB",
+			Name:       "demo",
+			UID:        types.UID("psmdb-uid"),
+		},
+		{
+			APIVersion: "middleware.cn/v1",
+			Kind:       "Middleware",
+			Name:       "demo",
+			UID:        types.UID("middleware-uid"),
+		},
+	}
+
+	matched, conflicted := ownerReferencesMatch(refs, candidates...)
+	if !matched || conflicted {
+		t.Fatalf("expected Middleware UID to match among base candidates, got matched=%v conflicted=%v", matched, conflicted)
+	}
+}
+
+func TestCollectOwnedPodsRejectsConflictingUIDDespiteMatchingLabel(t *testing.T) {
+	pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:   "demo-exporter-old",
+		Labels: map[string]string{"app": "demo"},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "apps/v1",
+			Kind:       "ReplicaSet",
+			Name:       "demo-exporter",
+			UID:        types.UID("old-replicaset-uid"),
+		}},
+	}}
+	candidates := []ownerCandidate{{
+		APIVersion: "apps/v1",
+		Kind:       "ReplicaSet",
+		Name:       "demo-exporter",
+		UID:        types.UID("new-replicaset-uid"),
+	}}
+
+	if pods := collectOwnedPods([]corev1.Pod{pod}, candidates, "demo"); len(pods) != 0 {
+		t.Fatalf("expected conflicting owner UID to block label fallback, got %#v", pods)
+	}
+}
+
+func TestCollectOwnedPodsAllowsLabelFallbackForDifferentOwnerIdentity(t *testing.T) {
+	pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:   "demo-hook",
+		Labels: map[string]string{"app.kubernetes.io/instance": "demo"},
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: "batch/v1",
+			Kind:       "Job",
+			Name:       "demo-hook",
+			UID:        types.UID("job-uid"),
+		}},
+	}}
+	candidates := []ownerCandidate{{
+		APIVersion: "psmdb.percona.com/v1",
+		Kind:       "PerconaServerMongoDB",
+		Name:       "demo",
+		UID:        types.UID("psmdb-uid"),
+	}}
+
+	pods := collectOwnedPods([]corev1.Pod{pod}, candidates, "demo")
+	if _, ok := pods[pod.Name]; !ok {
+		t.Fatal("expected unrelated owner identity to preserve label fallback")
+	}
+}
 
 func TestCustomResourcesFromStatusClearsMissingReason(t *testing.T) {
 	status := []byte(`{"phase":"Running"}`)

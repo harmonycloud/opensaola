@@ -34,11 +34,82 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+func hasOwnerUID(ownerReferences []metav1.OwnerReference, ownerUID types.UID) bool {
+	if ownerUID == "" {
+		return false
+	}
+	for _, ownerReference := range ownerReferences {
+		if ownerReference.UID == ownerUID {
+			return true
+		}
+	}
+	return false
+}
+
+type ownerCandidate struct {
+	APIVersion string
+	Kind       string
+	Name       string
+	UID        types.UID
+}
+
+func ownerReferencesMatch(ownerReferences []metav1.OwnerReference, candidates ...ownerCandidate) (matched, conflicted bool) {
+	for _, candidate := range candidates {
+		if hasOwnerUID(ownerReferences, candidate.UID) {
+			return true, false
+		}
+	}
+	for _, ownerReference := range ownerReferences {
+		for _, candidate := range candidates {
+			if candidate.UID == "" || ownerReference.UID == "" || ownerReference.UID == candidate.UID {
+				continue
+			}
+			if ownerReference.APIVersion == candidate.APIVersion && ownerReference.Kind == candidate.Kind && ownerReference.Name == candidate.Name {
+				return false, true
+			}
+		}
+	}
+	return false, false
+}
+
+func collectOwnedReplicaSets(replicaSetList []appsv1.ReplicaSet, candidates []ownerCandidate) map[string]appsv1.ReplicaSet {
+	replicaSets := make(map[string]appsv1.ReplicaSet)
+	for _, replicaSet := range replicaSetList {
+		if matched, _ := ownerReferencesMatch(replicaSet.OwnerReferences, candidates...); matched {
+			replicaSets[replicaSet.Name] = replicaSet
+		}
+	}
+	return replicaSets
+}
+
+func collectOwnedPods(podList []corev1.Pod, candidates []ownerCandidate, middlewareName string) map[string]corev1.Pod {
+	pods := make(map[string]corev1.Pod)
+	for _, pod := range podList {
+		matched, conflicted := ownerReferencesMatch(pod.OwnerReferences, candidates...)
+		if matched {
+			pods[pod.Name] = pod
+			continue
+		}
+		if conflicted {
+			continue
+		}
+		for _, key := range GeneralLabelKeys {
+			if pod.GetLabels()[key] == middlewareName {
+				pods[pod.Name] = pod
+				break
+			}
+		}
+	}
+	return pods
+}
 
 func pvcBelongsToStatefulSet(pvc corev1.PersistentVolumeClaim, sts appsv1.StatefulSet) bool {
 	if !pvcNameMatchesStatefulSetClaimTemplate(pvc.Name, sts) {
@@ -195,6 +266,20 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		services     = make(map[string]corev1.Service)
 		pvcs         = make(map[string]corev1.PersistentVolumeClaim)
 	)
+	baseOwnerCandidates := []ownerCandidate{
+		{
+			APIVersion: nowCr.GetAPIVersion(),
+			Kind:       nowCr.GetKind(),
+			Name:       nowCr.GetName(),
+			UID:        nowCr.GetUID(),
+		},
+		{
+			APIVersion: v1.GroupVersion.String(),
+			Kind:       "Middleware",
+			Name:       nowMid.Name,
+			UID:        nowMid.UID,
+		},
+	}
 
 	// Get the single workload object that is the CR itself (by kind).
 	switch nowCr.GetKind() {
@@ -235,11 +320,13 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	// middleware.cn/app labels, so pre-filtering by label would miss resources.
 	statefulsetList := cache.ListStatefulSets(nowMid.Namespace)
 	for _, statefulset := range statefulsetList {
-		for _, ownerReference := range statefulset.OwnerReferences {
-			if ownerReference.Kind == nowCr.GetKind() && ownerReference.Name == nowCr.GetName() && ownerReference.APIVersion == nowCr.GetAPIVersion() {
-				statefulsets[statefulset.Name] = statefulset
-				continue
-			}
+		matched, conflicted := ownerReferencesMatch(statefulset.OwnerReferences, baseOwnerCandidates...)
+		if matched {
+			statefulsets[statefulset.Name] = statefulset
+			continue
+		}
+		if conflicted {
+			continue
 		}
 		for _, key := range GeneralLabelKeys {
 			if statefulset.GetLabels()[key] == nowMid.Name {
@@ -258,11 +345,13 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	// Deployments — list from local cache, filter by ownerRef or label.
 	deploymentList := cache.ListDeployments(nowMid.Namespace)
 	for _, deployment := range deploymentList {
-		for _, ownerReference := range deployment.OwnerReferences {
-			if ownerReference.Kind == nowCr.GetKind() && ownerReference.Name == nowCr.GetName() && ownerReference.APIVersion == nowCr.GetAPIVersion() {
-				deployments[deployment.Name] = deployment
-				continue
-			}
+		matched, conflicted := ownerReferencesMatch(deployment.OwnerReferences, baseOwnerCandidates...)
+		if matched {
+			deployments[deployment.Name] = deployment
+			continue
+		}
+		if conflicted {
+			continue
 		}
 		for _, key := range GeneralLabelKeys {
 			if deployment.GetLabels()[key] == nowMid.Name {
@@ -281,11 +370,13 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	// DaemonSets — list from local cache, filter by ownerRef or label.
 	daemonsetList := cache.ListDaemonSets(nowMid.Namespace)
 	for _, daemonset := range daemonsetList {
-		for _, ownerReference := range daemonset.OwnerReferences {
-			if ownerReference.Kind == nowCr.GetKind() && ownerReference.Name == nowCr.GetName() && ownerReference.APIVersion == nowCr.GetAPIVersion() {
-				daemonsets[daemonset.Name] = daemonset
-				continue
-			}
+		matched, conflicted := ownerReferencesMatch(daemonset.OwnerReferences, baseOwnerCandidates...)
+		if matched {
+			daemonsets[daemonset.Name] = daemonset
+			continue
+		}
+		if conflicted {
+			continue
 		}
 		for _, key := range GeneralLabelKeys {
 			if daemonset.GetLabels()[key] == nowMid.Name {
@@ -302,51 +393,49 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	}
 
 	// ReplicaSets — list from local cache, filter by ownerRef to known deployments.
+	deploymentOwnerCandidates := make([]ownerCandidate, 0, len(deployments))
+	for _, deployment := range deployments {
+		deploymentOwnerCandidates = append(deploymentOwnerCandidates, ownerCandidate{
+			APIVersion: appsv1.SchemeGroupVersion.String(),
+			Kind:       "Deployment",
+			Name:       deployment.Name,
+			UID:        deployment.UID,
+		})
+	}
 	replicaSetList := cache.ListReplicaSets(nowMid.Namespace)
-	for _, replicaSet := range replicaSetList {
-		for _, ownerReference := range replicaSet.OwnerReferences {
-			for _, deployment := range deployments {
-				if ownerReference.Kind == deployment.Kind && ownerReference.Name == deployment.GetName() && ownerReference.APIVersion == deployment.APIVersion {
-					replicaSets[replicaSet.Name] = replicaSet
-					break
-				}
-			}
-		}
+	for name, replicaSet := range collectOwnedReplicaSets(replicaSetList, deploymentOwnerCandidates) {
+		replicaSets[name] = replicaSet
 	}
 
 	// Pods — list from local cache, filter by ownerRef or label.
+	podOwnerCandidates := append([]ownerCandidate{}, baseOwnerCandidates...)
+	for _, replicaSet := range replicaSets {
+		podOwnerCandidates = append(podOwnerCandidates, ownerCandidate{
+			APIVersion: appsv1.SchemeGroupVersion.String(),
+			Kind:       "ReplicaSet",
+			Name:       replicaSet.Name,
+			UID:        replicaSet.UID,
+		})
+	}
+	for _, statefulset := range statefulsets {
+		podOwnerCandidates = append(podOwnerCandidates, ownerCandidate{
+			APIVersion: appsv1.SchemeGroupVersion.String(),
+			Kind:       "StatefulSet",
+			Name:       statefulset.Name,
+			UID:        statefulset.UID,
+		})
+	}
+	for _, daemonset := range daemonsets {
+		podOwnerCandidates = append(podOwnerCandidates, ownerCandidate{
+			APIVersion: appsv1.SchemeGroupVersion.String(),
+			Kind:       "DaemonSet",
+			Name:       daemonset.Name,
+			UID:        daemonset.UID,
+		})
+	}
 	podList := cache.ListPods(nowMid.Namespace)
-	for _, pod := range podList {
-		for _, ownerReference := range pod.OwnerReferences {
-			if ownerReference.Kind == nowCr.GetKind() && ownerReference.Name == nowCr.GetName() && ownerReference.APIVersion == nowCr.GetAPIVersion() {
-				pods[pod.Name] = pod
-				continue
-			}
-			for _, replicaSet := range replicaSets {
-				if ownerReference.Kind == replicaSet.Kind && ownerReference.Name == replicaSet.GetName() && ownerReference.APIVersion == replicaSet.APIVersion {
-					pods[pod.Name] = pod
-					break
-				}
-			}
-			for _, statefulset := range statefulsets {
-				if ownerReference.Kind == statefulset.Kind && ownerReference.Name == statefulset.GetName() && ownerReference.APIVersion == statefulset.APIVersion {
-					pods[pod.Name] = pod
-					break
-				}
-			}
-			for _, daemonset := range daemonsets {
-				if ownerReference.Kind == daemonset.Kind && ownerReference.Name == daemonset.GetName() && ownerReference.APIVersion == daemonset.APIVersion {
-					pods[pod.Name] = pod
-					break
-				}
-			}
-		}
-		for _, key := range GeneralLabelKeys {
-			if pod.GetLabels()[key] == nowMid.Name {
-				pods[pod.Name] = pod
-				continue
-			}
-		}
+	for name, pod := range collectOwnedPods(podList, podOwnerCandidates, nowMid.Name) {
+		pods[name] = pod
 	}
 	var podsPvcNameList []string
 	nowMid.Status.CustomResources.Include.Pods = []v1.IncludeModel{}
@@ -364,11 +453,13 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	// Services — list from local cache, filter by ownerRef or label.
 	serviceList := cache.ListServices(nowMid.Namespace)
 	for _, service := range serviceList {
-		for _, ownerReference := range service.OwnerReferences {
-			if ownerReference.Kind == nowCr.GetKind() && ownerReference.Name == nowCr.GetName() && ownerReference.APIVersion == nowCr.GetAPIVersion() {
-				services[service.Name] = service
-				continue
-			}
+		matched, conflicted := ownerReferencesMatch(service.OwnerReferences, baseOwnerCandidates...)
+		if matched {
+			services[service.Name] = service
+			continue
+		}
+		if conflicted {
+			continue
 		}
 		for _, key := range GeneralLabelKeys {
 			if service.GetLabels()[key] == nowMid.Name {
@@ -392,11 +483,13 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	// PVCs — list from local cache, filter by ownerRef, label, StatefulSet claim template labels, or pod volume claim name.
 	pvcList := cache.ListPVCs(nowMid.Namespace)
 	for _, pvc := range pvcList {
-		for _, ownerReference := range pvc.OwnerReferences {
-			if ownerReference.Kind == nowCr.GetKind() && ownerReference.Name == nowCr.GetName() && ownerReference.APIVersion == nowCr.GetAPIVersion() {
-				pvcs[pvc.Name] = pvc
-				continue
-			}
+		matched, conflicted := ownerReferencesMatch(pvc.OwnerReferences, baseOwnerCandidates...)
+		if matched {
+			pvcs[pvc.Name] = pvc
+			continue
+		}
+		if conflicted {
+			continue
 		}
 		for _, key := range GeneralLabelKeys {
 			if pvc.GetLabels()[key] == nowMid.Name {

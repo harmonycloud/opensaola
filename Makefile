@@ -70,8 +70,14 @@ HELM_NAMESPACE_FROM_DEFAULT := $(if $(filter file,$(origin HELM_NAMESPACE)),$(if
 HELM_CHART ?= chart/opensaola
 HELM_WAIT ?= false
 HELM_TIMEOUT ?= 5m
-HELM_IMAGE_REGISTRY ?= ghcr.io
-HELM_IMAGE_REPOSITORY ?= harmonycloud/opensaola
+HELM_GLOBAL_IMAGE_REGISTRY ?= ghcr.io
+HELM_GLOBAL_IMAGE_REPOSITORY ?= harmonycloud
+HELM_IMAGE_REGISTRY ?=
+HELM_IMAGE_REPOSITORY ?=
+HELM_KUBECTL_IMAGE_REGISTRY ?=
+HELM_KUBECTL_IMAGE_REPOSITORY ?=
+HELM_MANAGER_IMAGE_NAME := opensaola
+HELM_KUBECTL_IMAGE_NAME := kubectl
 HELM_GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '-')
 HELM_GIT_SHA ?= $(shell git rev-parse --short=7 HEAD 2>/dev/null)
 HELM_GIT_TAG ?= $(shell git describe --exact-match --tags --match 'v[0-9]*' HEAD 2>/dev/null)
@@ -79,21 +85,19 @@ HELM_IMAGE_TAG ?= $(if $(HELM_GIT_TAG),$(HELM_GIT_TAG),$(if $(filter dev master 
 HELM_IMAGE_PULL_POLICY ?= $(if $(filter dev master main latest,$(HELM_IMAGE_TAG)),Always,IfNotPresent)
 HELM_INTERNAL_REGISTRY ?=
 HELM_INTERNAL_REPOSITORY ?=
-HELM_INTERNAL_PROJECT := $(patsubst %/,%,$(dir $(strip $(HELM_INTERNAL_REPOSITORY))))
-HELM_INTERNAL_KUBECTL_REPOSITORY ?= $(if $(filter .,$(HELM_INTERNAL_PROJECT)),kubectl,$(HELM_INTERNAL_PROJECT)/kubectl)
-HELM_KUBECTL_IMAGE_REGISTRY ?= ghcr.io
-HELM_KUBECTL_IMAGE_REPOSITORY ?= harmonycloud/kubectl
 HELM_KUBECTL_IMAGE_TAG ?= v1.30.14
 HELM_KUBECTL_IMAGE_PULL_POLICY ?= IfNotPresent
 HELM_USE_INTERNAL_IMAGE := $(if $(and $(strip $(HELM_INTERNAL_REGISTRY)),$(strip $(HELM_INTERNAL_REPOSITORY))),true,false)
-HELM_TARGET_IMAGE_REGISTRY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(strip $(HELM_INTERNAL_REGISTRY)),$(HELM_IMAGE_REGISTRY))
-HELM_TARGET_IMAGE_REPOSITORY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(strip $(HELM_INTERNAL_REPOSITORY)),$(HELM_IMAGE_REPOSITORY))
-HELM_SOURCE_IMAGE := $(HELM_IMAGE_REGISTRY)/$(HELM_IMAGE_REPOSITORY):$(HELM_IMAGE_TAG)
-HELM_TARGET_IMAGE := $(HELM_TARGET_IMAGE_REGISTRY)/$(HELM_TARGET_IMAGE_REPOSITORY):$(HELM_IMAGE_TAG)
-HELM_TARGET_KUBECTL_IMAGE_REGISTRY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(strip $(HELM_INTERNAL_REGISTRY)),$(HELM_KUBECTL_IMAGE_REGISTRY))
-HELM_TARGET_KUBECTL_IMAGE_REPOSITORY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(HELM_INTERNAL_KUBECTL_REPOSITORY),$(HELM_KUBECTL_IMAGE_REPOSITORY))
-HELM_SOURCE_KUBECTL_IMAGE := $(HELM_KUBECTL_IMAGE_REGISTRY)/$(HELM_KUBECTL_IMAGE_REPOSITORY):$(HELM_KUBECTL_IMAGE_TAG)
-HELM_TARGET_KUBECTL_IMAGE := $(HELM_TARGET_KUBECTL_IMAGE_REGISTRY)/$(HELM_TARGET_KUBECTL_IMAGE_REPOSITORY):$(HELM_KUBECTL_IMAGE_TAG)
+HELM_SOURCE_IMAGE_REGISTRY := $(if $(strip $(HELM_IMAGE_REGISTRY)),$(strip $(HELM_IMAGE_REGISTRY)),$(strip $(HELM_GLOBAL_IMAGE_REGISTRY)))
+HELM_SOURCE_IMAGE_REPOSITORY := $(if $(strip $(HELM_IMAGE_REPOSITORY)),$(strip $(HELM_IMAGE_REPOSITORY)),$(strip $(HELM_GLOBAL_IMAGE_REPOSITORY)))
+HELM_SOURCE_KUBECTL_IMAGE_REGISTRY := $(if $(strip $(HELM_KUBECTL_IMAGE_REGISTRY)),$(strip $(HELM_KUBECTL_IMAGE_REGISTRY)),$(strip $(HELM_GLOBAL_IMAGE_REGISTRY)))
+HELM_SOURCE_KUBECTL_IMAGE_REPOSITORY := $(if $(strip $(HELM_KUBECTL_IMAGE_REPOSITORY)),$(strip $(HELM_KUBECTL_IMAGE_REPOSITORY)),$(strip $(HELM_GLOBAL_IMAGE_REPOSITORY)))
+HELM_TARGET_IMAGE_REGISTRY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(strip $(HELM_INTERNAL_REGISTRY)),$(strip $(HELM_GLOBAL_IMAGE_REGISTRY)))
+HELM_TARGET_IMAGE_REPOSITORY := $(if $(filter true,$(HELM_USE_INTERNAL_IMAGE)),$(strip $(HELM_INTERNAL_REPOSITORY)),$(strip $(HELM_GLOBAL_IMAGE_REPOSITORY)))
+HELM_SOURCE_IMAGE := $(HELM_SOURCE_IMAGE_REGISTRY)/$(HELM_SOURCE_IMAGE_REPOSITORY)/$(HELM_MANAGER_IMAGE_NAME):$(HELM_IMAGE_TAG)
+HELM_TARGET_IMAGE := $(HELM_TARGET_IMAGE_REGISTRY)/$(HELM_TARGET_IMAGE_REPOSITORY)/$(HELM_MANAGER_IMAGE_NAME):$(HELM_IMAGE_TAG)
+HELM_SOURCE_KUBECTL_IMAGE := $(HELM_SOURCE_KUBECTL_IMAGE_REGISTRY)/$(HELM_SOURCE_KUBECTL_IMAGE_REPOSITORY)/$(HELM_KUBECTL_IMAGE_NAME):$(HELM_KUBECTL_IMAGE_TAG)
+HELM_TARGET_KUBECTL_IMAGE := $(HELM_TARGET_IMAGE_REGISTRY)/$(HELM_TARGET_IMAGE_REPOSITORY)/$(HELM_KUBECTL_IMAGE_NAME):$(HELM_KUBECTL_IMAGE_TAG)
 HELM_SYNC_IMAGE ?= false
 HELM_SYNC_MULTI_ARCH ?= true
 HELM_REQUIRE_INTERNAL_IMAGE ?= false
@@ -326,8 +330,12 @@ helm-package: ## Package the OpenSaola Helm chart into dist/charts/.
 verify-chart-crds: ## Verify Helm chart CRDs match generated CRDs.
 	@diff -qr config/crd/bases chart/opensaola/files/crds
 
+.PHONY: test-helm-images
+test-helm-images: ## Test Helm image prefix resolution.
+	bash hack/helm-image-resolution_test.sh
+
 .PHONY: helm-check
-helm-check: helm-lint helm-template helm-package verify-chart-crds ## Run all Helm chart checks.
+helm-check: helm-lint helm-template helm-package verify-chart-crds test-helm-images ## Run all Helm chart checks.
 
 .PHONY: helm-deploy
 helm-deploy: helm-upgrade ## Install or upgrade OpenSaola from the local Helm chart.
@@ -420,13 +428,24 @@ helm-upgrade: sync-helm-image ## Install or upgrade OpenSaola from the local Hel
 	if [ -n "$(HELM_IMAGE_TAG)" ] && [ "$(HELM_IMAGE_TAG)" != "HEAD" ]; then \
 		tag_args+=(--set image.tag="$(HELM_IMAGE_TAG)"); \
 	fi; \
+	manager_image_args=(); \
 	kubectl_image_args=(); \
-	if [ "$(HELM_USE_INTERNAL_IMAGE)" = "true" ]; then \
-		kubectl_image_args+=(--set kubectl.image.registry="$(HELM_TARGET_KUBECTL_IMAGE_REGISTRY)"); \
-		kubectl_image_args+=(--set kubectl.image.repository="$(HELM_TARGET_KUBECTL_IMAGE_REPOSITORY)"); \
-		kubectl_image_args+=(--set kubectl.image.tag="$(HELM_KUBECTL_IMAGE_TAG)"); \
-		kubectl_image_args+=(--set kubectl.image.pullPolicy="$(HELM_KUBECTL_IMAGE_PULL_POLICY)"); \
+	if [ "$(HELM_USE_INTERNAL_IMAGE)" != "true" ]; then \
+		if [ -n "$(strip $(HELM_IMAGE_REGISTRY))" ]; then \
+			manager_image_args+=(--set image.registry="$(strip $(HELM_IMAGE_REGISTRY))"); \
+		fi; \
+		if [ -n "$(strip $(HELM_IMAGE_REPOSITORY))" ]; then \
+			manager_image_args+=(--set image.repository="$(strip $(HELM_IMAGE_REPOSITORY))"); \
+		fi; \
+		if [ -n "$(strip $(HELM_KUBECTL_IMAGE_REGISTRY))" ]; then \
+			kubectl_image_args+=(--set kubectl.image.registry="$(strip $(HELM_KUBECTL_IMAGE_REGISTRY))"); \
+		fi; \
+		if [ -n "$(strip $(HELM_KUBECTL_IMAGE_REPOSITORY))" ]; then \
+			kubectl_image_args+=(--set kubectl.image.repository="$(strip $(HELM_KUBECTL_IMAGE_REPOSITORY))"); \
+		fi; \
 	fi; \
+	kubectl_image_args+=(--set kubectl.image.tag="$(HELM_KUBECTL_IMAGE_TAG)"); \
+	kubectl_image_args+=(--set kubectl.image.pullPolicy="$(HELM_KUBECTL_IMAGE_PULL_POLICY)"); \
 	wait_args=(); \
 	if [ "$(HELM_WAIT)" = "true" ]; then \
 		wait_args+=(--wait --timeout "$(HELM_TIMEOUT)"); \
@@ -434,10 +453,11 @@ helm-upgrade: sync-helm-image ## Install or upgrade OpenSaola from the local Hel
 	$(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART) \
 		--namespace "$$release_namespace" \
 		--create-namespace \
-		--set image.registry="$(HELM_TARGET_IMAGE_REGISTRY)" \
-		--set image.repository="$(HELM_TARGET_IMAGE_REPOSITORY)" \
+		--set global.registry="$(HELM_TARGET_IMAGE_REGISTRY)" \
+		--set global.repository="$(HELM_TARGET_IMAGE_REPOSITORY)" \
 		--set image.pullPolicy="$(HELM_IMAGE_PULL_POLICY)" \
 		"$${tag_args[@]}" \
+		"$${manager_image_args[@]}" \
 		"$${kubectl_image_args[@]}" \
 		"$${wait_args[@]}" \
 		$(HELM_EXTRA_ARGS)

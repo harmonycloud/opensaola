@@ -71,11 +71,15 @@ assert_rejected "${bad_dev_version}"
 stable_lock="${tmp_dir}/stable.lock"
 write_lock "${stable_lock}" \
   'repository=harmonycloud/saola-cli' \
-  'version=v1.2.3-rc.1' \
+  'version=v1.2.3' \
   "commit=${commit}" \
   'channel=stable' \
   'source_date_epoch=1782812176'
 "${helper}" validate "${stable_lock}"
+
+stable_prerelease="${tmp_dir}/stable-prerelease.lock"
+sed 's/^version=.*/version=v1.2.3-rc.1/' "${stable_lock}" >"${stable_prerelease}"
+assert_rejected "${stable_prerelease}"
 
 bad_stable_version="${tmp_dir}/bad-stable-version.lock"
 sed 's/^version=.*/version=dev-dfe685bacbeb/' "${stable_lock}" >"${bad_stable_version}"
@@ -109,13 +113,41 @@ fi
 [[ ! -e "${tmp_dir}/touch-pwned" ]] || fail 'get key was executed'
 
 repo_root="$(cd "${script_dir}/.." && pwd)"
+dev_lock_file="${repo_root}/build/saola-cli-dev.lock"
+stable_lock_file="${repo_root}/build/saola-cli-stable.lock"
+stable_candidate_file="${repo_root}/build/saola-cli-stable-candidate.lock"
+[[ -f "${dev_lock_file}" ]] || fail 'missing dedicated dev lock'
+[[ ! -e "${repo_root}/build/saola-cli.lock" ]] || fail 'legacy shared lock still exists'
+"${helper}" validate "${dev_lock_file}"
+[[ "$("${helper}" get "${dev_lock_file}" channel)" = dev ]] || fail 'dev lock channel is not dev'
+build_version="$("${helper}" get "${dev_lock_file}" version)"
+build_commit="$("${helper}" get "${dev_lock_file}" commit)"
+build_epoch="$("${helper}" get "${dev_lock_file}" source_date_epoch)"
+grep -Eq '^SAOLA_CLI_LOCK \?= build/saola-cli-\$\(SAOLA_CLI_CHANNEL\)\.lock$' "${repo_root}/Makefile" || fail 'Makefile does not select a channel-specific lock'
+[[ ! -e "${stable_lock_file}" ]] || {
+  "${helper}" validate "${stable_lock_file}"
+  [[ "$("${helper}" get "${stable_lock_file}" channel)" = stable ]] || fail 'stable lock channel is not stable'
+}
+[[ ! -e "${stable_candidate_file}" ]] || {
+  "${helper}" validate "${stable_candidate_file}"
+  [[ "$("${helper}" get "${stable_candidate_file}" channel)" = stable ]] || fail 'stable candidate lock channel is not stable'
+}
+common_dir="$(git -C "${repo_root}" rev-parse --path-format=absolute --git-common-dir)"
+main_repo_root="$(cd "${common_dir}/.." && pwd)"
+test_source_repo="${SAOLA_CLI_TEST_REPOSITORY:-$(dirname "${main_repo_root}")/saola-cli}"
+if ! git -C "${test_source_repo}" cat-file -e "${build_commit}^{commit}" 2>/dev/null; then
+  test_source_repo="${tmp_dir}/saola-cli-source"
+  git -C "${test_source_repo}" init -q
+  git -C "${test_source_repo}" remote add origin https://github.com/harmonycloud/saola-cli.git
+  git -C "${test_source_repo}" fetch -q --depth=1 origin "${build_commit}"
+fi
 docker_build_output="$(TMPDIR="${tmp_dir}" make -s -C "${repo_root}" docker-build CONTAINER_TOOL=echo IMG=controller:test)"
 [[ "${docker_build_output}" != *'git#'* ]] || fail 'docker-build still uses an unusable remote git#SHA context'
 docker_build_context="$(sed -n 's/.*--build-context saola-cli=\([^ ]*\).*/\1/p' <<<"${docker_build_output}")"
 [[ "${docker_build_context}" == /* ]] || fail 'docker-build default context is not an absolute temporary local directory'
 [[ ! -e "${docker_build_context}" ]] || fail 'docker-build temporary context was not cleaned after success'
-[[ "${docker_build_output}" == *"--build-arg SAOLA_CLI_VERSION=dev-dfe685bacbeb"* ]] || fail 'docker-build is missing the locked CLI version'
-[[ "${docker_build_output}" == *"--build-arg SAOLA_CLI_COMMIT=${commit}"* ]] || fail 'docker-build is missing the locked CLI commit'
+[[ "${docker_build_output}" == *"--build-arg SAOLA_CLI_VERSION=${build_version}"* ]] || fail 'docker-build is missing the locked CLI version'
+[[ "${docker_build_output}" == *"--build-arg SAOLA_CLI_COMMIT=${build_commit}"* ]] || fail 'docker-build is missing the locked CLI commit'
 [[ "${docker_build_output}" == *'--platform=linux/amd64'* ]] || fail 'docker-build default platform is not linux/amd64'
 if make -s -C "${repo_root}" docker-build CONTAINER_TOOL=echo IMG=controller:test DOCKER_PLATFORM=linux/s390x >/dev/null 2>&1; then
   fail 'docker-build accepted an unsupported platform'
@@ -136,16 +168,16 @@ override_output="$(make -s -C "${repo_root}" docker-build CONTAINER_TOOL=echo IM
   SAOLA_CLI_SOURCE_DATE_EPOCH=1 \
   'SAOLA_CLI_BUILD_ARGS=--build-arg PWNED=true')"
 [[ "${override_output}" != *'attacker/saola-cli'* && "${override_output}" != *'git#'* ]] || fail 'command line overrode the lock-derived repository or selected a remote context'
-[[ "${override_output}" == *'--build-arg SAOLA_CLI_VERSION=dev-dfe685bacbeb'* ]] || fail 'command line overrode the lock-derived version'
-[[ "${override_output}" == *"--build-arg SAOLA_CLI_COMMIT=${commit}"* ]] || fail 'command line overrode the lock-derived commit build arg'
-[[ "${override_output}" == *'--build-arg SAOLA_CLI_SOURCE_DATE_EPOCH=1782812176'* ]] || fail 'command line overrode the lock-derived source epoch'
+[[ "${override_output}" == *"--build-arg SAOLA_CLI_VERSION=${build_version}"* ]] || fail 'command line overrode the lock-derived version'
+[[ "${override_output}" == *"--build-arg SAOLA_CLI_COMMIT=${build_commit}"* ]] || fail 'command line overrode the lock-derived commit build arg'
+[[ "${override_output}" == *"--build-arg SAOLA_CLI_SOURCE_DATE_EPOCH=${build_epoch}"* ]] || fail 'command line overrode the lock-derived source epoch'
 [[ "${override_output}" != *'PWNED=true'* ]] || fail 'command line overrode SAOLA_CLI_BUILD_ARGS'
 
-local_context_output="$(make -s -C "${repo_root}" docker-build CONTAINER_TOOL=echo IMG=controller:test SAOLA_CLI_CONTEXT=../saola-cli)"
-[[ "${local_context_output}" != *'--build-context saola-cli=../saola-cli'* ]] || fail 'explicit SAOLA_CLI_CONTEXT was passed through without a clean archive'
+local_context_output="$(make -s -C "${repo_root}" docker-build CONTAINER_TOOL=echo IMG=controller:test SAOLA_CLI_CONTEXT="${test_source_repo}")"
+[[ "${local_context_output}" != *"--build-context saola-cli=${test_source_repo}"* ]] || fail 'explicit SAOLA_CLI_CONTEXT was passed through without a clean archive'
 local_build_context="$(sed -n 's/.*--build-context saola-cli=\([^ ]*\).*/\1/p' <<<"${local_context_output}")"
 [[ "${local_build_context}" == /* && ! -e "${local_build_context}" ]] || fail 'explicit source repo did not use a cleaned temporary archive'
-[[ "${local_context_output}" == *"--build-arg SAOLA_CLI_COMMIT=${commit}"* ]] || fail 'local context override changed the locked commit metadata'
+[[ "${local_context_output}" == *"--build-arg SAOLA_CLI_COMMIT=${build_commit}"* ]] || fail 'local context override changed the locked commit metadata'
 
 platform_override_output="$(make -s -C "${repo_root}" docker-buildx CONTAINER_TOOL=echo IMG=controller:test PLATFORMS=linux/s390x)"
 [[ "${platform_override_output}" == *'--platform=linux/amd64,linux/arm64'* ]] || fail 'command line overrode the fixed buildx platforms'
@@ -177,24 +209,24 @@ printf 'INSPECTED_CONTEXT=%s\n' "${context}"
 EOF
 chmod +x "${inspector}"
 
-inspected_output="$(EXPECTED_REPOSITORY="${repo_root}/../saola-cli" EXPECTED_COMMIT="${commit}" TMPDIR="${tmp_dir}" \
+inspected_output="$(EXPECTED_REPOSITORY="${test_source_repo}" EXPECTED_COMMIT="${build_commit}" TMPDIR="${tmp_dir}" \
   make -s -C "${repo_root}" docker-build CONTAINER_TOOL="${inspector}" IMG=controller:test)"
 inspected_context="${inspected_output#INSPECTED_CONTEXT=}"
 [[ "${inspected_context}" == /* ]] || fail 'inspector did not receive an absolute temporary local context'
 [[ ! -e "${inspected_context}" ]] || fail 'inspected docker-build context was not cleaned'
 
-inspected_buildx_output="$(EXPECTED_REPOSITORY="${repo_root}/../saola-cli" EXPECTED_COMMIT="${commit}" TMPDIR="${tmp_dir}" \
+inspected_buildx_output="$(EXPECTED_REPOSITORY="${test_source_repo}" EXPECTED_COMMIT="${build_commit}" TMPDIR="${tmp_dir}" \
   make -s -C "${repo_root}" docker-buildx CONTAINER_TOOL="${inspector}" IMG=controller:test)"
 inspected_buildx_context="${inspected_buildx_output#INSPECTED_CONTEXT=}"
 [[ ! -e "${inspected_buildx_context}" ]] || fail 'inspected docker-buildx context was not cleaned'
 
-inspected_explicit_output="$(EXPECTED_REPOSITORY="${repo_root}/../saola-cli" EXPECTED_COMMIT="${commit}" TMPDIR="${tmp_dir}" \
-  make -s -C "${repo_root}" docker-build CONTAINER_TOOL="${inspector}" IMG=controller:test SAOLA_CLI_CONTEXT=../saola-cli)"
+inspected_explicit_output="$(EXPECTED_REPOSITORY="${test_source_repo}" EXPECTED_COMMIT="${build_commit}" TMPDIR="${tmp_dir}" \
+  make -s -C "${repo_root}" docker-build CONTAINER_TOOL="${inspector}" IMG=controller:test SAOLA_CLI_CONTEXT="${test_source_repo}")"
 inspected_explicit_context="${inspected_explicit_output#INSPECTED_CONTEXT=}"
 [[ "${inspected_explicit_context}" == "${tmp_dir}"/opensaola-saola-cli.* ]] || fail 'explicit source repo did not produce a temporary archive context'
 [[ ! -e "${inspected_explicit_context}" ]] || fail 'explicit source repo archive was not cleaned'
 
-if failed_output="$(EXPECTED_REPOSITORY="${repo_root}/../saola-cli" EXPECTED_COMMIT="${commit}" FAIL_AFTER_INSPECT=true TMPDIR="${tmp_dir}" \
+if failed_output="$(EXPECTED_REPOSITORY="${test_source_repo}" EXPECTED_COMMIT="${build_commit}" FAIL_AFTER_INSPECT=true TMPDIR="${tmp_dir}" \
   make -s -C "${repo_root}" docker-build CONTAINER_TOOL="${inspector}" IMG=controller:test 2>&1)"; then
   fail 'expected fake container failure'
 fi
@@ -225,6 +257,11 @@ if compgen -G "${tmp_dir}/opensaola-saola-cli.*" >/dev/null; then
 fi
 
 dockerfile="${repo_root}/Dockerfile"
+[[ "$(grep -Ec '^ARG TARGETOS$' "${dockerfile}")" -eq 2 ]] || fail 'Dockerfile does not use BuildKit TARGETOS for both builders'
+[[ "$(grep -Ec '^ARG TARGETARCH$' "${dockerfile}")" -eq 2 ]] || fail 'Dockerfile does not use BuildKit TARGETARCH for both builders'
+if grep -Eq '^ARG TARGET(OS|ARCH)=' "${dockerfile}"; then
+  fail 'Dockerfile overrides automatic BuildKit target platform arguments'
+fi
 cli_stage_line="$(grep -n '^FROM .* AS saola-cli-builder$' "${dockerfile}" | cut -d: -f1)"
 kubectl_download_line="$(grep -n '^RUN curl -LO ' "${dockerfile}" | cut -d: -f1)"
 [[ -n "${cli_stage_line}" && -n "${kubectl_download_line}" && "${cli_stage_line}" -gt "${kubectl_download_line}" ]] || fail 'saola-cli stage interrupts the manager/kubectl builder stage'
@@ -248,6 +285,7 @@ assert_workflow_excludes() {
 update_workflow="${repo_root}/.github/workflows/saola-cli-update.yml"
 promote_workflow="${repo_root}/.github/workflows/saola-cli-promote.yml"
 docker_workflow="${repo_root}/.github/workflows/docker.yml"
+helm_workflow="${repo_root}/.github/workflows/helm-chart.yml"
 
 [[ -f "${update_workflow}" ]] || fail 'missing saola-cli update workflow'
 assert_workflow_contains "${update_workflow}" 'update workflow does not accept both dispatch event types' 'types:.*saola-cli-dev.*saola-cli-stable'
@@ -277,6 +315,7 @@ assert_workflow_contains "${update_workflow}" 'stable event is not bound to its 
 assert_workflow_contains "${update_workflow}" 'stable tag is not peeled before commit comparison' '\^\{\}'
 assert_workflow_contains "${update_workflow}" 'stable event does not query GitHub Releases' 'repos/.*/releases\?per_page='
 assert_workflow_contains "${update_workflow}" 'stable event does not reject draft releases' 'draft.*false'
+assert_workflow_contains "${update_workflow}" 'stable event does not reject prereleases' 'prerelease.*false'
 assert_workflow_contains "${update_workflow}" 'stable event is not gated on the latest published release' 'published_at.*max_by|max_by.*published_at'
 assert_workflow_contains "${update_workflow}" 'update runs are not globally serialized for dev' 'group: saola-cli-update-dev'
 assert_workflow_contains "${update_workflow}" 'update workflow does not refresh the dev baseline before branching' 'fetch origin dev'
@@ -284,12 +323,26 @@ assert_workflow_contains "${update_workflow}" 'update workflow does not rebuild 
 assert_workflow_contains "${update_workflow}" 'update workflow does not generate release checksums' 'release-build release-checksums'
 assert_workflow_contains "${update_workflow}" 'update workflow does not compare the rebuilt amd64 checksum' 'actual_amd64.*CLI_AMD64_SHA256'
 assert_workflow_contains "${update_workflow}" 'update workflow does not compare the rebuilt arm64 checksum' 'actual_arm64.*CLI_ARM64_SHA256'
-assert_workflow_contains "${update_workflow}" 'update workflow does not validate the lock it writes' 'saola-cli-lock\.sh.*validate'
+assert_workflow_contains "${update_workflow}" 'update workflow does not validate generated lock fields inline' 'grep -Fxq.*candidate_lock'
+assert_workflow_contains "${update_workflow}" 'update workflow does not verify the copied lock byte-for-byte' 'cmp -s.*candidate_lock.*lock_path'
+assert_workflow_contains "${update_workflow}" 'dev updates do not target the dedicated dev lock' 'build/saola-cli-dev\.lock'
+assert_workflow_contains "${update_workflow}" 'stable updates do not target the dedicated candidate lock' 'build/saola-cli-stable-candidate\.lock'
+assert_workflow_excludes "${update_workflow}" 'stable update can write the promoted master lock' "stable\) lock_path='build/saola-cli-stable\.lock'"
 assert_workflow_contains "${update_workflow}" 'stable update PR label contract is missing' 'automation:saola-cli-stable'
 assert_workflow_contains "${update_workflow}" 'update workflow does not use concurrency' '^concurrency:'
 assert_workflow_contains "${update_workflow}" 'update workflow does not target dev' '(--base|base:) dev'
 assert_workflow_contains "${update_workflow}" 'update workflow does not enable auto-merge' 'pr merge.*--auto.*--squash'
 assert_workflow_excludes "${update_workflow}" 'update workflow directly pushes a protected branch' 'git push[^#]*(origin )?(dev|master)([[:space:]]|$)'
+update_job="$(sed -n '/^  update-dev:/,$p' "${update_workflow}")"
+[[ "${update_job}" != *'AUTOMATION_TOKEN: ${{ secrets.OPENSAOLA_AUTOMATION_TOKEN }}'* ]] || fail 'automation token is exposed at update-dev job scope'
+update_checkout="$(sed -n '/name: Check out dev/,/name: Update the validated lock/p' "${update_workflow}")"
+[[ "${update_checkout}" == *'persist-credentials: false'* ]] || fail 'dev checkout persists credentials'
+[[ "${update_checkout}" != *'OPENSAOLA_AUTOMATION_TOKEN'* ]] || fail 'dev checkout receives the write token'
+lock_update_step="$(sed -n '/name: Update the validated lock/,/name: Create auditable dev pull request/p' "${update_workflow}")"
+[[ "${lock_update_step}" != *'OPENSAOLA_AUTOMATION_TOKEN'* ]] || fail 'unprivileged lock update receives the write token'
+[[ "${lock_update_step}" != *'hack/saola-cli-lock.sh'* ]] || fail 'lock update executes dev branch code'
+mutation_step="$(sed -n '/name: Create auditable dev pull request/,$p' "${update_workflow}")"
+[[ "${mutation_step}" == *'GH_TOKEN: ${{ secrets.OPENSAOLA_AUTOMATION_TOKEN }}'* ]] || fail 'mutation step is missing the scoped write token'
 
 [[ -f "${promote_workflow}" ]] || fail 'missing saola-cli promotion workflow'
 assert_workflow_contains "${promote_workflow}" 'promotion workflow is not scheduled' '^  schedule:'
@@ -297,21 +350,47 @@ assert_workflow_contains "${promote_workflow}" 'promotion workflow is not manual
 assert_workflow_contains "${promote_workflow}" 'promotion does not select the stable automation label' 'automation:saola-cli-stable'
 assert_workflow_contains "${promote_workflow}" 'promotion does not verify automation author' 'OPENSAOLA_AUTOMATION_LOGIN|EXPECTED_AUTOMATION_LOGIN'
 assert_workflow_contains "${promote_workflow}" 'promotion does not verify deterministic head branch' 'headRefName'
-assert_workflow_contains "${promote_workflow}" 'promotion does not enforce lock-only file changes' 'build/saola-cli\.lock'
+assert_workflow_contains "${promote_workflow}" 'promotion does not enforce candidate-only file changes' 'build/saola-cli-stable-candidate\.lock'
+assert_workflow_contains "${promote_workflow}" 'promotion does not reject prereleases' 'prerelease.*false'
 assert_workflow_contains "${promote_workflow}" 'promotion does not revalidate latest published release' 'published_at.*max_by|max_by.*published_at'
 assert_workflow_contains "${promote_workflow}" 'promotion does not revalidate Release checksums' 'SHA256SUMS'
 assert_workflow_contains "${promote_workflow}" 'promotion does not use the stable PR merge commit lock' 'mergeCommit\.oid'
-assert_workflow_contains "${promote_workflow}" 'promotion does not read the candidate lock at its merge SHA' 'contents/build/saola-cli\.lock\?ref='
+assert_workflow_contains "${promote_workflow}" 'promotion does not read the candidate lock at its merge SHA' 'contents/build/saola-cli-stable-candidate\.lock\?ref='
 assert_workflow_contains "${promote_workflow}" 'promotion does not enforce the default 24 hour soak' 'SOAK_HOURS:.*24'
 assert_workflow_contains "${promote_workflow}" 'promotion does not verify CI on the exact merge SHA' 'workflows/ci\.yml/runs.*head_sha'
 assert_workflow_contains "${promote_workflow}" 'promotion does not verify Docker on the exact merge SHA' 'workflows/docker\.yml/runs.*head_sha'
+assert_workflow_contains "${promote_workflow}" 'promotion does not require the exact stable candidate build check' 'Build stable candidate'
 assert_workflow_contains "${promote_workflow}" 'promotion does not target master' '(--base|base:) master'
 assert_workflow_contains "${promote_workflow}" 'promotion does not enable auto-merge' 'pr merge.*--auto.*--squash'
-assert_workflow_contains "${promote_workflow}" 'promotion no-op does not compare the complete validated lock' 'cmp -s.*candidate_lock.*build/saola-cli\.lock'
+assert_workflow_contains "${promote_workflow}" 'promotion no-op does not compare the complete validated lock' 'cmp -s.*candidate_lock.*build/saola-cli-stable\.lock'
 assert_workflow_excludes "${promote_workflow}" 'promotion resolves a floating CLI revision' '(version|ref|tag)=(latest|snapshot)'
 assert_workflow_excludes "${promote_workflow}" 'promotion directly pushes master' 'git push[^#]*(origin )?master([[:space:]]|$)'
+[[ "$(sed -n '/^  promote:/,$p' "${promote_workflow}")" != *'AUTOMATION_TOKEN: ${{ secrets.OPENSAOLA_AUTOMATION_TOKEN }}'* ]] || fail 'automation token is exposed at promote job scope'
+promote_checkout="$(sed -n '/name: Check out master/,/name: Validate and promote/p' "${promote_workflow}")"
+[[ "${promote_checkout}" == *'persist-credentials: false'* ]] || fail 'master checkout persists credentials'
+[[ "${promote_checkout}" != *'OPENSAOLA_AUTOMATION_TOKEN'* ]] || fail 'master checkout receives the write token'
+promote_mutation="$(sed -n '/name: Validate and promote/,$p' "${promote_workflow}")"
+[[ "${promote_mutation}" == *'GH_TOKEN: ${{ secrets.OPENSAOLA_AUTOMATION_TOKEN }}'* ]] || fail 'promotion mutation step is missing the scoped write token'
 
 assert_workflow_contains "${docker_workflow}" 'Docker workflow does not validate the CLI lock' 'saola-cli-lock\.sh.*validate'
+assert_workflow_contains "${docker_workflow}" 'Docker workflow does not isolate pull request builds' '^  pr-build:'
+assert_workflow_contains "${docker_workflow}" 'Docker workflow does not isolate publishing builds' '^  publish:'
+pr_build_job="$(sed -n '/^  pr-build:/,/^  publish:/p' "${docker_workflow}")"
+[[ "${pr_build_job}" == *'contents: read'* ]] || fail 'Docker PR job is not contents-read-only'
+[[ "${pr_build_job}" != *'packages: write'* ]] || fail 'Docker PR job can write packages'
+[[ "${pr_build_job}" == *'persist-credentials: false'* ]] || fail 'Docker PR checkout persists credentials'
+publish_job="$(sed -n '/^  publish:/,$p' "${docker_workflow}")"
+[[ "${publish_job}" == *'packages: write'* ]] || fail 'Docker publish job cannot write packages'
+[[ "${publish_job}" == *'persist-credentials: false'* ]] || fail 'Docker publish checkout persists credentials'
+assert_workflow_contains "${docker_workflow}" 'Docker workflow does not select the dedicated dev lock' 'build/saola-cli-dev\.lock'
+assert_workflow_contains "${docker_workflow}" 'Docker workflow does not select the dedicated stable lock' 'build/saola-cli-stable\.lock'
+assert_workflow_contains "${docker_workflow}" 'Docker workflow does not build the dedicated stable candidate' 'build/saola-cli-stable-candidate\.lock'
+assert_workflow_contains "${docker_workflow}" 'Docker workflow is missing the stable candidate check' 'name: Build stable candidate'
+assert_workflow_contains "${docker_workflow}" 'Docker push evidence can be superseded before promotion' 'group:.*github\.sha'
+assert_workflow_contains "${docker_workflow}" 'master PRs do not gate stable lock mutation to promotion branches' 'automation/promote-saola-cli-'
+assert_workflow_contains "${docker_workflow}" 'master bootstrap is not explicit' 'bootstrap=true'
+assert_workflow_contains "${docker_workflow}" 'master bootstrap can publish without a stable lock' 'publish=false'
+assert_workflow_contains "${docker_workflow}" 'Docker workflow does not fail closed on lock channel mismatch' 'expected_channel'
 assert_workflow_contains "${docker_workflow}" 'Docker workflow does not checkout locked CLI source' 'repository: harmonycloud/saola-cli'
 assert_workflow_contains "${docker_workflow}" 'Docker workflow checkout does not use locked CLI commit' 'ref:.*steps\.cli\.outputs\.commit'
 assert_workflow_contains "${docker_workflow}" 'Docker workflow checkout path is not isolated' 'path: \.saola-cli-source'
@@ -324,14 +403,18 @@ assert_workflow_contains "${docker_workflow}" 'Docker workflow does not emit pro
 assert_workflow_contains "${docker_workflow}" 'Docker workflow is missing CLI version OCI metadata' 'org\.opensaola\.saola-cli\.version'
 assert_workflow_contains "${docker_workflow}" 'Docker workflow is missing CLI commit OCI metadata' 'org\.opensaola\.saola-cli\.revision'
 
+assert_workflow_contains "${helm_workflow}" 'Helm tag publishing does not require the promoted stable lock' 'build/saola-cli-stable\.lock'
+assert_workflow_contains "${helm_workflow}" 'Helm tag publishing does not validate the promoted stable lock' 'saola-cli-lock\.sh.*validate'
+assert_workflow_contains "${helm_workflow}" 'Helm tag publishing does not enforce the stable channel' 'saola-cli-lock\.sh.*get.*channel'
+
 release_doc="${repo_root}/docs/release-process.md"
 assert_workflow_contains "${release_doc}" 'release docs omit default-branch workflow bootstrap' 'default branch.*master'
 assert_workflow_contains "${release_doc}" 'release docs omit Contents token permissions' 'Contents: read and write'
 assert_workflow_contains "${release_doc}" 'release docs omit Pull requests token permissions' 'Pull requests: read and write'
 assert_workflow_contains "${release_doc}" 'release docs omit Actions token permissions' 'Actions: read'
 assert_workflow_contains "${release_doc}" 'release docs omit label metadata permission requirements' '[Mm]etadata.*label'
-assert_workflow_contains "${release_doc}" 'release docs do not describe latest published stable gating' 'latest published.*non-draft release'
-assert_workflow_contains "${release_doc}" 'release docs still describe version-only promotion no-op' 'complete five-field lock'
+assert_workflow_contains "${release_doc}" 'release docs do not describe latest published stable gating' 'latest published final release'
+assert_workflow_contains "${release_doc}" 'release docs still describe version-only promotion no-op' 'complete stable lock'
 
 for workflow in "${update_workflow}" "${promote_workflow}"; do
   while IFS= read -r use; do

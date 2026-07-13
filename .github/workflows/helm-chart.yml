@@ -15,6 +15,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require the promoted stable Saola CLI for release tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          lock_path='build/saola-cli-stable.lock'
+          [[ -f "${lock_path}" ]] || {
+            echo 'release chart publishing requires a promoted stable Saola CLI lock' >&2
+            exit 1
+          }
+          hack/saola-cli-lock.sh validate "${lock_path}"
+          [[ "$(hack/saola-cli-lock.sh get "${lock_path}" channel)" = stable ]] || {
+            echo 'release chart publishing requires channel=stable' >&2
+            exit 1
+          }
       - uses: azure/setup-helm@v4
       - name: Check chart
         run: make helm-lint helm-template verify-chart-crds

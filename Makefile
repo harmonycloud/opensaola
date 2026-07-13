@@ -13,7 +13,8 @@ endif
 # scaffolded by default. However, you might want to replace it to use other
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
-SAOLA_CLI_LOCK ?= build/saola-cli.lock
+SAOLA_CLI_CHANNEL ?= dev
+SAOLA_CLI_LOCK ?= build/saola-cli-$(SAOLA_CLI_CHANNEL).lock
 SAOLA_CLI_LOCK_HELPER ?= hack/saola-cli-lock.sh
 override SAOLA_CLI_REPOSITORY = $(shell $(SAOLA_CLI_LOCK_HELPER) get $(SAOLA_CLI_LOCK) repository 2>/dev/null)
 override SAOLA_CLI_VERSION = $(shell $(SAOLA_CLI_LOCK_HELPER) get $(SAOLA_CLI_LOCK) version 2>/dev/null)
@@ -28,9 +29,26 @@ override SAOLA_CLI_BUILD_ARGS = \
 	--build-arg SAOLA_CLI_SOURCE_DATE_EPOCH=$(SAOLA_CLI_SOURCE_DATE_EPOCH)
 
 define with-saola-cli-context
-	@source_repo="$${SAOLA_CLI_CONTEXT:-../saola-cli}"; \
+	@source_repo="$${SAOLA_CLI_CONTEXT:-}"; \
+	fetched_repo=''; \
+	tmp_context=''; \
+	cleanup() { \
+		[[ -z "$$tmp_context" ]] || rm -rf "$$tmp_context"; \
+		[[ -z "$$fetched_repo" ]] || rm -rf "$$fetched_repo"; \
+	}; \
+	trap cleanup EXIT; \
+	if [[ -z "$$source_repo" ]]; then \
+		if git -C ../saola-cli cat-file -e '$(SAOLA_CLI_COMMIT)^{commit}' 2>/dev/null; then \
+			source_repo=../saola-cli; \
+		else \
+			fetched_repo="$$(mktemp -d "$${TMPDIR:-/tmp}/opensaola-saola-cli-repo.XXXXXX")"; \
+			git -C "$$fetched_repo" init -q; \
+			git -C "$$fetched_repo" remote add origin 'https://github.com/$(SAOLA_CLI_REPOSITORY).git'; \
+			git -C "$$fetched_repo" fetch -q --depth=1 origin '$(SAOLA_CLI_COMMIT)' || { echo 'failed to fetch locked saola-cli commit' >&2; exit 1; }; \
+			source_repo="$$fetched_repo"; \
+		fi; \
+	fi; \
 	tmp_context="$$(mktemp -d "$${TMPDIR:-/tmp}/opensaola-saola-cli.XXXXXX")"; \
-	trap 'rm -rf "$$tmp_context"' EXIT; \
 	git -C "$$source_repo" cat-file -e '$(SAOLA_CLI_COMMIT)^{commit}' || { echo 'locked saola-cli commit is unavailable in source repo' >&2; exit 1; }; \
 	git -C "$$source_repo" archive '$(SAOLA_CLI_COMMIT)' | tar -x -C "$$tmp_context" || { echo 'failed to export locked saola-cli commit' >&2; exit 1; }; \
 	context="$$tmp_context"; \

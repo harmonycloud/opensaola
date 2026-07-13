@@ -14,7 +14,7 @@
 - Do not push, tag, publish, configure secrets, or change external repositories during local implementation.
 - Official image platforms are exactly `linux/amd64` and `linux/arm64`.
 - CLI builds use `CGO_ENABLED=0`, `-trimpath`, and the CLI module's existing version ldflags.
-- `dev` may consume CLI snapshots; `master` may consume only stable `vMAJOR.MINOR.PATCH` or prerelease tags.
+- `dev` may consume CLI snapshots; `master` may consume only final stable `vMAJOR.MINOR.PATCH` tags.
 - Every OpenSaola image records the exact CLI version and full 40-character commit.
 - Automation fails closed on malformed versions, revisions, repositories, channels, missing checksums, failed tests, or absent credentials.
 - Runtime remains UID/GID 65532 with `/app/manager` as the unchanged entrypoint and `/usr/local/bin/saola` mode `0555`.
@@ -46,7 +46,9 @@
 ### Task 2: OpenSaola CLI lock contract and image integration
 
 **Files:**
-- Create: `opensaola/build/saola-cli.lock`
+- Create: `opensaola/build/saola-cli-dev.lock`
+- Create through stable dispatch on `dev`: `opensaola/build/saola-cli-stable-candidate.lock`
+- Create only through promotion on `master`: `opensaola/build/saola-cli-stable.lock`
 - Create: `opensaola/hack/saola-cli-lock.sh`
 - Create: `opensaola/hack/saola-cli-lock_test.sh`
 - Modify: `opensaola/Dockerfile`

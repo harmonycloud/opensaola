@@ -24,18 +24,12 @@ jobs:
     name: Promote soaked stable lock to master
     runs-on: ubuntu-latest
     env:
-      AUTOMATION_TOKEN: ${{ secrets.OPENSAOLA_AUTOMATION_TOKEN }}
-      GH_TOKEN: ${{ secrets.OPENSAOLA_AUTOMATION_TOKEN }}
       SOAK_HOURS: ${{ inputs.soak_hours || '24' }}
       EXPECTED_AUTOMATION_LOGIN: ${{ vars.OPENSAOLA_AUTOMATION_LOGIN }}
     steps:
-      - name: Require dedicated automation credential and valid soak
+      - name: Require valid promotion policy
         run: |
           set -euo pipefail
-          test -n "${AUTOMATION_TOKEN}" || {
-            echo 'OPENSAOLA_AUTOMATION_TOKEN is required; refusing to use GITHUB_TOKEN'
-            exit 1
-          }
           [[ "${SOAK_HOURS}" =~ ^(0|[1-9][0-9]*)$ ]]
           [[ -n "${EXPECTED_AUTOMATION_LOGIN}" ]] || {
             echo 'repository variable OPENSAOLA_AUTOMATION_LOGIN is required' >&2
@@ -43,6 +37,8 @@ jobs:
           }
       - name: Select the newest merged stable update
         id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           candidate="$(gh pr list --state merged --base dev \
@@ -62,7 +58,7 @@ jobs:
           version_from_branch="$(jq -r '.headRefName' <<<"${details}")"
           [[ "${version_from_branch}" =~ ^automation/saola-cli-stable-v[0-9A-Za-z.-]+$ ]]
           [[ "$(jq '.files | length' <<<"${details}")" -eq 1 ]]
-          [[ "$(jq -r '.files[0].path' <<<"${details}")" = build/saola-cli.lock ]]
+          [[ "$(jq -r '.files[0].path' <<<"${details}")" = build/saola-cli-stable-candidate.lock ]]
           [[ "${merge_sha}" =~ ^[0-9a-f]{40}$ ]]
           merged_epoch="$(date -u -d "${merged_at}" +%s)"
           ready_epoch="$((merged_epoch + SOAK_HOURS * 3600))"
@@ -78,11 +74,12 @@ jobs:
       - name: Read the exact merge commit lock and verify its workflows
         if: steps.candidate.outputs.found == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           MERGE_SHA: ${{ steps.candidate.outputs.merge_sha }}
           HEAD_REF: ${{ steps.candidate.outputs.head_ref }}
         run: |
           set -euo pipefail
-          gh api "repos/${GITHUB_REPOSITORY}/contents/build/saola-cli.lock?ref=${MERGE_SHA}" \
+          gh api "repos/${GITHUB_REPOSITORY}/contents/build/saola-cli-stable-candidate.lock?ref=${MERGE_SHA}" \
             --jq '.content' | base64 --decode >"${RUNNER_TEMP}/saola-cli.lock"
           channel="$(awk -F= '$1 == "channel" { print $2 }' "${RUNNER_TEMP}/saola-cli.lock")"
           version="$(awk -F= '$1 == "version" { print $2 }' "${RUNNER_TEMP}/saola-cli.lock")"
@@ -91,7 +88,7 @@ jobs:
           source_epoch="$(awk -F= '$1 == "source_date_epoch" { print $2 }' "${RUNNER_TEMP}/saola-cli.lock")"
           [[ "${channel}" = stable ]]
           [[ "${repository}" = harmonycloud/saola-cli ]]
-          [[ "${version}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+          [[ "${version}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           [[ "${HEAD_REF}" = "automation/saola-cli-stable-${version}" ]]
           tag_refs="$(git ls-remote "https://github.com/${repository}.git" \
             "refs/tags/${version}" "refs/tags/${version}^{}")"
@@ -101,7 +98,7 @@ jobs:
           commit_date="$(gh api "repos/${repository}/commits/${commit}" --jq '.commit.committer.date')"
           [[ "$(date -u -d "${commit_date}" +%s)" = "${source_epoch}" ]]
           releases="$(gh api --paginate --slurp "repos/${repository}/releases?per_page=100")"
-          latest_release="$(jq -c 'flatten | [.[] | select(.draft == false)] | max_by(.published_at)' <<<"${releases}")"
+          latest_release="$(jq -c 'flatten | [.[] | select(.draft == false and .prerelease == false)] | max_by(.published_at)' <<<"${releases}")"
           [[ "$(jq -r '.tag_name' <<<"${latest_release}")" = "${version}" ]]
           release_dir="$(mktemp -d)"
           gh release download "${version}" --repo "${repository}" \
@@ -123,39 +120,53 @@ jobs:
           }
           check_workflow ci.yml "${ci_result}"
           check_workflow docker.yml "${docker_result}"
-      - name: Check out master with the dedicated token
+          candidate_check_count="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/commits/${MERGE_SHA}/check-runs?check_name=Build%20stable%20candidate&filter=latest&per_page=100" \
+            --jq '[.check_runs[] | select(.name == "Build stable candidate" and .status == "completed" and .conclusion == "success")] | length')"
+          [[ "${candidate_check_count}" -ge 1 ]] || {
+            echo "Build stable candidate is not successful for exact merge ${MERGE_SHA}" >&2
+            exit 1
+          }
+      - name: Check out master with read-only credentials
         if: steps.candidate.outputs.found == 'true'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: master
           fetch-depth: 0
-          token: ${{ secrets.OPENSAOLA_AUTOMATION_TOKEN }}
+          persist-credentials: false
       - name: Validate and promote only the candidate lock
         if: steps.candidate.outputs.found == 'true'
         env:
+          GH_TOKEN: ${{ secrets.OPENSAOLA_AUTOMATION_TOKEN }}
           MERGE_SHA: ${{ steps.candidate.outputs.merge_sha }}
           SOURCE_PR: ${{ steps.candidate.outputs.number }}
         run: |
           set -euo pipefail
+          test -n "${GH_TOKEN}" || {
+            echo 'OPENSAOLA_AUTOMATION_TOKEN is required; refusing to use GITHUB_TOKEN' >&2
+            exit 1
+          }
+          gh auth setup-git
           candidate_lock="${RUNNER_TEMP}/saola-cli.lock"
           hack/saola-cli-lock.sh validate "${candidate_lock}"
           [[ "$(hack/saola-cli-lock.sh get "${candidate_lock}" channel)" = stable ]]
           version="$(hack/saola-cli-lock.sh get "${candidate_lock}" version)"
-          if hack/saola-cli-lock.sh validate build/saola-cli.lock &&
-             cmp -s "${candidate_lock}" build/saola-cli.lock; then
+          if [[ -f build/saola-cli-stable.lock ]] &&
+             hack/saola-cli-lock.sh validate build/saola-cli-stable.lock &&
+             cmp -s "${candidate_lock}" build/saola-cli-stable.lock; then
             echo "master already contains the complete ${version} lock; nothing to promote."
             exit 0
           fi
-          cp "${candidate_lock}" build/saola-cli.lock
-          hack/saola-cli-lock.sh validate build/saola-cli.lock
+          cp "${candidate_lock}" build/saola-cli-stable.lock
+          hack/saola-cli-lock.sh validate build/saola-cli-stable.lock
           safe_version="${version//[^0-9A-Za-z._-]/-}"
           branch="automation/promote-saola-cli-${safe_version}"
           git config user.name 'opensaola-automation'
           git config user.email 'opensaola-automation@users.noreply.github.com'
-          git checkout -B "${branch}"
-          git add build/saola-cli.lock
-          git commit -m "build: promote bundled saola CLI ${version}"
-          git push --force-with-lease origin "HEAD:refs/heads/${branch}"
+          git -c core.hooksPath=/dev/null checkout -B "${branch}"
+          git add build/saola-cli-stable.lock
+          git -c core.hooksPath=/dev/null commit --no-gpg-sign -m "build: promote bundled saola CLI ${version}"
+          git -c core.hooksPath=/dev/null push --force-with-lease origin "HEAD:refs/heads/${branch}"
           pr="$(gh pr list --state open --base master --head "${branch}" --json number --jq '.[0].number // empty')"
           body="Promotes the exact stable lock merged by dev PR #${SOURCE_PR} at \`${MERGE_SHA}\` after the configured ${SOAK_HOURS}h soak."
           if [[ -z "${pr}" ]]; then

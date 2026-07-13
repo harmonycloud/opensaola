@@ -15,21 +15,8 @@ die() {
 
 validate_stable_version() {
   local version="$1"
-  local prerelease identifier
 
-  [[ "${version}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || return 1
-  [[ "${version}" == *-* ]] || return 0
-
-  prerelease="${version#*-}"
-  while [[ -n "${prerelease}" ]]; do
-    identifier="${prerelease%%.*}"
-    [[ ! "${identifier}" =~ ^0[0-9]+$ ]] || return 1
-    if [[ "${prerelease}" == *.* ]]; then
-      prerelease="${prerelease#*.}"
-    else
-      prerelease=''
-    fi
-  done
+  [[ "${version}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 }
 
 parse_lock() {
@@ -94,7 +81,7 @@ parse_lock() {
       [[ "${version#dev-}" == "${commit:0:12}" ]] || die 'dev version must match the commit prefix'
       ;;
     stable)
-      validate_stable_version "${version}" || die 'stable version must be a SemVer release or prerelease tag without build metadata'
+      validate_stable_version "${version}" || die 'stable version must be a final vMAJOR.MINOR.PATCH release tag'
       ;;
     *)
       die 'channel must be dev or stable'

@@ -1,8 +1,8 @@
 # Build the manager binary
 FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 ARG VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG BUILD_DATE=unknown
@@ -39,8 +39,8 @@ RUN curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/${TARGETOS}/${TAR
 # Build the architecture-matched saola CLI from the immutable named context.
 FROM --platform=$BUILDPLATFORM golang:1.26.4 AS saola-cli-builder
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 ARG SAOLA_CLI_VERSION
 ARG SAOLA_CLI_COMMIT
 ARG SAOLA_CLI_SOURCE_DATE_EPOCH

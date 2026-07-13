@@ -95,7 +95,7 @@ jobs:
               }
               ;;
             saola-cli-stable:stable)
-              semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+              semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
               [[ "${CLI_VERSION}" =~ ${semver} ]]
               tag_refs="$(git ls-remote "https://github.com/${CLI_REPOSITORY}.git" \
                 "refs/tags/${CLI_VERSION}" "refs/tags/${CLI_VERSION}^{}")"
@@ -109,9 +109,9 @@ jobs:
               }
               releases="$(gh api --paginate --slurp \
                 "repos/${CLI_REPOSITORY}/releases?per_page=100")"
-              latest_release="$(jq -c 'flatten | [.[] | select(.draft == false)] | max_by(.published_at)' <<<"${releases}")"
+              latest_release="$(jq -c 'flatten | [.[] | select(.draft == false and .prerelease == false)] | max_by(.published_at)' <<<"${releases}")"
               [[ "$(jq -r '.tag_name' <<<"${latest_release}")" = "${CLI_VERSION}" ]] || {
-                echo 'stable event is not the latest published non-draft release' >&2
+                echo 'stable event is not the latest published final release' >&2
                 exit 1
               }
               release_id="$(jq -r '.id' <<<"${latest_release}")"
@@ -179,7 +179,6 @@ jobs:
     needs: validate-source
     runs-on: ubuntu-latest
     env:
-      AUTOMATION_TOKEN: ${{ secrets.OPENSAOLA_AUTOMATION_TOKEN }}
       CLI_REPOSITORY: ${{ needs.validate-source.outputs.repository }}
       CLI_CHANNEL: ${{ needs.validate-source.outputs.channel }}
       CLI_VERSION: ${{ needs.validate-source.outputs.version }}
@@ -189,13 +188,9 @@ jobs:
       CLI_ARM64_SHA256: ${{ needs.validate-source.outputs.arm64_sha256 }}
       CLI_RELEASE_ID: ${{ needs.validate-source.outputs.release_id }}
     steps:
-      - name: Require dedicated automation credential
+      - name: Revalidate trusted source outputs
         run: |
           set -euo pipefail
-          test -n "${AUTOMATION_TOKEN}" || {
-            echo 'OPENSAOLA_AUTOMATION_TOKEN is required; refusing to use GITHUB_TOKEN'
-            exit 1
-          }
           [[ "${CLI_REPOSITORY}" = harmonycloud/saola-cli ]]
           [[ "${CLI_COMMIT}" =~ ^[0-9a-f]{40}$ ]]
           [[ "${CLI_SOURCE_DATE_EPOCH}" =~ ^(0|[1-9][0-9]*)$ ]]
@@ -209,22 +204,27 @@ jobs:
               ;;
             stable)
               [[ "${CLI_RELEASE_ID}" =~ ^[1-9][0-9]*$ ]]
-              [[ "${CLI_VERSION}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+              [[ "${CLI_VERSION}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
               ;;
             *) exit 1 ;;
           esac
-      - name: Check out dev with the dedicated token
+      - name: Check out dev with read-only credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: dev
           fetch-depth: 0
-          token: ${{ secrets.OPENSAOLA_AUTOMATION_TOKEN }}
+          persist-credentials: false
       - name: Update the validated lock
         id: lock
         run: |
           set -euo pipefail
           git fetch origin dev
           git reset --hard origin/dev
+          case "${CLI_CHANNEL}" in
+            dev) lock_path='build/saola-cli-dev.lock' ;;
+            stable) lock_path='build/saola-cli-stable-candidate.lock' ;;
+            *) exit 1 ;;
+          esac
           candidate_lock="${RUNNER_TEMP}/saola-cli.lock"
           printf '%s\n' \
             "repository=${CLI_REPOSITORY}" \
@@ -233,29 +233,41 @@ jobs:
             "channel=${CLI_CHANNEL}" \
             "source_date_epoch=${CLI_SOURCE_DATE_EPOCH}" \
             >"${candidate_lock}"
-          hack/saola-cli-lock.sh validate "${candidate_lock}"
-          if hack/saola-cli-lock.sh validate build/saola-cli.lock &&
-             cmp -s "${candidate_lock}" build/saola-cli.lock; then
+          [[ "$(wc -l <"${candidate_lock}" | tr -d ' ')" -eq 5 ]]
+          grep -Fxq "repository=${CLI_REPOSITORY}" "${candidate_lock}"
+          grep -Fxq "version=${CLI_VERSION}" "${candidate_lock}"
+          grep -Fxq "commit=${CLI_COMMIT}" "${candidate_lock}"
+          grep -Fxq "channel=${CLI_CHANNEL}" "${candidate_lock}"
+          grep -Fxq "source_date_epoch=${CLI_SOURCE_DATE_EPOCH}" "${candidate_lock}"
+          if [[ -f "${lock_path}" ]] &&
+             cmp -s "${candidate_lock}" "${lock_path}"; then
             echo 'changed=false' >>"${GITHUB_OUTPUT}"
             exit 0
           fi
-          cp "${candidate_lock}" build/saola-cli.lock
-          hack/saola-cli-lock.sh validate build/saola-cli.lock
+          cp "${candidate_lock}" "${lock_path}"
+          cmp -s "${candidate_lock}" "${lock_path}"
           echo 'changed=true' >>"${GITHUB_OUTPUT}"
+          echo "path=${lock_path}" >>"${GITHUB_OUTPUT}"
       - name: Create auditable dev pull request and enable auto-merge
         if: steps.lock.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.OPENSAOLA_AUTOMATION_TOKEN }}
+          LOCK_PATH: ${{ steps.lock.outputs.path }}
         run: |
           set -euo pipefail
+          test -n "${GH_TOKEN}" || {
+            echo 'OPENSAOLA_AUTOMATION_TOKEN is required; refusing to use GITHUB_TOKEN' >&2
+            exit 1
+          }
+          gh auth setup-git
           safe_version="${CLI_VERSION//[^0-9A-Za-z._-]/-}"
           branch="automation/saola-cli-${CLI_CHANNEL}-${safe_version}"
           git config user.name 'opensaola-automation'
           git config user.email 'opensaola-automation@users.noreply.github.com'
-          git checkout -B "${branch}"
-          git add build/saola-cli.lock
-          git commit -m "build: update bundled saola CLI to ${CLI_VERSION}"
-          git push --force-with-lease origin "HEAD:refs/heads/${branch}"
+          git -c core.hooksPath=/dev/null checkout -B "${branch}"
+          git add "${LOCK_PATH}"
+          git -c core.hooksPath=/dev/null commit --no-gpg-sign -m "build: update bundled saola CLI to ${CLI_VERSION}"
+          git -c core.hooksPath=/dev/null push --force-with-lease origin "HEAD:refs/heads/${branch}"
           pr="$(gh pr list --state open --base dev --head "${branch}" --json number --jq '.[0].number // empty')"
           body="$(printf '%s\n' \
             'Automated immutable Saola CLI lock update.' \

@@ -18,57 +18,117 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
-# Cancel superseded runs for the same branch/PR, but never cancel a release
-# tag build — those must always complete.
-# 同一分支 / PR 的老任务被新 push 自动取消，但 tag 触发的 release 构建例外。
+# Cancel only superseded PR runs. Every push gets a SHA-specific group because
+# stable promotion requires immutable evidence from the exact dev merge SHA.
 concurrency:
-  group: docker-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  group: docker-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  docker:
+  pr-build:
+    if: github.event_name == 'pull_request'
     name: Build and Push
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Export locked Saola CLI metadata
-        id: cli
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select the channel-specific Saola CLI lock
+        id: lock
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          EXPECTED_AUTOMATION_LOGIN: ${{ vars.OPENSAOLA_AUTOMATION_LOGIN }}
         run: |
           set -euo pipefail
-          hack/saola-cli-lock.sh validate build/saola-cli.lock
+          case "${BASE_REF}" in
+            dev)
+              if [[ "${HEAD_REF}" =~ ^automation/saola-cli-stable-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo 'path=build/saola-cli-stable-candidate.lock' >>"${GITHUB_OUTPUT}"
+                echo 'expected_channel=stable' >>"${GITHUB_OUTPUT}"
+              else
+                echo 'path=build/saola-cli-dev.lock' >>"${GITHUB_OUTPUT}"
+                echo 'expected_channel=dev' >>"${GITHUB_OUTPUT}"
+              fi
+              echo 'enabled=true' >>"${GITHUB_OUTPUT}"
+              ;;
+            master)
+              if ! git diff --quiet "${BASE_SHA}...HEAD" -- build/saola-cli-stable.lock; then
+                changed_files="$(git diff --name-only "${BASE_SHA}...HEAD")"
+                [[ "${changed_files}" = build/saola-cli-stable.lock ]] || {
+                  echo 'stable promotion PR must change only build/saola-cli-stable.lock' >&2
+                  exit 1
+                }
+                [[ "${HEAD_REF}" =~ ^automation/promote-saola-cli-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+                  echo 'only a deterministic promotion branch may change the stable lock' >&2
+                  exit 1
+                }
+                [[ -n "${EXPECTED_AUTOMATION_LOGIN}" && "${PR_AUTHOR}" = "${EXPECTED_AUTOMATION_LOGIN}" ]] || {
+                  echo 'stable lock author does not match OPENSAOLA_AUTOMATION_LOGIN' >&2
+                  exit 1
+                }
+              fi
+              if [[ -f build/saola-cli-stable.lock ]]; then
+                echo 'path=build/saola-cli-stable.lock' >>"${GITHUB_OUTPUT}"
+                echo 'expected_channel=stable' >>"${GITHUB_OUTPUT}"
+                echo 'enabled=true' >>"${GITHUB_OUTPUT}"
+              elif git cat-file -e "${BASE_SHA}:build/saola-cli-stable.lock" 2>/dev/null; then
+                echo 'a master PR removed the promoted stable lock' >&2
+                exit 1
+              else
+                echo 'bootstrap=true' >>"${GITHUB_OUTPUT}"
+                echo 'publish=false' >>"${GITHUB_OUTPUT}"
+                echo 'enabled=false' >>"${GITHUB_OUTPUT}"
+                echo 'No final Saola CLI release exists yet; bootstrap PR is intentionally not building an official image.'
+              fi
+              ;;
+            *)
+              echo "unsupported pull request base: ${BASE_REF}" >&2
+              exit 1
+              ;;
+          esac
+      - name: Export locked Saola CLI metadata
+        if: steps.lock.outputs.enabled == 'true'
+        id: cli
+        env:
+          LOCK_PATH: ${{ steps.lock.outputs.path }}
+          EXPECTED_CHANNEL: ${{ steps.lock.outputs.expected_channel }}
+        run: |
+          set -euo pipefail
+          hack/saola-cli-lock.sh validate "${LOCK_PATH}"
+          actual_channel="$(hack/saola-cli-lock.sh get "${LOCK_PATH}" channel)"
+          [[ "${actual_channel}" = "${EXPECTED_CHANNEL}" ]] || {
+            echo "${LOCK_PATH} channel ${actual_channel} does not match expected_channel ${EXPECTED_CHANNEL}" >&2
+            exit 1
+          }
           for key in repository version commit channel source_date_epoch; do
-            value="$(hack/saola-cli-lock.sh get build/saola-cli.lock "${key}")"
+            value="$(hack/saola-cli-lock.sh get "${LOCK_PATH}" "${key}")"
             echo "${key}=${value}" >>"${GITHUB_OUTPUT}"
           done
       - name: Check out locked Saola CLI source
+        if: steps.lock.outputs.enabled == 'true'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: harmonycloud/saola-cli
           ref: ${{ steps.cli.outputs.commit }}
           path: .saola-cli-source
           persist-credentials: false
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Login to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - if: steps.lock.outputs.enabled == 'true'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - if: steps.lock.outputs.enabled == 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Normalize image name
+        if: steps.lock.outputs.enabled == 'true'
         id: image
         run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-      - name: Validate release tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          [[ "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] || {
-            echo "Release tags must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease"
-            exit 1
-          }
       - name: Docker meta
+        if: steps.lock.outputs.enabled == 'true'
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
@@ -88,7 +148,8 @@ jobs:
             org.opensaola.saola-cli.version=${{ steps.cli.outputs.version }}
             org.opensaola.saola-cli.revision=${{ steps.cli.outputs.commit }}
             org.opensaola.saola-cli.channel=${{ steps.cli.outputs.channel }}
-      - name: Build and push
+      - name: Build without publishing
+        if: steps.lock.outputs.enabled == 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -99,7 +160,201 @@ jobs:
             SAOLA_CLI_COMMIT=${{ steps.cli.outputs.commit }}
             SAOLA_CLI_SOURCE_DATE_EPOCH=${{ steps.cli.outputs.source_date_epoch }}
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+  stable-candidate-build:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    name: Build stable candidate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Export stable candidate metadata when present
+        id: cli
+        run: |
+          set -euo pipefail
+          lock_path='build/saola-cli-stable-candidate.lock'
+          if [[ ! -f "${lock_path}" ]]; then
+            echo 'enabled=false' >>"${GITHUB_OUTPUT}"
+            echo 'No stable candidate is present on this dev commit.'
+            exit 0
+          fi
+          hack/saola-cli-lock.sh validate "${lock_path}"
+          [[ "$(hack/saola-cli-lock.sh get "${lock_path}" channel)" = stable ]]
+          echo 'enabled=true' >>"${GITHUB_OUTPUT}"
+          for key in repository version commit channel source_date_epoch; do
+            value="$(hack/saola-cli-lock.sh get "${lock_path}" "${key}")"
+            echo "${key}=${value}" >>"${GITHUB_OUTPUT}"
+          done
+      - name: Check out stable candidate source
+        if: steps.cli.outputs.enabled == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: harmonycloud/saola-cli
+          ref: ${{ steps.cli.outputs.commit }}
+          path: .saola-cli-source
+          persist-credentials: false
+      - if: steps.cli.outputs.enabled == 'true'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - if: steps.cli.outputs.enabled == 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build stable candidate without publishing
+        if: steps.cli.outputs.enabled == 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          build-contexts: |
+            saola-cli=./.saola-cli-source
+          build-args: |
+            SAOLA_CLI_VERSION=${{ steps.cli.outputs.version }}
+            SAOLA_CLI_COMMIT=${{ steps.cli.outputs.commit }}
+            SAOLA_CLI_SOURCE_DATE_EPOCH=${{ steps.cli.outputs.source_date_epoch }}
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: opensaola:stable-candidate-${{ github.sha }}
+          labels: |
+            org.opensaola.saola-cli.repository=${{ steps.cli.outputs.repository }}
+            org.opensaola.saola-cli.version=${{ steps.cli.outputs.version }}
+            org.opensaola.saola-cli.revision=${{ steps.cli.outputs.commit }}
+            org.opensaola.saola-cli.channel=stable
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+  publish:
+    if: github.event_name != 'pull_request'
+    name: Build and push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Select the channel-specific Saola CLI lock
+        id: lock
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF}" in
+            refs/heads/dev)
+              echo 'path=build/saola-cli-dev.lock' >>"${GITHUB_OUTPUT}"
+              echo 'expected_channel=dev' >>"${GITHUB_OUTPUT}"
+              echo 'enabled=true' >>"${GITHUB_OUTPUT}"
+              ;;
+            refs/heads/master)
+              if [[ ! -f build/saola-cli-stable.lock ]]; then
+                echo 'bootstrap=true' >>"${GITHUB_OUTPUT}"
+                echo 'publish=false' >>"${GITHUB_OUTPUT}"
+                echo 'enabled=false' >>"${GITHUB_OUTPUT}"
+                echo 'Master automation is bootstrapped, but no final Saola CLI lock exists; no image will be published.'
+                exit 0
+              fi
+              echo 'path=build/saola-cli-stable.lock' >>"${GITHUB_OUTPUT}"
+              echo 'expected_channel=stable' >>"${GITHUB_OUTPUT}"
+              echo 'enabled=true' >>"${GITHUB_OUTPUT}"
+              ;;
+            refs/tags/v*)
+              echo 'path=build/saola-cli-stable.lock' >>"${GITHUB_OUTPUT}"
+              echo 'expected_channel=stable' >>"${GITHUB_OUTPUT}"
+              echo 'enabled=true' >>"${GITHUB_OUTPUT}"
+              ;;
+            *)
+              echo "unsupported publishing ref: ${GITHUB_REF}" >&2
+              exit 1
+              ;;
+          esac
+      - name: Export locked Saola CLI metadata
+        if: steps.lock.outputs.enabled == 'true'
+        id: cli
+        env:
+          LOCK_PATH: ${{ steps.lock.outputs.path }}
+          EXPECTED_CHANNEL: ${{ steps.lock.outputs.expected_channel }}
+        run: |
+          set -euo pipefail
+          hack/saola-cli-lock.sh validate "${LOCK_PATH}"
+          actual_channel="$(hack/saola-cli-lock.sh get "${LOCK_PATH}" channel)"
+          [[ "${actual_channel}" = "${EXPECTED_CHANNEL}" ]] || {
+            echo "${LOCK_PATH} channel ${actual_channel} does not match expected_channel ${EXPECTED_CHANNEL}" >&2
+            exit 1
+          }
+          for key in repository version commit channel source_date_epoch; do
+            value="$(hack/saola-cli-lock.sh get "${LOCK_PATH}" "${key}")"
+            echo "${key}=${value}" >>"${GITHUB_OUTPUT}"
+          done
+      - name: Check out locked Saola CLI source
+        if: steps.lock.outputs.enabled == 'true'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: harmonycloud/saola-cli
+          ref: ${{ steps.cli.outputs.commit }}
+          path: .saola-cli-source
+          persist-credentials: false
+      - if: steps.lock.outputs.enabled == 'true'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - if: steps.lock.outputs.enabled == 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Login to GHCR
+        if: steps.lock.outputs.enabled == 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Normalize image name
+        if: steps.lock.outputs.enabled == 'true'
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+      - name: Validate release tag
+        if: steps.lock.outputs.enabled == 'true' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          [[ "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "Release tags must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease"
+            exit 1
+          }
+      - name: Docker meta
+        if: steps.lock.outputs.enabled == 'true'
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          flavor: |
+            latest=false
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.ref_type == 'tag' }}
+          labels: |
+            org.opensaola.saola-cli.repository=${{ steps.cli.outputs.repository }}
+            org.opensaola.saola-cli.version=${{ steps.cli.outputs.version }}
+            org.opensaola.saola-cli.revision=${{ steps.cli.outputs.commit }}
+            org.opensaola.saola-cli.channel=${{ steps.cli.outputs.channel }}
+      - name: Build and push
+        if: steps.lock.outputs.enabled == 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          build-contexts: |
+            saola-cli=./.saola-cli-source
+          build-args: |
+            SAOLA_CLI_VERSION=${{ steps.cli.outputs.version }}
+            SAOLA_CLI_COMMIT=${{ steps.cli.outputs.commit }}
+            SAOLA_CLI_SOURCE_DATE_EPOCH=${{ steps.cli.outputs.source_date_epoch }}
+          platforms: linux/amd64,linux/arm64
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

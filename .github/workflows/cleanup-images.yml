@@ -31,7 +31,7 @@ jobs:
       # Delete old sha-* tagged images, keep the 10 most recent.
       # 清理旧的 sha-* tag，保留最新 10 个。
       - name: Delete old sha-* images (keep latest 10)
-        uses: snok/container-retention-policy@v3.0.1
+        uses: snok/container-retention-policy@d3bdcf5ce9b05f685154e4a16c39233b245e3d53 # v3.1.0
         with:
           account: ${{ github.repository_owner }}
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -47,7 +47,7 @@ jobs:
       # 清理 multi-arch 构建残留的 untagged 孤儿 manifest；
       # 保留 1 周是为了避免误删仍被新 manifest list 引用的层。
       - name: Delete old untagged manifests
-        uses: snok/container-retention-policy@v3.0.1
+        uses: snok/container-retention-policy@d3bdcf5ce9b05f685154e4a16c39233b245e3d53 # v3.1.0
         with:
           account: ${{ github.repository_owner }}
           token: ${{ secrets.GITHUB_TOKEN }}

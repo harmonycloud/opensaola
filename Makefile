@@ -183,6 +183,7 @@ test-makefile: ## Test Makefile targets that must not require the Go toolchain.
 
 .PHONY: test-release-automation
 test-release-automation:
+	bash hack/cleanup-images-workflow_test.sh
 	bash hack/resolve-saola-cli-release_test.sh
 	bash hack/saola-cli-lock_test.sh
 

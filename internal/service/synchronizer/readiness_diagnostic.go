@@ -56,6 +56,9 @@ func middlewarePodConditionDiagnostic(mid *zeusv1.Middleware, cr *unstructured.U
 			if condition.Type != corev1.PodScheduled && condition.Type != corev1.ContainersReady && condition.Type != corev1.PodReady {
 				continue
 			}
+			if condition.Type != corev1.PodScheduled && hasTransientMiddlewareWaitingContainer(pod) {
+				continue
+			}
 			return middlewareRuntimeDiagnostic(mid, cr, status.Diagnostic{
 				Phase:              status.PhaseWorkloadReadiness,
 				FailedObject:       status.ObjectRef{APIVersion: "v1", Kind: "Pod", Namespace: pod.Namespace, Name: pod.Name},
@@ -161,7 +164,7 @@ type middlewareWaitingContainer struct {
 
 func firstMiddlewareWaitingContainer(pod corev1.Pod) *middlewareWaitingContainer {
 	for _, container := range pod.Status.InitContainerStatuses {
-		if container.State.Waiting == nil {
+		if container.State.Waiting == nil || isTransientMiddlewareWaitingReason(container.State.Waiting.Reason) {
 			continue
 		}
 		return &middlewareWaitingContainer{
@@ -173,7 +176,7 @@ func firstMiddlewareWaitingContainer(pod corev1.Pod) *middlewareWaitingContainer
 		}
 	}
 	for _, container := range pod.Status.ContainerStatuses {
-		if container.State.Waiting == nil {
+		if container.State.Waiting == nil || isTransientMiddlewareWaitingReason(container.State.Waiting.Reason) {
 			continue
 		}
 		return &middlewareWaitingContainer{
@@ -185,6 +188,29 @@ func firstMiddlewareWaitingContainer(pod corev1.Pod) *middlewareWaitingContainer
 		}
 	}
 	return nil
+}
+
+func hasTransientMiddlewareWaitingContainer(pod corev1.Pod) bool {
+	for _, container := range pod.Status.InitContainerStatuses {
+		if container.State.Waiting != nil && isTransientMiddlewareWaitingReason(container.State.Waiting.Reason) {
+			return true
+		}
+	}
+	for _, container := range pod.Status.ContainerStatuses {
+		if container.State.Waiting != nil && isTransientMiddlewareWaitingReason(container.State.Waiting.Reason) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTransientMiddlewareWaitingReason(reason string) bool {
+	switch reason {
+	case "ContainerCreating", "PodInitializing":
+		return true
+	default:
+		return false
+	}
 }
 
 func objectRefFromUnstructured(obj *unstructured.Unstructured) status.ObjectRef {

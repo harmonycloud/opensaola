@@ -76,6 +76,147 @@ func TestDeriveMiddlewareReadinessDiagnostic_PodImagePullTLS(t *testing.T) {
 	}
 }
 
+func TestDeriveMiddlewareReadinessDiagnostic_ContainerCreatingIsTransient(t *testing.T) {
+	mid := &zeusv1.Middleware{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-minio", Namespace: "middleware", Generation: 2},
+		Status:     zeusv1.MiddlewareStatus{ObservedGeneration: 2},
+	}
+	cr := &unstructured.Unstructured{}
+	cr.SetAPIVersion("apps/v1")
+	cr.SetKind("StatefulSet")
+	cr.SetNamespace("middleware")
+	cr.SetName("demo-minio")
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-minio-0", Namespace: "middleware"},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "minio",
+				Image: "registry.local/middleware/minio:latest",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "ContainerCreating",
+				}},
+			}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse, Reason: "ContainersNotReady"},
+				{Type: corev1.ContainersReady, Status: corev1.ConditionFalse, Reason: "ContainersNotReady"},
+				{Type: corev1.PodScheduled, Status: corev1.ConditionTrue},
+			},
+		},
+	}
+
+	got := deriveMiddlewareReadinessDiagnostic(mid, cr, map[string]corev1.Pod{pod.Name: pod}, nil)
+	if got != "" {
+		t.Fatalf("expected ContainerCreating startup to remain transient, got %q", got)
+	}
+}
+
+func TestDeriveMiddlewareReadinessDiagnostic_PodInitializingIsTransient(t *testing.T) {
+	mid := &zeusv1.Middleware{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "middleware"}}
+	cr := &unstructured.Unstructured{}
+	cr.SetAPIVersion("apps/v1")
+	cr.SetKind("StatefulSet")
+	cr.SetNamespace("middleware")
+	cr.SetName("demo")
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-0", Namespace: "middleware"},
+		Status: corev1.PodStatus{
+			InitContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "init",
+				Image: "registry.local/init:latest",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "PodInitializing",
+				}},
+			}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse, Reason: "ContainersNotReady"},
+				{Type: corev1.ContainersReady, Status: corev1.ConditionFalse, Reason: "ContainersNotReady"},
+			},
+		},
+	}
+
+	got := deriveMiddlewareReadinessDiagnostic(mid, cr, map[string]corev1.Pod{pod.Name: pod}, nil)
+	if got != "" {
+		t.Fatalf("expected PodInitializing startup to remain transient, got %q", got)
+	}
+}
+
+func TestDeriveMiddlewareReadinessDiagnostic_TransientWaitDoesNotHideUnschedulable(t *testing.T) {
+	mid := &zeusv1.Middleware{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "middleware"}}
+	cr := &unstructured.Unstructured{}
+	cr.SetAPIVersion("apps/v1")
+	cr.SetKind("StatefulSet")
+	cr.SetNamespace("middleware")
+	cr.SetName("demo")
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-0", Namespace: "middleware"},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:  "demo",
+				Image: "registry.local/demo:latest",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "ContainerCreating",
+				}},
+			}},
+			Conditions: []corev1.PodCondition{{
+				Type:    corev1.PodScheduled,
+				Status:  corev1.ConditionFalse,
+				Reason:  "Unschedulable",
+				Message: "0/3 nodes are available",
+			}},
+		},
+	}
+
+	got := deriveMiddlewareReadinessDiagnostic(mid, cr, map[string]corev1.Pod{pod.Name: pod}, nil)
+	for _, want := range []string{
+		"fieldPath=status.conditions[type=PodScheduled]",
+		"causeCategory=SchedulingUnschedulable",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected transient wait not to hide %q, got %q", want, got)
+		}
+	}
+}
+
+func TestDeriveMiddlewareReadinessDiagnostic_TransientWaitDoesNotHideActionableWait(t *testing.T) {
+	mid := &zeusv1.Middleware{ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "middleware"}}
+	cr := &unstructured.Unstructured{}
+	cr.SetAPIVersion("apps/v1")
+	cr.SetKind("StatefulSet")
+	cr.SetNamespace("middleware")
+	cr.SetName("demo")
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-0", Namespace: "middleware"},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{
+				Name:  "starting",
+				Image: "registry.local/starting:latest",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: "ContainerCreating",
+				}},
+			},
+			{
+				Name:  "broken",
+				Image: "registry.local/broken:latest",
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason:  "CreateContainerConfigError",
+					Message: "secret not found",
+				}},
+			},
+		}},
+	}
+
+	got := deriveMiddlewareReadinessDiagnostic(mid, cr, map[string]corev1.Pod{pod.Name: pod}, nil)
+	for _, want := range []string{
+		"fieldPath=status.containerStatuses[name=broken].state.waiting",
+		"actual=CreateContainerConfigError",
+		"secret not found",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected transient wait not to hide %q, got %q", want, got)
+		}
+	}
+}
+
 func TestDeriveMiddlewareReadinessDiagnostic_PVCPending(t *testing.T) {
 	mid := &zeusv1.Middleware{ObjectMeta: metav1.ObjectMeta{Name: "demo-milvus", Namespace: "middleware"}}
 	cr := &unstructured.Unstructured{}

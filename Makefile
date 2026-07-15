@@ -6,6 +6,27 @@ IMG ?= controller:latest
 # scaffolded by default. However, you might want to replace it to use other
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
+MANAGER_VERSION ?= $(shell \
+	tag="$$(git describe --exact-match --tags --match 'v[0-9]*' HEAD 2>/dev/null)"; \
+	if printf '%s\n' "$$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$$'; then \
+		printf '%s' "$$tag"; \
+	elif branch="$$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" && [ -n "$$branch" ]; then \
+		printf '%s' "$$branch"; \
+	elif commit="$$(git rev-parse --short=12 HEAD 2>/dev/null)" && [ -n "$$commit" ]; then \
+		printf 'sha-%s' "$$commit"; \
+	else \
+		printf 'dev'; \
+	fi)
+MANAGER_GIT_COMMIT ?= $(shell git rev-parse --verify HEAD 2>/dev/null || printf 'unknown')
+MANAGER_BUILD_DATE ?= $(shell git show -s --format=%cI HEAD 2>/dev/null || printf 'unknown')
+MANAGER_LDFLAGS ?= -s -w \
+	-X github.com/harmonycloud/opensaola/internal/version.Version=$(MANAGER_VERSION) \
+	-X github.com/harmonycloud/opensaola/internal/version.GitCommit=$(MANAGER_GIT_COMMIT) \
+	-X github.com/harmonycloud/opensaola/internal/version.BuildDate=$(MANAGER_BUILD_DATE)
+MANAGER_BUILD_ARGS ?= \
+	--build-arg VERSION=$(MANAGER_VERSION) \
+	--build-arg GIT_COMMIT=$(MANAGER_GIT_COMMIT) \
+	--build-arg BUILD_DATE=$(MANAGER_BUILD_DATE)
 SAOLA_CLI_LOCK ?= build/saola-cli-stable.lock
 SAOLA_CLI_LOCK_HELPER ?= hack/saola-cli-lock.sh
 override SAOLA_CLI_REPOSITORY = $(shell $(SAOLA_CLI_LOCK_HELPER) get $(SAOLA_CLI_LOCK) repository 2>/dev/null)
@@ -184,6 +205,9 @@ test-makefile: ## Test Makefile targets that must not require the Go toolchain.
 .PHONY: test-release-automation
 test-release-automation:
 	bash hack/cleanup-images-workflow_test.sh
+	bash hack/manager-version-build_test.sh
+	bash hack/manager-version-workflow_test.sh
+	bash hack/manager-version_test.sh
 	bash hack/resolve-saola-cli-release_test.sh
 	bash hack/saola-cli-lock_test.sh
 
@@ -280,7 +304,7 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
-	go build -o bin/manager ./cmd
+	go build -trimpath -ldflags "$(MANAGER_LDFLAGS)" -o bin/manager ./cmd
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -299,7 +323,7 @@ docker-platform-validate:
 	@case '$(DOCKER_PLATFORM)' in linux/amd64|linux/arm64) ;; *) echo 'DOCKER_PLATFORM must be linux/amd64 or linux/arm64' >&2; exit 1 ;; esac
 
 docker-build: saola-cli-lock-validate docker-platform-validate ## Build docker image with the manager.
-	$(call with-saola-cli-context,$(CONTAINER_TOOL) build --build-context "saola-cli=$$context" $(SAOLA_CLI_BUILD_ARGS) --platform=$(DOCKER_PLATFORM) -t ${IMG} .)
+	$(call with-saola-cli-context,$(CONTAINER_TOOL) build --build-context "saola-cli=$$context" $(MANAGER_BUILD_ARGS) $(SAOLA_CLI_BUILD_ARGS) --platform=$(DOCKER_PLATFORM) -t ${IMG} .)
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -314,7 +338,7 @@ docker-push: ## Push docker image with the manager.
 override PLATFORMS = linux/amd64,linux/arm64
 .PHONY: docker-buildx
 docker-buildx: saola-cli-lock-validate ## Build and push docker image for the manager for cross-platform support
-	$(call with-saola-cli-context,$(CONTAINER_TOOL) buildx build --build-context "saola-cli=$$context" $(SAOLA_CLI_BUILD_ARGS) --push --platform=$(PLATFORMS) --tag ${IMG} .)
+	$(call with-saola-cli-context,$(CONTAINER_TOOL) buildx build --build-context "saola-cli=$$context" $(MANAGER_BUILD_ARGS) $(SAOLA_CLI_BUILD_ARGS) --push --platform=$(PLATFORMS) --tag ${IMG} .)
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.

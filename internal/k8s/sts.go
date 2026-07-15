@@ -20,7 +20,6 @@ import (
 	"context"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
-	"github.com/tidwall/gjson"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,67 +37,51 @@ func GetStatefulSet(ctx context.Context, kubeClient client.Client, name, namespa
 	return statefulSet, err
 }
 
-func GetStatefulSetsPhase(status []byte) string {
-	readyReplicas := gjson.GetBytes(status, "readyReplicas").Int()
-	replicas := gjson.GetBytes(status, "replicas").Int()
-	currentReplicas := gjson.GetBytes(status, "currentReplicas").Int()
-	updatedReplicas := gjson.GetBytes(status, "updatedReplicas").Int()
-
-	// If desired replicas is 0, return Unknown phase
-	if replicas == 0 {
-		return string(v1.PhaseUnknown)
+// DeriveStatefulSetPhase derives OpenSaola's lifecycle phase from the complete
+// StatefulSet object. Incomplete replica counters are rollout progress, not a
+// failure; concrete Pod/PVC failures are handled by the synchronizer's
+// readiness diagnostics.
+func DeriveStatefulSetPhase(statefulSet *appsv1.StatefulSet, previousPhase v1.Phase) v1.Phase {
+	if statefulSet == nil {
+		return v1.PhaseUnknown
 	}
 
-	// Check if in creating phase: no current replicas and no ready replicas
-	if currentReplicas == 0 && readyReplicas == 0 {
-		// Further check conditions to confirm whether it is being created
-		if isStatefulSetProgressing(status) {
-			return string(v1.PhaseCreating)
-		}
-		return string(v1.PhaseFailed)
+	desired := desiredReplicas(statefulSet.Spec.Replicas)
+	status := statefulSet.Status
+
+	if status.ObservedGeneration >= statefulSet.Generation &&
+		status.Replicas == desired &&
+		status.ReadyReplicas == desired &&
+		status.AvailableReplicas == desired &&
+		statefulSetRevisionConverged(statefulSet, desired) {
+		return v1.PhaseRunning
 	}
 
-	// Check if in updating phase: some replicas updated but not all ready
-	if updatedReplicas > 0 && readyReplicas < replicas && currentReplicas > 0 {
-		return string(v1.PhaseUpdating)
-	}
-
-	// Check if running normally: ready replicas equals desired replicas
-	if readyReplicas == replicas && currentReplicas == replicas {
-		return string(v1.PhaseRunning)
-	}
-
-	// All other cases are considered failed
-	return string(v1.PhaseFailed)
+	return workloadProgressPhase(statefulSet.Generation, previousPhase)
 }
 
-// isStatefulSetProgressing checks whether a StatefulSet is in a progressing state.
-func isStatefulSetProgressing(status []byte) bool {
-	conditions := gjson.GetBytes(status, "conditions").Array()
-	for _, condition := range conditions {
-		conditionType := condition.Get("type").String()
-		conditionStatus := condition.Get("status").String()
-		conditionReason := condition.Get("reason").String()
+func statefulSetRevisionConverged(statefulSet *appsv1.StatefulSet, desired int32) bool {
+	status := statefulSet.Status
+	if desired == 0 {
+		return status.CurrentReplicas == 0 && status.UpdatedReplicas == 0
+	}
 
-		// Check the Progressing condition (if present)
-		if conditionType == "Progressing" && conditionStatus == "True" {
-			// Common reasons indicating creation in progress
-			creatingReasons := []string{
-				"StatefulSetCreated",
-				"StatefulSetUpdated",
-				"PartitionRolling",
-			}
-
-			for _, reason := range creatingReasons {
-				if conditionReason == reason {
-					return true
-				}
-			}
+	strategy := statefulSet.Spec.UpdateStrategy
+	if strategy.Type == appsv1.RollingUpdateStatefulSetStrategyType || strategy.Type == "" {
+		partition := int32(0)
+		if strategy.RollingUpdate != nil && strategy.RollingUpdate.Partition != nil {
+			partition = *strategy.RollingUpdate.Partition
+		}
+		if partition > desired {
+			partition = desired
+		}
+		if partition > 0 {
+			return status.UpdatedReplicas >= desired-partition
 		}
 	}
 
-	// StatefulSet may not have a Progressing condition; use other indicators instead.
-	// If there is an observed generation but no replicas, it may be in the process of being created.
-	observedGeneration := gjson.GetBytes(status, "observedGeneration").Int()
-	return observedGeneration > 0
+	return status.CurrentReplicas == desired &&
+		status.UpdatedReplicas == desired &&
+		status.CurrentRevision != "" &&
+		status.CurrentRevision == status.UpdateRevision
 }

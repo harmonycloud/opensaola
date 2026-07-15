@@ -103,7 +103,10 @@ func ListMiddlewares(ctx context.Context, cli client.Client, namespace string, l
 	return results, nil
 }
 
-// UpdateMiddlewareStatus updates the Middleware status.
+// UpdateMiddlewareStatus updates controller-owned Middleware status fields.
+// The runtime-owned CustomResources field (the initial primary-CR seed and
+// SyncCustomResourceV2) is preserved from the latest API object so a deferred
+// controller update cannot overwrite a newer runtime observation.
 func UpdateMiddlewareStatus(ctx context.Context, cli client.Client, m *v1.Middleware) error {
 	attempt := 0
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -134,11 +137,14 @@ func UpdateMiddlewareStatus(ctx context.Context, cli client.Client, m *v1.Middle
 
 		log.FromContext(ctx).V(1).Info("Update Middleware status", "version", now.ResourceVersion)
 
+		desiredStatus := *m.Status.DeepCopy()
+		desiredStatus.CustomResources = now.Status.CustomResources
+
 		// Compare whether status has changed
-		if equality.Semantic.DeepEqual(now.Status, m.Status) {
+		if equality.Semantic.DeepEqual(now.Status, desiredStatus) {
 			return nil
 		}
-		now.Status = m.Status
+		now.Status = desiredStatus
 
 		// Retry updating the CR
 		err = cli.Status().Update(ctx, now)
@@ -151,9 +157,9 @@ func UpdateMiddlewareStatus(ctx context.Context, cli client.Client, m *v1.Middle
 
 // PatchMiddlewareStatusFields reads the latest Middleware from API Server,
 // applies the mutate function to modify only specific fields of its status,
-// then writes back. Unlike UpdateMiddlewareStatus which does full replacement,
-// this only modifies the fields touched by mutate, preventing concurrent
-// writers (e.g. SyncCustomResourceV2) from overwriting controller's state/conditions.
+// then writes back. This lets runtime writers modify only the fields they own,
+// preventing concurrent writers (e.g. SyncCustomResourceV2) from overwriting
+// controller-owned state/conditions.
 // (see English comment above)
 func PatchMiddlewareStatusFields(ctx context.Context, cli client.Client, name, namespace string, mutate func(*v1.MiddlewareStatus)) error {
 	attempt := 0

@@ -231,6 +231,33 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 	return nil
 }
 
+// seedInitialCustomResourcePhase persists Creating immediately after the first
+// successful primary custom resource apply. SyncCustomResourceV2 takes over
+// from this seed once the target resource exposes a derived or native phase.
+func seedInitialCustomResourcePhase(ctx context.Context, cli client.Client, action consts.HandleAction, m *v1.Middleware) error {
+	if m == nil || action != consts.HandleActionPublish || m.Status.CustomResources.Phase != v1.PhaseUnknown {
+		return nil
+	}
+
+	effectivePhase := m.Status.CustomResources.Phase
+	if err := k8s.PatchMiddlewareStatusFields(ctx, cli, m.Name, m.Namespace, func(s *v1.MiddlewareStatus) {
+		// A synchronizer update may have won the race after the primary resource
+		// was applied. Do not replace an observed runtime phase with Creating.
+		if s.CustomResources.Phase == v1.PhaseUnknown {
+			s.CustomResources.Phase = v1.PhaseCreating
+		}
+		effectivePhase = s.CustomResources.Phase
+	}); err != nil {
+		return fmt.Errorf("seed initial custom resource phase: %w", err)
+	}
+
+	// Keep the reconcile copy consistent with the value that was actually
+	// persisted. Later controller status updates deliberately preserve
+	// the runtime-owned customResources field.
+	m.Status.CustomResources.Phase = effectivePhase
+	return nil
+}
+
 // buildCustomResource builds the custom resource
 func buildCustomResource(ctx context.Context, cli client.Client, action consts.HandleAction, m *v1.Middleware) (err error) {
 	conditionApplyCluster := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeApplyCluster)
@@ -312,6 +339,9 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 			})
 			log.FromContext(ctx).Error(err, "create or patch custom resource error", status.DiagnosticLogValues(err)...)
 			watcher.CloseCRWatcher(ctx, cr)
+			return err
+		}
+		if err = seedInitialCustomResourcePhase(ctx, cli, action, m); err != nil {
 			return err
 		}
 

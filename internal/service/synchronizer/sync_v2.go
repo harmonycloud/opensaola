@@ -184,6 +184,16 @@ func customResourcesFromStatus(status []byte) (v1.CustomResources, error) {
 	return customResources, nil
 }
 
+func phaseFromGenericStatus(status []byte, fallback v1.Phase) v1.Phase {
+	phase := fallback
+	for _, key := range []string{"phase", "state"} {
+		if value := strings.TrimSpace(gjson.GetBytes(status, key).String()); value != "" {
+			phase = v1.Phase(value)
+		}
+	}
+	return phase
+}
+
 // recomputeAndUpdateStatus reads the latest Middleware and CR state, rebuilds
 // the full include list from the local informer cache, and writes the result back
 // to Middleware.status if anything changed.
@@ -201,6 +211,7 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		return
 	}
 	tempCustomResources := deepcopy.Copy(nowMid.Status.CustomResources)
+	previousPhase := nowMid.Status.CustomResources.Phase
 
 	nowCr, err := k8s.GetCustomResource(ctx, cli, cr.GetName(), cr.GetNamespace(), cr.GroupVersionKind())
 	if err != nil {
@@ -224,21 +235,6 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	if err != nil {
 		log.FromContext(ctx).Error(err, "recomputeAndUpdateStatus: unmarshal cr status error")
 		return
-	}
-
-	// Phase extraction
-	var CRPhaseKeys = []string{"phase", "state"}
-	switch cr.GroupVersionKind().Kind {
-	case "StatefulSet":
-		nowMid.Status.CustomResources.Phase = v1.Phase(k8s.GetStatefulSetsPhase(nowCrStatusBytes))
-	case "Deployment":
-		nowMid.Status.CustomResources.Phase = v1.Phase(k8s.GetDeploymentPhase(nowCrStatusBytes))
-	default:
-		for _, key := range CRPhaseKeys {
-			if gjson.GetBytes(nowCrStatusBytes, key).Exists() {
-				nowMid.Status.CustomResources.Phase = v1.Phase(gjson.GetBytes(nowCrStatusBytes, key).String())
-			}
-		}
 	}
 
 	// Replicas extraction
@@ -281,29 +277,37 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		},
 	}
 
-	// Get the single workload object that is the CR itself (by kind).
-	switch nowCr.GetKind() {
-	case "Deployment":
+	// Derive phase from native workloads using their complete typed object. All
+	// other custom resources preserve the existing status.phase/status.state
+	// passthrough behavior.
+	switch nowCr.GroupVersionKind() {
+	case appsv1.SchemeGroupVersion.WithKind("Deployment"):
 		dep, depErr := k8s.GetDeployment(ctx, cli, nowCr.GetName(), nowCr.GetNamespace())
 		if depErr != nil {
 			log.FromContext(ctx).Error(depErr, "recomputeAndUpdateStatus: get deployment error")
 			return
 		}
+		nowMid.Status.CustomResources.Phase = k8s.DeriveDeploymentPhase(dep, previousPhase)
 		deployments[dep.Name] = *dep
-	case "StatefulSet":
+	case appsv1.SchemeGroupVersion.WithKind("StatefulSet"):
 		sts, stsErr := k8s.GetStatefulSet(ctx, cli, nowCr.GetName(), nowCr.GetNamespace())
 		if stsErr != nil {
 			log.FromContext(ctx).Error(stsErr, "recomputeAndUpdateStatus: get statefulset error")
 			return
 		}
+		nowMid.Status.CustomResources.Phase = k8s.DeriveStatefulSetPhase(sts, previousPhase)
 		statefulsets[sts.Name] = *sts
-	case "DaemonSet":
+	case appsv1.SchemeGroupVersion.WithKind("DaemonSet"):
 		ds, dsErr := k8s.GetDaemonSet(ctx, cli, nowCr.GetName(), nowCr.GetNamespace())
 		if dsErr != nil {
 			log.FromContext(ctx).Error(dsErr, "recomputeAndUpdateStatus: get daemonset error")
 			return
 		}
+		nowMid.Status.CustomResources.Phase = k8s.DeriveDaemonSetPhase(ds, previousPhase)
+		nowMid.Status.CustomResources.Replicas = int(ds.Status.DesiredNumberScheduled)
 		daemonsets[ds.Name] = *ds
+	default:
+		nowMid.Status.CustomResources.Phase = phaseFromGenericStatus(nowCrStatusBytes, previousPhase)
 	}
 
 	// Obtain the namespace cache from the informer manager.

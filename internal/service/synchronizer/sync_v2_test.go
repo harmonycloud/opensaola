@@ -255,6 +255,35 @@ func TestCustomResourcesFromStatusClearsMissingReason(t *testing.T) {
 	}
 }
 
+func TestPhaseFromGenericStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		status   string
+		fallback v1.Phase
+		want     v1.Phase
+	}{
+		{name: "missing phase and state preserves creating", status: `{}`, fallback: v1.PhaseCreating, want: v1.PhaseCreating},
+		{name: "empty phase preserves creating", status: `{"phase":""}`, fallback: v1.PhaseCreating, want: v1.PhaseCreating},
+		{name: "phase only", status: `{"phase":"Running"}`, fallback: v1.PhaseCreating, want: v1.PhaseRunning},
+		{name: "state only", status: `{"state":"Available"}`, fallback: v1.PhaseCreating, want: v1.Phase("Available")},
+		{name: "empty state does not override phase", status: `{"phase":"Running","state":""}`, fallback: v1.PhaseCreating, want: v1.PhaseRunning},
+		{name: "state preserves existing precedence over phase", status: `{"phase":"Running","state":"Updating"}`, fallback: v1.PhaseCreating, want: v1.PhaseUpdating},
+		{name: "missing phase and state preserves running", status: `{}`, fallback: v1.PhaseRunning, want: v1.PhaseRunning},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := phaseFromGenericStatus([]byte(tt.status), tt.fallback); got != tt.want {
+				t.Fatalf("phaseFromGenericStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPVCBelongsToStatefulSet_UsesSelectorLabels(t *testing.T) {
 	sts := appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "rocketmq-xwjnamesrv"},

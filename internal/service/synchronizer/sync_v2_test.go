@@ -17,14 +17,103 @@ limitations under the License.
 package synchronizer
 
 import (
+	"context"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestScheduleInitialReadinessRecheck(t *testing.T) {
+	tests := []struct {
+		name         string
+		stopBefore   bool
+		cancelBefore bool
+		wantTrigger  bool
+	}{
+		{
+			name:        "fires at the grace deadline",
+			wantTrigger: true,
+		},
+		{
+			name:       "owner stop cancels the recheck",
+			stopBefore: true,
+		},
+		{
+			name:         "context cancellation cancels the recheck",
+			cancelBefore: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				stop := make(chan struct{})
+				triggered := make(chan struct{}, 1)
+				scheduleInitialReadinessRecheck(ctx, stop, time.Now().Add(time.Minute), func() {
+					triggered <- struct{}{}
+				})
+				synctest.Wait()
+
+				if tt.stopBefore {
+					close(stop)
+					synctest.Wait()
+				}
+				if tt.cancelBefore {
+					cancel()
+					synctest.Wait()
+				}
+				time.Sleep(time.Minute)
+				synctest.Wait()
+
+				select {
+				case <-triggered:
+					if !tt.wantTrigger {
+						t.Fatal("expected owner stop to suppress the grace recheck")
+					}
+				default:
+					if tt.wantTrigger {
+						t.Fatal("expected grace deadline to trigger a recheck")
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestInitialReadinessRecheckDeadline_UsesLiveCustomResourceTimestamp(t *testing.T) {
+	gvk := schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "StatefulSet"}
+	createdAt := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(gvk)
+	live.SetNamespace("middleware")
+	live.SetName("demo-minio")
+	live.SetGeneration(1)
+	live.SetCreationTimestamp(metav1.NewTime(createdAt))
+
+	cli := fake.NewClientBuilder().WithObjects(live).Build()
+	desired := live.DeepCopy()
+	desired.SetCreationTimestamp(metav1.Time{})
+
+	got, ok := initialReadinessRecheckDeadline(context.Background(), cli, desired)
+	if !ok {
+		t.Fatal("expected live first-generation custom resource to provide a recheck deadline")
+	}
+	want := createdAt.Add(initialReadinessGracePeriod)
+	if !got.Equal(want) {
+		t.Fatalf("recheck deadline = %s, want %s", got, want)
+	}
+}
 
 func TestHasOwnerUID(t *testing.T) {
 	tests := []struct {

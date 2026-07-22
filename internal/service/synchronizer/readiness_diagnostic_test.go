@@ -19,6 +19,7 @@ package synchronizer
 import (
 	"strings"
 	"testing"
+	"time"
 
 	zeusv1 "github.com/harmonycloud/opensaola/api/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -214,6 +215,198 @@ func TestDeriveMiddlewareReadinessDiagnostic_TransientWaitDoesNotHideActionableW
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected transient wait not to hide %q, got %q", want, got)
 		}
+	}
+}
+
+func TestDeriveMiddlewareReadinessDiagnostic_InitialReadinessGrace(t *testing.T) {
+	now := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+	pendingPVC := corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "export-demo-minio-0", Namespace: "middleware"},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimPending},
+	}
+
+	tests := []struct {
+		name           string
+		createdAt      time.Time
+		midCreatedAt   time.Time
+		midGeneration  int64
+		crGeneration   int64
+		runtimePhase   zeusv1.Phase
+		pods           map[string]corev1.Pod
+		pvcs           map[string]corev1.PersistentVolumeClaim
+		wantEmpty      bool
+		wantDiagnostic string
+	}{
+		{
+			name:      "pending PVC remains transient during first-start window",
+			createdAt: now.Add(-time.Minute),
+			pvcs:      map[string]corev1.PersistentVolumeClaim{pendingPVC.Name: pendingPVC},
+			wantEmpty: true,
+		},
+		{
+			name:          "Middleware update before first workload ready remains transient",
+			createdAt:     now.Add(-time.Minute),
+			midGeneration: 2,
+			pvcs:          map[string]corev1.PersistentVolumeClaim{pendingPVC.Name: pendingPVC},
+			wantEmpty:     true,
+		},
+		{
+			name:      "pod ready false without container status remains transient during first-start window",
+			createdAt: now.Add(-time.Minute),
+			pods: map[string]corev1.Pod{
+				"demo-minio-0": {
+					ObjectMeta: metav1.ObjectMeta{Name: "demo-minio-0", Namespace: "middleware"},
+					Status: corev1.PodStatus{Conditions: []corev1.PodCondition{
+						{Type: corev1.PodReady, Status: corev1.ConditionFalse, Reason: "ContainersNotReady"},
+						{Type: corev1.ContainersReady, Status: corev1.ConditionFalse, Reason: "ContainersNotReady"},
+					}},
+				},
+			},
+			wantEmpty: true,
+		},
+		{
+			name:      "PVC binding unschedulable remains transient during first-start window",
+			createdAt: now.Add(-time.Minute),
+			pods: map[string]corev1.Pod{
+				"demo-minio-0": {
+					ObjectMeta: metav1.ObjectMeta{Name: "demo-minio-0", Namespace: "middleware"},
+					Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+						Type:    corev1.PodScheduled,
+						Status:  corev1.ConditionFalse,
+						Reason:  "Unschedulable",
+						Message: "0/3 nodes are available: pod has unbound immediate PersistentVolumeClaims",
+					}}},
+				},
+			},
+			wantEmpty: true,
+		},
+		{
+			name:      "resource unschedulable stays actionable during first-start window",
+			createdAt: now.Add(-time.Minute),
+			pods: map[string]corev1.Pod{
+				"demo-minio-0": {
+					ObjectMeta: metav1.ObjectMeta{Name: "demo-minio-0", Namespace: "middleware"},
+					Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+						Type:    corev1.PodScheduled,
+						Status:  corev1.ConditionFalse,
+						Reason:  "Unschedulable",
+						Message: "0/3 nodes are available: 1 Insufficient cpu",
+					}}},
+				},
+			},
+			wantDiagnostic: "causeCategory=SchedulingUnschedulable",
+		},
+		{
+			name:      "mixed PVC binding and resource unschedulable stays actionable during first-start window",
+			createdAt: now.Add(-time.Minute),
+			pods: map[string]corev1.Pod{
+				"demo-minio-0": {
+					ObjectMeta: metav1.ObjectMeta{Name: "demo-minio-0", Namespace: "middleware"},
+					Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+						Type:    corev1.PodScheduled,
+						Status:  corev1.ConditionFalse,
+						Reason:  "Unschedulable",
+						Message: "0/3 nodes are available: 1 Insufficient cpu, 2 pod has unbound immediate PersistentVolumeClaims",
+					}}},
+				},
+			},
+			wantDiagnostic: "causeCategory=SchedulingUnschedulable",
+		},
+		{
+			name:      "actionable container wait stays actionable during first-start window",
+			createdAt: now.Add(-time.Minute),
+			pods: map[string]corev1.Pod{
+				"demo-minio-0": {
+					ObjectMeta: metav1.ObjectMeta{Name: "demo-minio-0", Namespace: "middleware"},
+					Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+						Name: "minio",
+						State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+							Reason:  "ErrImagePull",
+							Message: "registry unavailable",
+						}},
+					}}},
+				},
+			},
+			wantDiagnostic: "actual=ErrImagePull",
+		},
+		{
+			name:           "pending PVC reports after first-start window",
+			createdAt:      now.Add(-initialReadinessGracePeriod),
+			pvcs:           map[string]corev1.PersistentVolumeClaim{pendingPVC.Name: pendingPVC},
+			wantDiagnostic: "causeCategory=PVCPending",
+		},
+		{
+			name:           "old primary CR is not extended by a fresh Middleware timestamp",
+			createdAt:      now.Add(-initialReadinessGracePeriod),
+			midCreatedAt:   now,
+			pvcs:           map[string]corev1.PersistentVolumeClaim{pendingPVC.Name: pendingPVC},
+			wantDiagnostic: "causeCategory=PVCPending",
+		},
+		{
+			name:           "missing primary CR timestamp does not suppress diagnostics",
+			pvcs:           map[string]corev1.PersistentVolumeClaim{pendingPVC.Name: pendingPVC},
+			wantDiagnostic: "causeCategory=PVCPending",
+		},
+		{
+			name:           "updated primary CR does not use the first-start window",
+			createdAt:      now.Add(-time.Minute),
+			crGeneration:   2,
+			pvcs:           map[string]corev1.PersistentVolumeClaim{pendingPVC.Name: pendingPVC},
+			wantDiagnostic: "causeCategory=PVCPending",
+		},
+		{
+			name:           "pending PVC remains actionable after the runtime has already failed",
+			createdAt:      now.Add(-time.Minute),
+			runtimePhase:   zeusv1.PhaseFailed,
+			pvcs:           map[string]corev1.PersistentVolumeClaim{pendingPVC.Name: pendingPVC},
+			wantDiagnostic: "causeCategory=PVCPending",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			midGeneration := tt.midGeneration
+			if midGeneration == 0 {
+				midGeneration = 1
+			}
+			crGeneration := tt.crGeneration
+			if crGeneration == 0 {
+				crGeneration = 1
+			}
+			phase := tt.runtimePhase
+			if phase == "" {
+				phase = zeusv1.PhaseCreating
+			}
+			mid := &zeusv1.Middleware{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "demo-minio",
+					Namespace:         "middleware",
+					Generation:        midGeneration,
+					CreationTimestamp: metav1.NewTime(tt.midCreatedAt),
+				},
+				Status: zeusv1.MiddlewareStatus{CustomResources: zeusv1.CustomResources{
+					Phase: phase,
+				}},
+			}
+			cr := &unstructured.Unstructured{}
+			cr.SetAPIVersion("apps/v1")
+			cr.SetKind("StatefulSet")
+			cr.SetNamespace("middleware")
+			cr.SetName(mid.Name)
+			cr.SetGeneration(crGeneration)
+			cr.SetCreationTimestamp(metav1.NewTime(tt.createdAt))
+
+			got := deriveMiddlewareReadinessDiagnosticAt(mid, cr, tt.pods, tt.pvcs, now)
+			if tt.wantEmpty {
+				if got != "" {
+					t.Fatalf("expected no diagnostic, got %q", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tt.wantDiagnostic) {
+				t.Fatalf("expected diagnostic to contain %q, got %q", tt.wantDiagnostic, got)
+			}
+		})
 	}
 }
 

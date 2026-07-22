@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mohae/deepcopy"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -699,6 +700,57 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	}
 }
 
+// initialReadinessRecheckDeadline resolves the deadline from a fresh primary
+// custom resource. The caller may hold the desired object from publish, which
+// does not reliably carry API server-assigned creation metadata.
+func initialReadinessRecheckDeadline(ctx context.Context, cli client.Client, cr *unstructured.Unstructured) (time.Time, bool) {
+	if cr == nil {
+		return time.Time{}, false
+	}
+
+	nowCr, err := k8s.GetCustomResource(ctx, cli, cr.GetName(), cr.GetNamespace(), cr.GroupVersionKind())
+	if err != nil {
+		log.FromContext(ctx).Info("initial readiness recheck: get custom resource skipped", "warning", true,
+			"gvk", cr.GroupVersionKind().String(), "namespace", cr.GetNamespace(), "name", cr.GetName(), "err", err)
+		return time.Time{}, false
+	}
+	return initialReadinessDeadline(nowCr)
+}
+
+// scheduleInitialReadinessRecheck wakes the event-driven synchronizer once the
+// first-start grace period ends. Informers intentionally have no periodic
+// resync, so without this one-shot timer a silent Pending PVC could otherwise
+// remain in Creating indefinitely. Its owner stop channel cancels it on delete.
+func scheduleInitialReadinessRecheck(ctx context.Context, stop <-chan struct{}, deadline time.Time, trigger func()) {
+	delay := time.Until(deadline)
+	if delay <= 0 {
+		return
+	}
+
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-stop:
+			return
+		case <-timer.C:
+			// stop may become ready at the same instant as the timer. Prefer
+			// cancellation so a deleted Middleware cannot trigger a stale read.
+			select {
+			case <-ctx.Done():
+				return
+			case <-stop:
+				return
+			default:
+			}
+			trigger()
+		}
+	}()
+}
+
 // SyncCustomResourceV2 is an event-driven replacement for SyncCustomResource.
 // Instead of a fixed ticker, it registers the namespace with NsInformerManager and
 // registers a per-Middleware Debouncer that fires recomputeAndUpdateStatus on any
@@ -744,6 +796,9 @@ func SyncCustomResourceV2(ctx context.Context, cli client.Client, cr *unstructur
 	stopChan, ok := actual.(chan struct{})
 	if !ok {
 		return fmt.Errorf("SyncCustomResourceV2 stop channel %s has unexpected type %T", key, actual)
+	}
+	if deadline, hasDeadline := initialReadinessRecheckDeadline(ctx, cli, cr); hasDeadline {
+		scheduleInitialReadinessRecheck(ctx, stopChan, deadline, triggerFn)
 	}
 
 	defer func() {

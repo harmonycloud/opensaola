@@ -7,8 +7,8 @@ IMG ?= controller:latest
 # tools. (i.e. podman)
 CONTAINER_TOOL ?= docker
 MANAGER_VERSION ?= $(shell \
-	tag="$$(git describe --exact-match --tags --match 'v[0-9]*' HEAD 2>/dev/null)"; \
-	if printf '%s\n' "$$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$$'; then \
+	if tag="$$(git describe --exact-match --tags --match 'v[0-9]*' HEAD 2>/dev/null)" && \
+		printf '%s\n' "$$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$$'; then \
 		printf '%s' "$$tag"; \
 	elif branch="$$(git symbolic-ref --quiet --short HEAD 2>/dev/null)" && [ -n "$$branch" ]; then \
 		printf '%s' "$$branch"; \

@@ -195,6 +195,41 @@ func phaseFromGenericStatus(status []byte, fallback v1.Phase) v1.Phase {
 	return phase
 }
 
+// operatorOwnsCustomResourceStatus reports whether the primary custom resource
+// is managed by an external middleware operator. Its status is authoritative for
+// the Middleware lifecycle and must not be replaced by inferred Pod/PVC status.
+//
+// A partially populated reference is still treated as operator-managed here.
+// Validation handles the malformed reference separately; falling through to the
+// no-operator status path would make a legacy or malformed object report a
+// synthetic runtime state instead of the state published by its primary CR.
+func operatorOwnsCustomResourceStatus(mid *v1.Middleware) bool {
+	if mid == nil {
+		return false
+	}
+	return strings.TrimSpace(mid.Spec.OperatorBaseline.Name) != "" ||
+		strings.TrimSpace(mid.Spec.OperatorBaseline.GvkName) != ""
+}
+
+// applyLocalReadinessDiagnostic applies Pod/PVC-derived runtime status only to
+// no-operator middleware. For operator-managed middleware, the primary CR owns
+// phase and reason; child resources are still discovered for Include but cannot
+// overwrite the CR's lifecycle state.
+func applyLocalReadinessDiagnostic(
+	mid *v1.Middleware,
+	cr *unstructured.Unstructured,
+	pods map[string]corev1.Pod,
+	pvcs map[string]corev1.PersistentVolumeClaim,
+) {
+	if mid == nil || operatorOwnsCustomResourceStatus(mid) {
+		return
+	}
+	if diagnostic := deriveMiddlewareReadinessDiagnostic(mid, cr, pods, pvcs); diagnostic != "" {
+		mid.Status.CustomResources.Phase = v1.PhaseFailed
+		mid.Status.CustomResources.Reason = diagnostic
+	}
+}
+
 // recomputeAndUpdateStatus reads the latest Middleware and CR state, rebuilds
 // the full include list from the local informer cache, and writes the result back
 // to Middleware.status if anything changed.
@@ -278,37 +313,43 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		},
 	}
 
-	// Derive phase from native workloads using their complete typed object. All
-	// other custom resources preserve the existing status.phase/status.state
-	// passthrough behavior.
-	switch nowCr.GroupVersionKind() {
-	case appsv1.SchemeGroupVersion.WithKind("Deployment"):
-		dep, depErr := k8s.GetDeployment(ctx, cli, nowCr.GetName(), nowCr.GetNamespace())
-		if depErr != nil {
-			log.FromContext(ctx).Error(depErr, "recomputeAndUpdateStatus: get deployment error")
-			return
-		}
-		nowMid.Status.CustomResources.Phase = k8s.DeriveDeploymentPhase(dep, previousPhase)
-		deployments[dep.Name] = *dep
-	case appsv1.SchemeGroupVersion.WithKind("StatefulSet"):
-		sts, stsErr := k8s.GetStatefulSet(ctx, cli, nowCr.GetName(), nowCr.GetNamespace())
-		if stsErr != nil {
-			log.FromContext(ctx).Error(stsErr, "recomputeAndUpdateStatus: get statefulset error")
-			return
-		}
-		nowMid.Status.CustomResources.Phase = k8s.DeriveStatefulSetPhase(sts, previousPhase)
-		statefulsets[sts.Name] = *sts
-	case appsv1.SchemeGroupVersion.WithKind("DaemonSet"):
-		ds, dsErr := k8s.GetDaemonSet(ctx, cli, nowCr.GetName(), nowCr.GetNamespace())
-		if dsErr != nil {
-			log.FromContext(ctx).Error(dsErr, "recomputeAndUpdateStatus: get daemonset error")
-			return
-		}
-		nowMid.Status.CustomResources.Phase = k8s.DeriveDaemonSetPhase(ds, previousPhase)
-		nowMid.Status.CustomResources.Replicas = int(ds.Status.DesiredNumberScheduled)
-		daemonsets[ds.Name] = *ds
-	default:
+	// Operator-managed Middleware mirrors the primary CR lifecycle directly,
+	// regardless of the CR's GVK. Native workload derivation is reserved for
+	// no-operator Middleware, whose primary resource has no external controller
+	// status to own the lifecycle.
+	operatorOwnsStatus := operatorOwnsCustomResourceStatus(nowMid)
+	if operatorOwnsStatus {
 		nowMid.Status.CustomResources.Phase = phaseFromGenericStatus(nowCrStatusBytes, previousPhase)
+	} else {
+		switch nowCr.GroupVersionKind() {
+		case appsv1.SchemeGroupVersion.WithKind("Deployment"):
+			dep, depErr := k8s.GetDeployment(ctx, cli, nowCr.GetName(), nowCr.GetNamespace())
+			if depErr != nil {
+				log.FromContext(ctx).Error(depErr, "recomputeAndUpdateStatus: get deployment error")
+				return
+			}
+			nowMid.Status.CustomResources.Phase = k8s.DeriveDeploymentPhase(dep, previousPhase)
+			deployments[dep.Name] = *dep
+		case appsv1.SchemeGroupVersion.WithKind("StatefulSet"):
+			sts, stsErr := k8s.GetStatefulSet(ctx, cli, nowCr.GetName(), nowCr.GetNamespace())
+			if stsErr != nil {
+				log.FromContext(ctx).Error(stsErr, "recomputeAndUpdateStatus: get statefulset error")
+				return
+			}
+			nowMid.Status.CustomResources.Phase = k8s.DeriveStatefulSetPhase(sts, previousPhase)
+			statefulsets[sts.Name] = *sts
+		case appsv1.SchemeGroupVersion.WithKind("DaemonSet"):
+			ds, dsErr := k8s.GetDaemonSet(ctx, cli, nowCr.GetName(), nowCr.GetNamespace())
+			if dsErr != nil {
+				log.FromContext(ctx).Error(dsErr, "recomputeAndUpdateStatus: get daemonset error")
+				return
+			}
+			nowMid.Status.CustomResources.Phase = k8s.DeriveDaemonSetPhase(ds, previousPhase)
+			nowMid.Status.CustomResources.Replicas = int(ds.Status.DesiredNumberScheduled)
+			daemonsets[ds.Name] = *ds
+		default:
+			nowMid.Status.CustomResources.Phase = phaseFromGenericStatus(nowCrStatusBytes, previousPhase)
+		}
 	}
 
 	// Obtain the namespace cache from the informer manager.
@@ -521,10 +562,7 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 			Name: key,
 		})
 	}
-	if diagnostic := deriveMiddlewareReadinessDiagnostic(nowMid, nowCr, pods, pvcs); diagnostic != "" {
-		nowMid.Status.CustomResources.Phase = v1.PhaseFailed
-		nowMid.Status.CustomResources.Reason = diagnostic
-	}
+	applyLocalReadinessDiagnostic(nowMid, nowCr, pods, pvcs)
 
 	// Disaster sync — unchanged from V1, still reads from API server via k8s helpers.
 	nowMid.Status.CustomResources.Disaster = new(v1.Disaster)

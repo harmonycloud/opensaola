@@ -77,6 +77,107 @@ func TestDeriveMiddlewareReadinessDiagnostic_PodImagePullTLS(t *testing.T) {
 	}
 }
 
+func TestApplyLocalReadinessDiagnostic_RespectsOperatorStatusOwnership(t *testing.T) {
+	t.Parallel()
+
+	cr := &unstructured.Unstructured{}
+	cr.SetAPIVersion("psmdb.percona.com/v1")
+	cr.SetKind("PerconaServerMongoDB")
+	cr.SetNamespace("middleware")
+	cr.SetName("demo-mongodb")
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-mongodb-rs0-0", Namespace: "middleware"},
+		Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+			Type:    corev1.PodReady,
+			Status:  corev1.ConditionFalse,
+			Reason:  "ContainersNotReady",
+			Message: "containers with unready status: [mongod]",
+		}}},
+	}
+
+	tests := []struct {
+		name           string
+		mid            *zeusv1.Middleware
+		wantPhase      zeusv1.Phase
+		wantReason     string
+		wantDiagnostic bool
+	}{
+		{
+			name: "operator CR status remains authoritative",
+			mid: &zeusv1.Middleware{
+				Spec: zeusv1.MiddlewareSpec{OperatorBaseline: zeusv1.OperatorBaseline{
+					Name:    "mongodb-operator-standard",
+					GvkName: "v1",
+				}},
+				Status: zeusv1.MiddlewareStatus{CustomResources: zeusv1.CustomResources{
+					Phase:  zeusv1.Phase("initializing"),
+					Reason: "operator is initializing replica set",
+				}},
+			},
+			wantPhase:  zeusv1.Phase("initializing"),
+			wantReason: "operator is initializing replica set",
+		},
+		{
+			name: "operator ready status remains authoritative",
+			mid: &zeusv1.Middleware{
+				Spec: zeusv1.MiddlewareSpec{OperatorBaseline: zeusv1.OperatorBaseline{
+					Name:    "mongodb-operator-standard",
+					GvkName: "v1",
+				}},
+				Status: zeusv1.MiddlewareStatus{CustomResources: zeusv1.CustomResources{
+					Phase: zeusv1.Phase("ready"),
+				}},
+			},
+			wantPhase: zeusv1.Phase("ready"),
+		},
+		{
+			name: "partial operator baseline remains CR authoritative",
+			mid: &zeusv1.Middleware{
+				Spec: zeusv1.MiddlewareSpec{OperatorBaseline: zeusv1.OperatorBaseline{
+					Name: "mongodb-operator-standard",
+				}},
+				Status: zeusv1.MiddlewareStatus{CustomResources: zeusv1.CustomResources{
+					Phase:  zeusv1.Phase("initializing"),
+					Reason: "operator is initializing replica set",
+				}},
+			},
+			wantPhase:  zeusv1.Phase("initializing"),
+			wantReason: "operator is initializing replica set",
+		},
+		{
+			name: "no operator middleware derives a readiness failure",
+			mid: &zeusv1.Middleware{
+				Status: zeusv1.MiddlewareStatus{CustomResources: zeusv1.CustomResources{
+					Phase: zeusv1.PhaseCreating,
+				}},
+			},
+			wantPhase:      zeusv1.PhaseFailed,
+			wantDiagnostic: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mid := tt.mid.DeepCopy()
+			applyLocalReadinessDiagnostic(mid, cr, map[string]corev1.Pod{pod.Name: pod}, nil)
+
+			if got := mid.Status.CustomResources.Phase; got != tt.wantPhase {
+				t.Fatalf("phase = %q, want %q", got, tt.wantPhase)
+			}
+			if tt.wantDiagnostic {
+				if !strings.Contains(mid.Status.CustomResources.Reason, "phase=workload-readiness") {
+					t.Fatalf("expected local readiness diagnostic, got %q", mid.Status.CustomResources.Reason)
+				}
+				return
+			}
+			if got := mid.Status.CustomResources.Reason; got != tt.wantReason {
+				t.Fatalf("reason = %q, want %q", got, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestDeriveMiddlewareReadinessDiagnostic_ContainerCreatingIsTransient(t *testing.T) {
 	mid := &zeusv1.Middleware{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo-minio", Namespace: "middleware", Generation: 2},

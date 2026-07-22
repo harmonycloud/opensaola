@@ -357,6 +357,8 @@ func TestPhaseFromGenericStatus(t *testing.T) {
 		{name: "empty phase preserves creating", status: `{"phase":""}`, fallback: v1.PhaseCreating, want: v1.PhaseCreating},
 		{name: "phase only", status: `{"phase":"Running"}`, fallback: v1.PhaseCreating, want: v1.PhaseRunning},
 		{name: "state only", status: `{"state":"Available"}`, fallback: v1.PhaseCreating, want: v1.Phase("Available")},
+		{name: "operator initializing state passes through", status: `{"state":"initializing"}`, fallback: v1.PhaseCreating, want: v1.Phase("initializing")},
+		{name: "operator ready state passes through", status: `{"state":"ready"}`, fallback: v1.PhaseCreating, want: v1.Phase("ready")},
 		{name: "empty state does not override phase", status: `{"phase":"Running","state":""}`, fallback: v1.PhaseCreating, want: v1.PhaseRunning},
 		{name: "state preserves existing precedence over phase", status: `{"phase":"Running","state":"Updating"}`, fallback: v1.PhaseCreating, want: v1.PhaseUpdating},
 		{name: "missing phase and state preserves running", status: `{}`, fallback: v1.PhaseRunning, want: v1.PhaseRunning},
@@ -368,6 +370,55 @@ func TestPhaseFromGenericStatus(t *testing.T) {
 			t.Parallel()
 			if got := phaseFromGenericStatus([]byte(tt.status), tt.fallback); got != tt.want {
 				t.Fatalf("phaseFromGenericStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOperatorOwnsCustomResourceStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		mid  *v1.Middleware
+		want bool
+	}{
+		{
+			name: "nil middleware is not operator managed",
+		},
+		{
+			name: "no operator baseline is not operator managed",
+			mid:  &v1.Middleware{},
+		},
+		{
+			name: "complete operator baseline owns status",
+			mid: &v1.Middleware{Spec: v1.MiddlewareSpec{OperatorBaseline: v1.OperatorBaseline{
+				Name:    "mongodb-operator-standard",
+				GvkName: "v1",
+			}}},
+			want: true,
+		},
+		{
+			name: "partial legacy operator baseline still owns status",
+			mid: &v1.Middleware{Spec: v1.MiddlewareSpec{OperatorBaseline: v1.OperatorBaseline{
+				Name: "mongodb-operator-standard",
+			}}},
+			want: true,
+		},
+		{
+			name: "operator GVK reference alone still owns status",
+			mid: &v1.Middleware{Spec: v1.MiddlewareSpec{OperatorBaseline: v1.OperatorBaseline{
+				GvkName: "v1",
+			}}},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := operatorOwnsCustomResourceStatus(tt.mid); got != tt.want {
+				t.Fatalf("operatorOwnsCustomResourceStatus() = %v, want %v", got, tt.want)
 			}
 		})
 	}

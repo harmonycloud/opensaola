@@ -33,6 +33,7 @@ import (
 	"github.com/harmonycloud/opensaola/internal/resource/logger"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
 	"github.com/harmonycloud/opensaola/internal/service/packages"
+	"github.com/harmonycloud/opensaola/internal/version"
 	"github.com/harmonycloud/opensaola/pkg/config"
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -82,6 +83,7 @@ func main() {
 	var kubeTimeout time.Duration
 	var probeAddr string
 	var enableHTTP2 bool
+	var printVersion bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8081", "The address the metrics endpoint binds to. "+
 		"Serves controller-runtime built-in metrics over plain HTTP; use 0 to disable.")
@@ -101,7 +103,13 @@ func main() {
 	flag.StringVar(&webhookCertKey, "webhook-cert-key", "tls.key", "The name of the webhook key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the webhook server")
+	flag.BoolVar(&printVersion, "version", false, "Print manager version information and exit.")
 	flag.Parse()
+
+	if printVersion {
+		fmt.Fprintln(os.Stdout, version.Current())
+		return
+	}
 
 	if err := config.Initialize(); err != nil {
 		setupLog.Error(err, "failed to initialize config")
@@ -111,6 +119,12 @@ func main() {
 	resource.Initialize()
 
 	ctrl.SetLogger(zerologr.New(&logger.Log.Zlog).WithCallDepth(-1))
+	buildInfo := version.Current()
+	setupLog.Info("manager build information",
+		"version", buildInfo.Version,
+		"gitCommit", buildInfo.GitCommit,
+		"buildDate", buildInfo.BuildDate,
+	)
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will

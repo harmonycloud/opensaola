@@ -26,9 +26,108 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  manager-metadata:
+    name: Resolve manager metadata
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      git_commit: ${{ steps.metadata.outputs.git_commit }}
+      build_date: ${{ steps.metadata.outputs.build_date }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Derive and validate manager metadata
+        id: metadata
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          commit="$(git rev-parse HEAD)"
+          [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "checked-out manager commit is not a full lowercase SHA: ${commit}" >&2
+            exit 1
+          }
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "GitHub event SHA is not a full lowercase SHA: ${GITHUB_SHA}" >&2
+            exit 1
+          }
+          [[ "${commit}" == "${GITHUB_SHA}" ]] || {
+            echo "checked-out manager commit ${commit} does not match event SHA ${GITHUB_SHA}" >&2
+            exit 1
+          }
+
+          build_date="$(git show -s --format=%cI "${commit}")"
+          [[ "${build_date}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$ ]] || {
+            echo "manager commit date is not RFC3339: ${build_date}" >&2
+            exit 1
+          }
+
+          case "${GITHUB_EVENT_NAME}" in
+            pull_request)
+              [[ "${PR_NUMBER}" =~ ^[1-9][0-9]*$ ]] || {
+                echo "pull request number is invalid: ${PR_NUMBER}" >&2
+                exit 1
+              }
+              version="pr-${PR_NUMBER}"
+              ;;
+            push|workflow_dispatch)
+              case "${GITHUB_REF}" in
+                refs/tags/*)
+                  [[ "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] || {
+                    echo 'Release tags must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease' >&2
+                    exit 1
+                  }
+                  version="${GITHUB_REF_NAME}"
+                  ;;
+                refs/heads/*)
+                  version="${GITHUB_REF_NAME}"
+                  ;;
+                *)
+                  echo "unsupported manager metadata ref: ${GITHUB_REF}" >&2
+                  exit 1
+                  ;;
+              esac
+              ;;
+            *)
+              echo "unsupported manager metadata event: ${GITHUB_EVENT_NAME}" >&2
+              exit 1
+              ;;
+          esac
+
+          for value in "${version}" "${commit}" "${build_date}"; do
+            [[ -n "${value}" ]] || {
+              echo 'manager metadata values must not be empty' >&2
+              exit 1
+            }
+          done
+
+          echo "version=${version}" >>"${GITHUB_OUTPUT}"
+          echo "git_commit=${commit}" >>"${GITHUB_OUTPUT}"
+          echo "build_date=${build_date}" >>"${GITHUB_OUTPUT}"
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify manager version contract
+        env:
+          VERSION: ${{ steps.metadata.outputs.version }}
+          GIT_COMMIT: ${{ steps.metadata.outputs.git_commit }}
+          BUILD_DATE: ${{ steps.metadata.outputs.build_date }}
+        run: |
+          set -euo pipefail
+          bash hack/manager-version-build_test.sh
+          bash hack/manager-version-workflow_test.sh
+          bash hack/manager-version_test.sh
+
   pr-build:
     if: github.event_name == 'pull_request'
     name: Build without publishing
+    needs: manager-metadata
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -92,6 +191,9 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.ref_type == 'tag' }}
           labels: |
+            org.opencontainers.image.version=${{ needs.manager-metadata.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.manager-metadata.outputs.git_commit }}
+            org.opencontainers.image.created=${{ needs.manager-metadata.outputs.build_date }}
             org.opensaola.saola-cli.repository=${{ steps.cli.outputs.repository }}
             org.opensaola.saola-cli.version=${{ steps.cli.outputs.version }}
             org.opensaola.saola-cli.revision=${{ steps.cli.outputs.commit }}
@@ -104,6 +206,9 @@ jobs:
           build-contexts: |
             saola-cli=./.saola-cli-source
           build-args: |
+            VERSION=${{ needs.manager-metadata.outputs.version }}
+            GIT_COMMIT=${{ needs.manager-metadata.outputs.git_commit }}
+            BUILD_DATE=${{ needs.manager-metadata.outputs.build_date }}
             SAOLA_CLI_VERSION=${{ steps.cli.outputs.version }}
             SAOLA_CLI_COMMIT=${{ steps.cli.outputs.commit }}
             SAOLA_CLI_SOURCE_DATE_EPOCH=${{ steps.cli.outputs.source_date_epoch }}
@@ -234,7 +339,7 @@ jobs:
   publish:
     if: github.event_name != 'pull_request' && needs.resolve-cli.outputs.build_enabled == 'true'
     name: Build and push
-    needs: resolve-cli
+    needs: [manager-metadata, resolve-cli]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -261,13 +366,6 @@ jobs:
       - name: Normalize image name
         id: image
         run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "${GITHUB_OUTPUT}"
-      - name: Validate release tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          [[ "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] || {
-            echo 'Release tags must match vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-prerelease'
-            exit 1
-          }
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
@@ -283,10 +381,65 @@ jobs:
             type=sha,prefix=sha-
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.ref_type == 'tag' }}
           labels: |
+            org.opencontainers.image.version=${{ needs.manager-metadata.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.manager-metadata.outputs.git_commit }}
+            org.opencontainers.image.created=${{ needs.manager-metadata.outputs.build_date }}
             org.opensaola.saola-cli.repository=${{ needs.resolve-cli.outputs.repository }}
             org.opensaola.saola-cli.version=${{ needs.resolve-cli.outputs.version }}
             org.opensaola.saola-cli.revision=${{ needs.resolve-cli.outputs.commit }}
             org.opensaola.saola-cli.channel=${{ needs.resolve-cli.outputs.channel }}
+      - name: Build verification image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          build-contexts: |
+            saola-cli=./.saola-cli-source
+          build-args: |
+            VERSION=${{ needs.manager-metadata.outputs.version }}
+            GIT_COMMIT=${{ needs.manager-metadata.outputs.git_commit }}
+            BUILD_DATE=${{ needs.manager-metadata.outputs.build_date }}
+            SAOLA_CLI_VERSION=${{ needs.resolve-cli.outputs.version }}
+            SAOLA_CLI_COMMIT=${{ needs.resolve-cli.outputs.commit }}
+            SAOLA_CLI_SOURCE_DATE_EPOCH=${{ needs.resolve-cli.outputs.source_date_epoch }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: opensaola-manager-verify:${{ github.run_id }}-${{ github.run_attempt }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
+      - name: Verify built manager image
+        env:
+          IMAGE: opensaola-manager-verify:${{ github.run_id }}-${{ github.run_attempt }}
+          VERSION: ${{ needs.manager-metadata.outputs.version }}
+          GIT_COMMIT: ${{ needs.manager-metadata.outputs.git_commit }}
+          BUILD_DATE: ${{ needs.manager-metadata.outputs.build_date }}
+        run: |
+          set -euo pipefail
+
+          expected="$(printf 'Version: %s\nGit Commit: %s\nBuild Date: %s' "${VERSION}" "${GIT_COMMIT}" "${BUILD_DATE}")"
+          actual="$(docker run --rm "${IMAGE}" --version)"
+          [[ "${actual}" == "${expected}" ]] || {
+            printf 'manager image identity mismatch\nexpected:\n%s\nactual:\n%s\n' "${expected}" "${actual}" >&2
+            exit 1
+          }
+
+          verify_label() {
+            local key="$1"
+            local expected_value="$2"
+            local actual_value
+            actual_value="$(docker image inspect --format "{{ index .Config.Labels \"${key}\" }}" "${IMAGE}")"
+            [[ "${actual_value}" == "${expected_value}" ]] || {
+              echo "image label ${key} is ${actual_value}, expected ${expected_value}" >&2
+              exit 1
+            }
+          }
+
+          verify_label org.opencontainers.image.version "${VERSION}"
+          verify_label org.opencontainers.image.revision "${GIT_COMMIT}"
+          verify_label org.opencontainers.image.created "${BUILD_DATE}"
       - name: Build and push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -294,6 +447,9 @@ jobs:
           build-contexts: |
             saola-cli=./.saola-cli-source
           build-args: |
+            VERSION=${{ needs.manager-metadata.outputs.version }}
+            GIT_COMMIT=${{ needs.manager-metadata.outputs.git_commit }}
+            BUILD_DATE=${{ needs.manager-metadata.outputs.build_date }}
             SAOLA_CLI_VERSION=${{ needs.resolve-cli.outputs.version }}
             SAOLA_CLI_COMMIT=${{ needs.resolve-cli.outputs.commit }}
             SAOLA_CLI_SOURCE_DATE_EPOCH=${{ needs.resolve-cli.outputs.source_date_epoch }}

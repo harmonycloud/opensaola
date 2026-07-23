@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	zeusv1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/service/status"
@@ -27,25 +28,73 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
+// initialReadinessGracePeriod leaves room for a freshly published workload to
+// create its PVCs and report its first Pod status. It is intentionally bounded:
+// after this window a still-pending PVC or an unready Pod is reported as a
+// runtime failure as before.
+const initialReadinessGracePeriod = 2 * time.Minute
+
 func deriveMiddlewareReadinessDiagnostic(
 	mid *zeusv1.Middleware,
 	cr *unstructured.Unstructured,
 	pods map[string]corev1.Pod,
 	pvcs map[string]corev1.PersistentVolumeClaim,
 ) string {
+	return deriveMiddlewareReadinessDiagnosticAt(mid, cr, pods, pvcs, time.Now())
+}
+
+func deriveMiddlewareReadinessDiagnosticAt(
+	mid *zeusv1.Middleware,
+	cr *unstructured.Unstructured,
+	pods map[string]corev1.Pod,
+	pvcs map[string]corev1.PersistentVolumeClaim,
+	now time.Time,
+) string {
+	withinInitialGrace := isWithinInitialReadinessGrace(mid, cr, now)
+
 	if diagnostic := middlewarePodWaitingDiagnostic(mid, cr, pods); diagnostic != "" {
 		return diagnostic
 	}
-	if diagnostic := middlewarePodConditionDiagnostic(mid, cr, pods); diagnostic != "" {
+	if diagnostic := middlewarePodConditionDiagnostic(mid, cr, pods, withinInitialGrace); diagnostic != "" {
 		return diagnostic
 	}
-	if diagnostic := middlewarePVCPendingDiagnostic(mid, cr, pvcs); diagnostic != "" {
+	if diagnostic := middlewarePVCPendingDiagnostic(mid, cr, pvcs, withinInitialGrace); diagnostic != "" {
 		return diagnostic
 	}
 	return ""
 }
 
-func middlewarePodConditionDiagnostic(mid *zeusv1.Middleware, cr *unstructured.Unstructured, pods map[string]corev1.Pod) string {
+// initialReadinessDeadline returns the bounded first-start deadline for a
+// first-generation primary CR. The primary CR timestamp is used rather than
+// the Middleware timestamp so lengthy pre-actions do not consume the window.
+func initialReadinessDeadline(cr *unstructured.Unstructured) (time.Time, bool) {
+	if cr == nil || cr.GetGeneration() != 1 {
+		return time.Time{}, false
+	}
+	createdAt := cr.GetCreationTimestamp()
+	if createdAt.IsZero() {
+		return time.Time{}, false
+	}
+	return createdAt.Add(initialReadinessGracePeriod), true
+}
+
+func initialReadinessGraceDeadline(mid *zeusv1.Middleware, cr *unstructured.Unstructured) (time.Time, bool) {
+	if mid == nil || mid.Status.CustomResources.Phase != zeusv1.PhaseCreating {
+		return time.Time{}, false
+	}
+	return initialReadinessDeadline(cr)
+}
+
+func isWithinInitialReadinessGrace(mid *zeusv1.Middleware, cr *unstructured.Unstructured, now time.Time) bool {
+	deadline, ok := initialReadinessGraceDeadline(mid, cr)
+	if !ok {
+		return false
+	}
+	createdAt := cr.GetCreationTimestamp()
+	return !now.Before(createdAt.Time) && now.Before(deadline)
+}
+
+func middlewarePodConditionDiagnostic(mid *zeusv1.Middleware, cr *unstructured.Unstructured, pods map[string]corev1.Pod, withinInitialGrace bool) string {
 	podNames := sortedMapKeys(pods)
 	for _, podName := range podNames {
 		pod := pods[podName]
@@ -54,6 +103,12 @@ func middlewarePodConditionDiagnostic(mid *zeusv1.Middleware, cr *unstructured.U
 				continue
 			}
 			if condition.Type != corev1.PodScheduled && condition.Type != corev1.ContainersReady && condition.Type != corev1.PodReady {
+				continue
+			}
+			if condition.Type != corev1.PodScheduled && (hasTransientMiddlewareWaitingContainer(pod) || withinInitialGrace) {
+				continue
+			}
+			if withinInitialGrace && isInitialPVCBindingPendingCondition(condition) {
 				continue
 			}
 			return middlewareRuntimeDiagnostic(mid, cr, status.Diagnostic{
@@ -77,6 +132,41 @@ func middlewarePodConditionDiagnostic(mid *zeusv1.Middleware, cr *unstructured.U
 		}
 	}
 	return ""
+}
+
+// isInitialPVCBindingPendingCondition identifies the scheduler's normal
+// first-start response while a volumeClaimTemplate is still being provisioned.
+// Keep this narrow so CPU, affinity, taint, and other scheduling failures stay
+// immediately actionable even during the initial readiness window.
+func isInitialPVCBindingPendingCondition(condition corev1.PodCondition) bool {
+	if condition.Type != corev1.PodScheduled || condition.Reason != "Unschedulable" {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(condition.Message))
+	const pvcBindingReason = "pod has unbound immediate persistentvolumeclaims"
+	if !strings.Contains(message, pvcBindingReason) {
+		return false
+	}
+
+	// Scheduler messages can aggregate causes, e.g. "Insufficient cpu, pod has
+	// unbound immediate PersistentVolumeClaims". Only suppress the canonical
+	// PVC-binding-only portion; any other cause must remain immediately visible.
+	if _, reasons, found := strings.Cut(message, ":"); found {
+		message = reasons
+	}
+	if reasons, _, found := strings.Cut(message, ". preemption:"); found {
+		message = reasons
+	}
+	hasPVCBindingReason := false
+	for _, reason := range strings.FieldsFunc(message, func(r rune) bool {
+		return r == ',' || r == ';'
+	}) {
+		if !strings.Contains(reason, pvcBindingReason) {
+			return false
+		}
+		hasPVCBindingReason = true
+	}
+	return hasPVCBindingReason
 }
 
 func middlewarePodWaitingDiagnostic(mid *zeusv1.Middleware, cr *unstructured.Unstructured, pods map[string]corev1.Pod) string {
@@ -108,11 +198,14 @@ func middlewarePodWaitingDiagnostic(mid *zeusv1.Middleware, cr *unstructured.Uns
 	return ""
 }
 
-func middlewarePVCPendingDiagnostic(mid *zeusv1.Middleware, cr *unstructured.Unstructured, pvcs map[string]corev1.PersistentVolumeClaim) string {
+func middlewarePVCPendingDiagnostic(mid *zeusv1.Middleware, cr *unstructured.Unstructured, pvcs map[string]corev1.PersistentVolumeClaim, withinInitialGrace bool) string {
 	pvcNames := sortedMapKeys(pvcs)
 	for _, pvcName := range pvcNames {
 		pvc := pvcs[pvcName]
 		if pvc.Status.Phase != corev1.ClaimPending {
+			continue
+		}
+		if withinInitialGrace {
 			continue
 		}
 		return middlewareRuntimeDiagnostic(mid, cr, status.Diagnostic{
@@ -161,7 +254,7 @@ type middlewareWaitingContainer struct {
 
 func firstMiddlewareWaitingContainer(pod corev1.Pod) *middlewareWaitingContainer {
 	for _, container := range pod.Status.InitContainerStatuses {
-		if container.State.Waiting == nil {
+		if container.State.Waiting == nil || isTransientMiddlewareWaitingReason(container.State.Waiting.Reason) {
 			continue
 		}
 		return &middlewareWaitingContainer{
@@ -173,7 +266,7 @@ func firstMiddlewareWaitingContainer(pod corev1.Pod) *middlewareWaitingContainer
 		}
 	}
 	for _, container := range pod.Status.ContainerStatuses {
-		if container.State.Waiting == nil {
+		if container.State.Waiting == nil || isTransientMiddlewareWaitingReason(container.State.Waiting.Reason) {
 			continue
 		}
 		return &middlewareWaitingContainer{
@@ -185,6 +278,29 @@ func firstMiddlewareWaitingContainer(pod corev1.Pod) *middlewareWaitingContainer
 		}
 	}
 	return nil
+}
+
+func hasTransientMiddlewareWaitingContainer(pod corev1.Pod) bool {
+	for _, container := range pod.Status.InitContainerStatuses {
+		if container.State.Waiting != nil && isTransientMiddlewareWaitingReason(container.State.Waiting.Reason) {
+			return true
+		}
+	}
+	for _, container := range pod.Status.ContainerStatuses {
+		if container.State.Waiting != nil && isTransientMiddlewareWaitingReason(container.State.Waiting.Reason) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTransientMiddlewareWaitingReason(reason string) bool {
+	switch reason {
+	case "ContainerCreating", "PodInitializing":
+		return true
+	default:
+		return false
+	}
 }
 
 func objectRefFromUnstructured(obj *unstructured.Unstructured) status.ObjectRef {

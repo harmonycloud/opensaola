@@ -23,8 +23,8 @@ import (
 
 	"github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/pkg/tools"
-	"github.com/tidwall/gjson"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -172,62 +172,46 @@ func CompareDeploymentSpec(ctx context.Context, new, old *appsv1.Deployment) (is
 	return tools.CompareJson(ctx, new.Spec, old.Spec)
 }
 
-func GetDeploymentPhase(status []byte) string {
-	readyReplicas := gjson.GetBytes(status, "readyReplicas").Int()
-	replicas := gjson.GetBytes(status, "replicas").Int()
-	availableReplicas := gjson.GetBytes(status, "availableReplicas").Int()
-	updatedReplicas := gjson.GetBytes(status, "updatedReplicas").Int()
-
-	// If desired replicas is 0, return Unknown phase
-	if replicas == 0 {
-		return string(v1.PhaseUnknown)
+// DeriveDeploymentPhase derives OpenSaola's lifecycle phase from the complete
+// Deployment object. It intentionally compares status counters with
+// spec.replicas: status.replicas is the number of Pods already created, not the
+// desired replica count.
+func DeriveDeploymentPhase(deployment *appsv1.Deployment, previousPhase v1.Phase) v1.Phase {
+	if deployment == nil {
+		return v1.PhaseUnknown
 	}
 
-	// Check if in creating phase: no available replicas and no ready replicas
-	if availableReplicas == 0 && readyReplicas == 0 {
-		// Further check conditions to confirm whether it is being created
-		if isDeploymentProgressing(status) {
-			return string(v1.PhaseCreating)
-		}
-		return string(v1.PhaseFailed)
+	desired := desiredReplicas(deployment.Spec.Replicas)
+	status := deployment.Status
+	observed := status.ObservedGeneration >= deployment.Generation
+	terminating := status.TerminatingReplicas != nil && *status.TerminatingReplicas > 0
+
+	if observed && deploymentHasFailed(status.Conditions) {
+		return v1.PhaseFailed
 	}
 
-	// Check if in updating phase: some replicas updated but not all ready
-	if updatedReplicas > 0 && readyReplicas < replicas && availableReplicas > 0 {
-		return string(v1.PhaseUpdating)
+	if observed &&
+		status.Replicas == desired &&
+		status.UpdatedReplicas == desired &&
+		status.ReadyReplicas == desired &&
+		status.AvailableReplicas == desired &&
+		status.UnavailableReplicas == 0 &&
+		!terminating {
+		return v1.PhaseRunning
 	}
 
-	// Check if running normally: ready replicas equals desired replicas
-	if readyReplicas == replicas && availableReplicas == replicas {
-		return string(v1.PhaseRunning)
-	}
-
-	// All other cases are considered failed
-	return string(v1.PhaseFailed)
+	return workloadProgressPhase(deployment.Generation, previousPhase)
 }
 
-// isDeploymentProgressing checks whether a Deployment is in a progressing state.
-func isDeploymentProgressing(status []byte) bool {
-	conditions := gjson.GetBytes(status, "conditions").Array()
+func deploymentHasFailed(conditions []appsv1.DeploymentCondition) bool {
 	for _, condition := range conditions {
-		conditionType := condition.Get("type").String()
-		conditionStatus := condition.Get("status").String()
-		conditionReason := condition.Get("reason").String()
-
-		// Check the Progressing condition
-		if conditionType == "Progressing" && conditionStatus == "True" {
-			// Common reasons indicating creation in progress
-			creatingReasons := []string{
-				"NewReplicaSetCreated",
-				"ReplicaSetUpdated",
-				"FoundNewReplicaSet",
-			}
-
-			for _, reason := range creatingReasons {
-				if conditionReason == reason {
-					return true
-				}
-			}
+		if condition.Type == appsv1.DeploymentReplicaFailure && condition.Status == corev1.ConditionTrue {
+			return true
+		}
+		if condition.Type == appsv1.DeploymentProgressing &&
+			condition.Status == corev1.ConditionFalse &&
+			condition.Reason == "ProgressDeadlineExceeded" {
+			return true
 		}
 	}
 	return false

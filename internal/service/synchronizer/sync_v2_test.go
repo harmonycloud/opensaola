@@ -17,14 +17,103 @@ limitations under the License.
 package synchronizer
 
 import (
+	"context"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestScheduleInitialReadinessRecheck(t *testing.T) {
+	tests := []struct {
+		name         string
+		stopBefore   bool
+		cancelBefore bool
+		wantTrigger  bool
+	}{
+		{
+			name:        "fires at the grace deadline",
+			wantTrigger: true,
+		},
+		{
+			name:       "owner stop cancels the recheck",
+			stopBefore: true,
+		},
+		{
+			name:         "context cancellation cancels the recheck",
+			cancelBefore: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				stop := make(chan struct{})
+				triggered := make(chan struct{}, 1)
+				scheduleInitialReadinessRecheck(ctx, stop, time.Now().Add(time.Minute), func() {
+					triggered <- struct{}{}
+				})
+				synctest.Wait()
+
+				if tt.stopBefore {
+					close(stop)
+					synctest.Wait()
+				}
+				if tt.cancelBefore {
+					cancel()
+					synctest.Wait()
+				}
+				time.Sleep(time.Minute)
+				synctest.Wait()
+
+				select {
+				case <-triggered:
+					if !tt.wantTrigger {
+						t.Fatal("expected owner stop to suppress the grace recheck")
+					}
+				default:
+					if tt.wantTrigger {
+						t.Fatal("expected grace deadline to trigger a recheck")
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestInitialReadinessRecheckDeadline_UsesLiveCustomResourceTimestamp(t *testing.T) {
+	gvk := schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "StatefulSet"}
+	createdAt := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(gvk)
+	live.SetNamespace("middleware")
+	live.SetName("demo-minio")
+	live.SetGeneration(1)
+	live.SetCreationTimestamp(metav1.NewTime(createdAt))
+
+	cli := fake.NewClientBuilder().WithObjects(live).Build()
+	desired := live.DeepCopy()
+	desired.SetCreationTimestamp(metav1.Time{})
+
+	got, ok := initialReadinessRecheckDeadline(context.Background(), cli, desired)
+	if !ok {
+		t.Fatal("expected live first-generation custom resource to provide a recheck deadline")
+	}
+	want := createdAt.Add(initialReadinessGracePeriod)
+	if !got.Equal(want) {
+		t.Fatalf("recheck deadline = %s, want %s", got, want)
+	}
+}
 
 func TestHasOwnerUID(t *testing.T) {
 	tests := []struct {
@@ -252,6 +341,86 @@ func TestCustomResourcesFromStatusClearsMissingReason(t *testing.T) {
 	}
 	if got.Reason != "" {
 		t.Fatalf("expected missing reason to remain empty, got %q", got.Reason)
+	}
+}
+
+func TestPhaseFromGenericStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		status   string
+		fallback v1.Phase
+		want     v1.Phase
+	}{
+		{name: "missing phase and state preserves creating", status: `{}`, fallback: v1.PhaseCreating, want: v1.PhaseCreating},
+		{name: "empty phase preserves creating", status: `{"phase":""}`, fallback: v1.PhaseCreating, want: v1.PhaseCreating},
+		{name: "phase only", status: `{"phase":"Running"}`, fallback: v1.PhaseCreating, want: v1.PhaseRunning},
+		{name: "state only", status: `{"state":"Available"}`, fallback: v1.PhaseCreating, want: v1.Phase("Available")},
+		{name: "operator initializing state passes through", status: `{"state":"initializing"}`, fallback: v1.PhaseCreating, want: v1.Phase("initializing")},
+		{name: "operator ready state passes through", status: `{"state":"ready"}`, fallback: v1.PhaseCreating, want: v1.Phase("ready")},
+		{name: "empty state does not override phase", status: `{"phase":"Running","state":""}`, fallback: v1.PhaseCreating, want: v1.PhaseRunning},
+		{name: "state preserves existing precedence over phase", status: `{"phase":"Running","state":"Updating"}`, fallback: v1.PhaseCreating, want: v1.PhaseUpdating},
+		{name: "missing phase and state preserves running", status: `{}`, fallback: v1.PhaseRunning, want: v1.PhaseRunning},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := phaseFromGenericStatus([]byte(tt.status), tt.fallback); got != tt.want {
+				t.Fatalf("phaseFromGenericStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOperatorOwnsCustomResourceStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		mid  *v1.Middleware
+		want bool
+	}{
+		{
+			name: "nil middleware is not operator managed",
+		},
+		{
+			name: "no operator baseline is not operator managed",
+			mid:  &v1.Middleware{},
+		},
+		{
+			name: "complete operator baseline owns status",
+			mid: &v1.Middleware{Spec: v1.MiddlewareSpec{OperatorBaseline: v1.OperatorBaseline{
+				Name:    "mongodb-operator-standard",
+				GvkName: "v1",
+			}}},
+			want: true,
+		},
+		{
+			name: "partial legacy operator baseline still owns status",
+			mid: &v1.Middleware{Spec: v1.MiddlewareSpec{OperatorBaseline: v1.OperatorBaseline{
+				Name: "mongodb-operator-standard",
+			}}},
+			want: true,
+		},
+		{
+			name: "operator GVK reference alone still owns status",
+			mid: &v1.Middleware{Spec: v1.MiddlewareSpec{OperatorBaseline: v1.OperatorBaseline{
+				GvkName: "v1",
+			}}},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := operatorOwnsCustomResourceStatus(tt.mid); got != tt.want {
+				t.Fatalf("operatorOwnsCustomResourceStatus() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

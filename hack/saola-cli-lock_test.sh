@@ -337,7 +337,7 @@ sync_job="$(sed -n '/^  sync-dev-lock:/,/^  publish:/p' "${docker_workflow}")"
 publish_job="$(sed -n '/^  publish:/,$p' "${docker_workflow}")"
 [[ "${publish_job}" == *'packages: write'* ]] || fail 'Docker publish job cannot write packages'
 [[ "${publish_job}" == *'persist-credentials: false'* ]] || fail 'Docker publish checkout persists credentials'
-[[ "${publish_job}" == *'needs: resolve-cli'* ]] || fail 'Docker publish job does not depend on the resolver'
+[[ "${publish_job}" == *'needs: [manager-metadata, resolve-cli]'* ]] || fail 'Docker publish job does not depend on manager metadata and the CLI resolver'
 [[ "${publish_job}" == *"needs.resolve-cli.outputs.build_enabled == 'true'"* ]] || fail 'Docker publish job can run when the resolver disables it'
 for key in repository version commit channel source_date_epoch; do
   [[ "${publish_job}" == *"needs.resolve-cli.outputs.${key}"* ]] || fail "Docker publish does not consume resolver output ${key}"

@@ -170,6 +170,9 @@ func TestBuildCustomResource_CreateFailureWritesApplyClusterDiagnostic(t *testin
 	if err == nil {
 		t.Fatal("expected custom resource create error")
 	}
+	if got := mid.Status.CustomResources.Phase; got != v1.PhaseUnknown {
+		t.Fatalf("customResources.phase = %q after failed apply, want %q", got, v1.PhaseUnknown)
+	}
 
 	for _, want := range []string{
 		"phase=runtime-reconcile",

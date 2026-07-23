@@ -25,7 +25,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -trimpath \
-    -ldflags="-s -w -X main.version=${VERSION} -X main.gitCommit=${GIT_COMMIT} -X main.buildDate=${BUILD_DATE}" \
+    -ldflags="-s -w \
+      -X github.com/harmonycloud/opensaola/internal/version.Version=${VERSION} \
+      -X github.com/harmonycloud/opensaola/internal/version.GitCommit=${GIT_COMMIT} \
+      -X github.com/harmonycloud/opensaola/internal/version.BuildDate=${BUILD_DATE}" \
     -o manager ./cmd
 
 # Download kubectl in builder stage to keep runtime image clean

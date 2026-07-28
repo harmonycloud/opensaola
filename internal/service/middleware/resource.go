@@ -338,48 +338,28 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 				),
 			})
 			log.FromContext(ctx).Error(err, "create or patch custom resource error", status.DiagnosticLogValues(err)...)
-			watcher.CloseCRWatcher(ctx, cr)
+			// Do not release a shared watcher here: this reconcile may be a retry
+			// after the CR was already published and registered. Membership is
+			// released only by the explicit Middleware delete path.
 			return err
 		}
 		if err = seedInitialCustomResourcePhase(ctx, cli, action, m); err != nil {
 			return err
 		}
 
-		// Start watching the CR resource
-		cw := watcher.NewCRWatcher(cr.GroupVersionKind(), cr.GetNamespace())
-		cwCache, ok := watcher.CustomResourceWatcherMap.Load(cw.GetKey())
-		if !ok {
-			// If the watcher does not exist, create a new one
-			log.FromContext(ctx).Info("create watcher", "gvk", cr.GroupVersionKind(), "namespace", cr.GetNamespace())
-			watcher.CustomResourceWatcherMap.Store(cw.GetKey(), cw)
-			go func() {
-				if informerErr := k8s.NewInformerOptUnit(ctx, cli, cw.StopChan, cw.GVK, cw.Namespace, watcher.NewResourceEventHandlerFuncs(ctx, cli, m.Name, m.Namespace)); informerErr != nil {
-					log.FromContext(ctx).Error(informerErr, "custom resource informer exited with error", "gvk", cw.GVK, "namespace", cw.Namespace)
-				}
-			}()
-		} else {
-			crList, err := k8s.ListCustomResources(ctx, cli, cr.GetNamespace(), cr.GroupVersionKind(), client.MatchingLabels{
-				v1.LabelComponent: cr.GetLabels()[v1.LabelComponent],
+		// Start or join the shared namespace/GVK watcher. Membership is tracked by
+		// CR name, avoiding component-wide counter resets that could stop another
+		// Middleware's watcher.
+		if _, _, watcherErr := watcher.EnsureCRWatcher(ctx, cli, cr, m.Name, m.Namespace); watcherErr != nil {
+			return status.WrapDiagnostic(watcherErr, status.Diagnostic{
+				Phase:              status.PhaseRuntimeReconcile,
+				Controller:         "middleware",
+				Resource:           middlewareObjectRef(m),
+				FailedObject:       status.ObjectRefFromObject(cr, cr.GroupVersionKind()),
+				Generation:         m.Generation,
+				ObservedGeneration: m.Status.ObservedGeneration,
+				Next:               "check the dynamic custom-resource watcher registration and informer logs",
 			})
-			if err != nil {
-				return status.WrapDiagnostic(err, status.Diagnostic{
-					Phase:              status.PhaseRuntimeReconcile,
-					Controller:         "middleware",
-					Resource:           middlewareObjectRef(m),
-					FailedObject:       status.ObjectRefFromObject(cr, cr.GroupVersionKind()),
-					Generation:         m.Generation,
-					ObservedGeneration: m.Status.ObservedGeneration,
-					Next:               "check whether the target CRD is installed and whether the controller service account can list this resource",
-				})
-			}
-			cw, ok = cwCache.(*watcher.CustomResourceWatcher)
-			if !ok {
-				return fmt.Errorf("custom resource watcher %s has unexpected type %T", cw.GetKey(), cwCache)
-			}
-			cw.Counter.Store(int32(len(crList)))
-
-			// If the watcher exists, re-query CR count and calibrate the counter
-			log.FromContext(ctx).Info("sync watcher counter", "gvk", cr.GroupVersionKind(), "namespace", cr.GetNamespace(), "counter", cw.Counter.Load())
 		}
 
 		go func() {
@@ -391,21 +371,9 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 		// Stop watching/syncing: after middleware deletion, CR delete events may not be received (or may be filtered by label).
 		// This is a fallback to close the in-process watcher & sync goroutines.
 		// Note: this is in-process state (Map + chan); each operator replica must execute this independently.
-		cw := watcher.NewCRWatcher(cr.GroupVersionKind(), cr.GetNamespace())
-		if _, ok := watcher.CustomResourceWatcherMap.Load(cw.GetKey()); ok {
-			watcher.CloseCRWatcher(ctx, cr)
-		}
+		watcher.ReleaseCRWatcher(ctx, cr)
 		stopKey := fmt.Sprintf(synchronizer.SyncCustomResourceStopChanMapKey, cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName())
-		if resourceStop, ok := synchronizer.SyncCustomResourceStopChanMap.Load(stopKey); ok {
-			func() {
-				defer func() { _ = recover() }()
-				stopChan, ok := resourceStop.(chan struct{})
-				if ok {
-					close(stopChan)
-				}
-			}()
-			synchronizer.SyncCustomResourceStopChanMap.Delete(stopKey)
-		}
+		synchronizer.StopSyncCustomResource(stopKey)
 
 		// Delete CR
 		err = k8s.DeleteCustomResource(ctx, cli, cr)

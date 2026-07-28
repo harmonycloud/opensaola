@@ -19,7 +19,6 @@ package k8s
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"time"
 
 	"github.com/harmonycloud/opensaola/internal/k8s/kubeclient"
@@ -36,37 +35,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// NewInformerOptUnit creates a new informer operation unit.
-func NewInformerOptUnit(ctx context.Context, cli client.Client, stopCh chan struct{}, gvk schema.GroupVersionKind, ns string, rehf cache.ResourceEventHandlerFuncs) error {
-	return newInformerOptUnitImpl(ctx, cli, stopCh, gvk, ns, rehf, 0)
-}
-
-func newInformerOptUnitImpl(ctx context.Context, cli client.Client, stopCh chan struct{}, gvk schema.GroupVersionKind, ns string, rehf cache.ResourceEventHandlerFuncs, attempt int) (err error) {
+// NewInformerOptUnit creates and runs one informer operation unit. The caller
+// owns stopCh and is responsible for retries after an error or unexpected exit.
+func NewInformerOptUnit(ctx context.Context, cli client.Client, stopCh <-chan struct{}, gvk schema.GroupVersionKind, ns string, rehf cache.ResourceEventHandlerFuncs) (err error) {
 	logger := log.FromContext(ctx)
-	// Panic recovery
 	defer func() {
-		if err != nil {
-			logger.Error(err, "NewInformerOptUnit error")
+		if r := recover(); r != nil {
+			err = fmt.Errorf("informer panic: %v", r)
+			logger.Error(err, "NewInformerOptUnit")
 			return
 		}
-		if r := recover(); r != nil {
-			logger.Error(fmt.Errorf("panic: %v", r), "NewInformerOptUnit")
-
-			buf := make([]byte, 1024)
-			n := runtime.Stack(buf, false)
-			fmt.Printf("Stack trace:\n%s\n", string(buf[:n]))
-
-			nextAttempt := attempt + 1
-			delay := CalcPanicBackoff(nextAttempt)
-			logger.Info("NewInformerOptUnit panic backoff restart", "attempt", nextAttempt, "delay", delay)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(delay):
-			}
-			go func() {
-				_ = newInformerOptUnitImpl(ctx, cli, stopCh, gvk, ns, rehf, nextAttempt)
-			}()
+		if err != nil {
+			logger.Error(err, "NewInformerOptUnit error")
 		}
 	}()
 
@@ -144,28 +124,10 @@ func newInformerOptUnitImpl(ctx context.Context, cli client.Client, stopCh chan 
 
 	logger.Info("Start watching", "gvk", gvk.String(), "ns", ns)
 
-	// Ensure the informer exits when ctx is canceled, preventing goroutine leaks during leader switch or manager stop.
-	go func() {
-		select {
-		case <-ctx.Done():
-			safeClose(stopCh)
-		case <-stopCh:
-		}
-	}()
-
 	informer.Run(stopCh)
 
 	logger.Info("Stop watching", "gvk", gvk.String(), "ns", ns)
 	return nil
-}
-
-func safeClose(ch chan struct{}) {
-	defer func() {
-		if r := recover(); r != nil {
-			ctrl.Log.WithName("k8s").Error(fmt.Errorf("panic: %v", r), "panic recovered in informer safeClose")
-		}
-	}()
-	close(ch)
 }
 
 // GetGroupVersionResource resolves a GroupVersionResource from a GroupVersionKind.

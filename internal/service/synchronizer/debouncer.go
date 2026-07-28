@@ -157,9 +157,11 @@ func registryKey(ns, midName string) string {
 }
 
 // Register creates and stores a new Debouncer for the given ns/midName pair.
-// If one already exists it is stopped before being replaced.
-func (r *NsDebounceRegistry) Register(ns, midName string, triggerFn func()) {
+// If one already exists it is stopped before being replaced. The returned
+// pointer is an ownership token for identity-safe cleanup.
+func (r *NsDebounceRegistry) Register(ns, midName string, triggerFn func()) *Debouncer {
 	key := registryKey(ns, midName)
+	debouncer := NewDebouncer(triggerFn)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -169,9 +171,10 @@ func (r *NsDebounceRegistry) Register(ns, midName string, triggerFn func()) {
 		ctrl.Log.WithName("synchronizer").V(1).Info("debouncer replaced", "key", key)
 		// Replaced existing Debouncer
 	}
-	r.debouncers[key] = NewDebouncer(triggerFn)
+	r.debouncers[key] = debouncer
 	ctrl.Log.WithName("synchronizer").V(1).Info("debouncer registered", "key", key)
 	// Registered Debouncer for %s
+	return debouncer
 }
 
 // Unregister stops and removes the Debouncer for the given ns/midName.
@@ -188,6 +191,25 @@ func (r *NsDebounceRegistry) Unregister(ns, midName string) {
 		ctrl.Log.WithName("synchronizer").V(1).Info("debouncer unregistered", "key", key)
 		// Unregistered Debouncer for %s
 	}
+}
+
+// UnregisterIfCurrent stops and removes a Debouncer only when it is still the
+// instance registered by the caller. This prevents an old SyncV2 cleanup from
+// removing a replacement registered during leader re-entry.
+func (r *NsDebounceRegistry) UnregisterIfCurrent(ns, midName string, want *Debouncer) bool {
+	key := registryKey(ns, midName)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	current, ok := r.debouncers[key]
+	if !ok || current != want {
+		return false
+	}
+	current.Stop()
+	delete(r.debouncers, key)
+	ctrl.Log.WithName("synchronizer").V(1).Info("debouncer unregistered", "key", key)
+	return true
 }
 
 // NotifyNamespace notifies every Debouncer registered under the given namespace.
@@ -248,13 +270,18 @@ var globalDebounceRegistry = &NsDebounceRegistry{
 
 // RegisterDebouncer registers a Debouncer for the given ns/midName in the global registry.
 // triggerFn is typically the recomputeAndUpdateStatus callback for that Middleware.
-func RegisterDebouncer(ns, midName string, triggerFn func()) {
-	globalDebounceRegistry.Register(ns, midName, triggerFn)
+func RegisterDebouncer(ns, midName string, triggerFn func()) *Debouncer {
+	return globalDebounceRegistry.Register(ns, midName, triggerFn)
 }
 
 // UnregisterDebouncer removes the Debouncer for the given ns/midName from the global registry.
 func UnregisterDebouncer(ns, midName string) {
 	globalDebounceRegistry.Unregister(ns, midName)
+}
+
+// UnregisterDebouncerIfCurrent removes only the Debouncer owned by the caller.
+func UnregisterDebouncerIfCurrent(ns, midName string, want *Debouncer) bool {
+	return globalDebounceRegistry.UnregisterIfCurrent(ns, midName, want)
 }
 
 // NotifyNamespace notifies all Debouncers in the given namespace via the global registry.

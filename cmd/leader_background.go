@@ -52,12 +52,15 @@ func (t *leaderBackgroundTasks) Start(ctx context.Context) error {
 	synchronizer.StopAllSyncCustomResources()
 
 	// Start the namespace-scoped informer manager used by SyncCustomResourceV2.
+	var nsInformerManager *synchronizer.NsInformerManager
 	if t.cfg != nil {
-		if _, err := synchronizer.StartNsInformerManager(ctx, t.cfg); err != nil {
+		var err error
+		nsInformerManager, err = synchronizer.StartNsInformerManager(ctx, t.cfg)
+		if err != nil {
 			l.Error(err, "start NsInformerManager")
 		} else {
 			// Wire informer events to the debouncer layer.
-			synchronizer.GetNsInformerManager().SetEventCallback(func(ns string) {
+			nsInformerManager.SetEventCallback(func(ns string) {
 				synchronizer.NotifyNamespace(ns)
 			})
 		}
@@ -75,10 +78,9 @@ func (t *leaderBackgroundTasks) Start(ctx context.Context) error {
 
 	<-ctx.Done()
 
-	// Shut down debouncer registry and informer manager on leader loss / process exit.
-	synchronizer.StopAllDebouncers()
-	synchronizer.StopNsInformerManager()
-	watcher.StopAllCRWatchers()
-	synchronizer.StopAllSyncCustomResources()
+	// CR watchers and SyncV2 sessions observe this leader's context and clean up
+	// their own identities. Do not globally stop them here: a replacement leader
+	// may already have registered new watchers/sessions in this process.
+	synchronizer.StopNsInformerManagerIfCurrent(nsInformerManager)
 	return nil
 }

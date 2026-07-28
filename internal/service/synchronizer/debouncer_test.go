@@ -182,3 +182,26 @@ func TestNsDebounceRegistry_NotifyMiddleware(t *testing.T) {
 		t.Fatal("NotifyMiddleware returned true for missing middleware")
 	}
 }
+
+func TestNsDebounceRegistry_UnregisterIfCurrentPreservesReplacement(t *testing.T) {
+	r := &NsDebounceRegistry{debouncers: make(map[string]*Debouncer)}
+	old := r.Register("ns1", "mid-a", func() {})
+	replacement := r.Register("ns1", "mid-a", func() {})
+
+	if r.UnregisterIfCurrent("ns1", "mid-a", old) {
+		t.Fatal("old Debouncer unexpectedly removed its replacement")
+	}
+	r.mu.RLock()
+	current := r.debouncers[registryKey("ns1", "mid-a")]
+	r.mu.RUnlock()
+	if current != replacement {
+		t.Fatalf("registered Debouncer = %p, want replacement %p", current, replacement)
+	}
+
+	if !r.UnregisterIfCurrent("ns1", "mid-a", replacement) {
+		t.Fatal("replacement Debouncer was not removed by its owner")
+	}
+	if r.NotifyMiddleware("ns1", "mid-a") {
+		t.Fatal("removed Debouncer remained registered")
+	}
+}

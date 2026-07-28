@@ -18,10 +18,10 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/harmonycloud/opensaola/api/v1"
@@ -34,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -43,7 +42,12 @@ type CustomResourceWatcher struct {
 	GVK       schema.GroupVersionKind // gvk
 	Namespace string                  // namespace
 	StopChan  chan struct{}           // stop channel
-	Counter   atomic.Int32            // reference count (atomic)
+
+	done chan struct{}
+
+	membersMu sync.Mutex
+	members   map[string]struct{}
+	stopped   bool
 }
 
 var CustomResourceWatcherMap sync.Map
@@ -51,9 +55,9 @@ var CustomResourceWatcherMap sync.Map
 func StopAllCRWatchers() {
 	CustomResourceWatcherMap.Range(func(key, value any) bool {
 		if cw, ok := value.(*CustomResourceWatcher); ok {
-			safeClose(cw.StopChan)
+			cw.Stop()
+			CustomResourceWatcherMap.CompareAndDelete(key, cw)
 		}
-		CustomResourceWatcherMap.Delete(key)
 		return true
 	})
 }
@@ -68,9 +72,171 @@ func NewCRWatcher(gvk schema.GroupVersionKind, ns string) *CustomResourceWatcher
 		GVK:       gvk,
 		Namespace: ns,
 		StopChan:  make(chan struct{}),
+		done:      make(chan struct{}),
+		members:   make(map[string]struct{}),
 	}
-	cw.Counter.Store(1)
 	return cw
+}
+
+// Done is closed once the informer supervisor has released this watcher.
+func (w *CustomResourceWatcher) Done() <-chan struct{} {
+	return w.done
+}
+
+// Stop is idempotent. The watcher owns StopChan; informer workers only receive
+// from it and never close it.
+func (w *CustomResourceWatcher) Stop() {
+	if w == nil {
+		return
+	}
+	w.membersMu.Lock()
+	w.stopLocked()
+	w.membersMu.Unlock()
+}
+
+func (w *CustomResourceWatcher) stopLocked() {
+	if w.stopped {
+		return
+	}
+	w.stopped = true
+	close(w.StopChan)
+}
+
+func (w *CustomResourceWatcher) addMember(name string) bool {
+	if w == nil || name == "" {
+		return false
+	}
+	w.membersMu.Lock()
+	defer w.membersMu.Unlock()
+	if w.stopped {
+		return false
+	}
+	w.members[name] = struct{}{}
+	return true
+}
+
+func (w *CustomResourceWatcher) removeMember(name string) (removed, empty bool) {
+	if w == nil || name == "" {
+		return false, false
+	}
+	w.membersMu.Lock()
+	defer w.membersMu.Unlock()
+	if _, ok := w.members[name]; !ok {
+		return false, len(w.members) == 0
+	}
+	delete(w.members, name)
+	if len(w.members) == 0 {
+		w.stopLocked()
+		return true, true
+	}
+	return true, false
+}
+
+type informerRunner func(context.Context, client.Client, <-chan struct{}, schema.GroupVersionKind, string, cache.ResourceEventHandlerFuncs) error
+
+// EnsureCRWatcher joins the namespace/GVK watcher for cr, creating a
+// self-healing informer supervisor when needed. Membership is keyed by CR name,
+// so releasing one Middleware cannot stop another CR sharing the watcher.
+func EnsureCRWatcher(ctx context.Context, cli client.Client, cr *unstructured.Unstructured, middlewareName, middlewareNamespace string) (*CustomResourceWatcher, bool, error) {
+	return ensureCRWatcher(
+		ctx,
+		cli,
+		cr,
+		NewResourceEventHandlerFuncs(ctx, cli, middlewareName, middlewareNamespace),
+		k8s.NewInformerOptUnit,
+		k8s.CalcPanicBackoff,
+	)
+}
+
+func ensureCRWatcher(ctx context.Context, cli client.Client, cr *unstructured.Unstructured, handler cache.ResourceEventHandlerFuncs, runInformer informerRunner, retryBackoff func(int) time.Duration) (*CustomResourceWatcher, bool, error) {
+	if cr == nil {
+		return nil, false, errors.New("custom resource is nil")
+	}
+	if cr.GetName() == "" {
+		return nil, false, errors.New("custom resource name is empty")
+	}
+
+	for {
+		candidate := NewCRWatcher(cr.GroupVersionKind(), cr.GetNamespace())
+		actual, loaded := CustomResourceWatcherMap.LoadOrStore(candidate.GetKey(), candidate)
+		if loaded {
+			existing, ok := actual.(*CustomResourceWatcher)
+			if !ok {
+				return nil, false, fmt.Errorf("custom resource watcher %s has unexpected type %T", candidate.GetKey(), actual)
+			}
+			if existing.addMember(cr.GetName()) {
+				return existing, false, nil
+			}
+			CustomResourceWatcherMap.CompareAndDelete(candidate.GetKey(), existing)
+			continue
+		}
+
+		if !candidate.addMember(cr.GetName()) {
+			CustomResourceWatcherMap.CompareAndDelete(candidate.GetKey(), candidate)
+			continue
+		}
+		log.FromContext(ctx).Info("creating CR watcher", "key", candidate.GetKey())
+		go candidate.run(ctx, cli, handler, runInformer, retryBackoff)
+		return candidate, true, nil
+	}
+}
+
+func (w *CustomResourceWatcher) run(ctx context.Context, cli client.Client, handler cache.ResourceEventHandlerFuncs, runInformer informerRunner, retryBackoff func(int) time.Duration) {
+	defer close(w.done)
+	defer CustomResourceWatcherMap.CompareAndDelete(w.GetKey(), w)
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			w.Stop()
+		case <-w.StopChan:
+		}
+	}()
+
+	for attempt := 1; ; attempt++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.StopChan:
+			return
+		default:
+		}
+
+		err := runInformer(ctx, cli, w.StopChan, w.GVK, w.Namespace, handler)
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.StopChan:
+			return
+		default:
+		}
+		if err == nil {
+			err = errors.New("custom resource informer exited unexpectedly")
+		}
+		log.FromContext(ctx).Error(err, "custom resource informer exited; retrying", "gvk", w.GVK, "namespace", w.Namespace, "attempt", attempt)
+
+		delay := retryBackoff(attempt)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		case <-w.StopChan:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 // StartCRWatcher starts the CR watcher
@@ -81,6 +247,11 @@ func StartCRWatcher(ctx context.Context, cli client.Client) error {
 func startCRWatcherImpl(ctx context.Context, cli client.Client, attempt int) (err error) {
 	defer func() {
 		r := recover()
+		// Leader loss cancels this worker normally. It must not run global cleanup
+		// after a replacement leader has started its own watcher sessions.
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil || r != nil {
 			log.FromContext(ctx).Error(fmt.Errorf("panic: %v error: %v", r, err), "StartCRWatcher panic")
 
@@ -186,68 +357,47 @@ func startCRWatcherImpl(ctx context.Context, cli client.Client, attempt int) (er
 		cr.SetNamespace(namespace)
 		log.FromContext(ctx).V(1).Info("found CR to watch", "gvk", gvk, "namespace", namespace, "name", name)
 
-		// Check if the CR watcher already exists; if so, increment the reference count
+		// Sync registration and dynamic CR watching are independent goroutines. The
+		// Add handler also notifies, so either ordering observes the initial state.
 		crForSync := cr.DeepCopy()
 		go func() {
 			if syncErr := synchronizer.SyncCustomResourceV2(ctx, cli, crForSync, &mid); syncErr != nil {
 				log.FromContext(ctx).Error(syncErr, "custom resource sync exited with error", "gvk", crForSync.GroupVersionKind(), "namespace", crForSync.GetNamespace(), "name", crForSync.GetName())
 			}
 		}()
-		cw := NewCRWatcher(cr.GroupVersionKind(), cr.GetNamespace())
-		if cwCache, ok := CustomResourceWatcherMap.Load(cw.GetKey()); ok {
-			log.FromContext(ctx).Info("CR watcher already exists", "key", cw.GetKey())
-			cw, ok = cwCache.(*CustomResourceWatcher)
-			if !ok {
-				return fmt.Errorf("custom resource watcher %s has unexpected type %T", cw.GetKey(), cwCache)
-			}
-			cw.Counter.Add(1)
-			continue
+		if _, _, watcherErr := EnsureCRWatcher(ctx, cli, cr, mid.Name, mid.Namespace); watcherErr != nil {
+			return watcherErr
 		}
-
-		log.FromContext(ctx).Info("creating CR watcher", "key", cw.GetKey())
-		CustomResourceWatcherMap.Store(cw.GetKey(), cw)
-		go func() {
-			if informerErr := k8s.NewInformerOptUnit(ctx, cli, cw.StopChan, cw.GVK, cw.Namespace, NewResourceEventHandlerFuncs(ctx, cli, mid.Name, mid.Namespace)); informerErr != nil {
-				log.FromContext(ctx).Error(informerErr, "custom resource informer exited with error", "gvk", cw.GVK, "namespace", cw.Namespace)
-			}
-		}()
 	}
 	return nil
 }
 
-// CloseCRWatcher closes a CR watcher
-func CloseCRWatcher(ctx context.Context, obj *unstructured.Unstructured) {
-	temp := NewCRWatcher(obj.GroupVersionKind(), obj.GetNamespace())
-	v, ok := CustomResourceWatcherMap.Load(temp.GetKey())
-	if ok {
-		cw, ok := v.(*CustomResourceWatcher)
-		if !ok {
-			return
-		}
-		// Concurrency-safe reference counting: only the transition from 1 -> 0 performs close/delete.
-		newVal := cw.Counter.Add(-1)
-		if newVal == 0 {
-			log.FromContext(ctx).Info("close cr watcher", "key", cw.GetKey())
-			log.FromContext(ctx).Info("send stop chan success", "key", cw.GetKey())
-			safeClose(cw.StopChan)
-			log.FromContext(ctx).Info("close cr watcher success", "key", cw.GetKey())
-			CustomResourceWatcherMap.Delete(cw.GetKey())
-			log.FromContext(ctx).Info("delete cr watcher success", "key", cw.GetKey())
-		} else if newVal < 0 {
-			log.FromContext(ctx).Error(nil, "cr watcher refcount < 0", "key", cw.GetKey())
-		}
-	} else {
-		log.FromContext(ctx).Error(nil, "not found cr watcher", "key", temp.GetKey())
+// ReleaseCRWatcher removes obj from its shared namespace/GVK watcher. A watcher
+// is stopped only after its final member is released.
+func ReleaseCRWatcher(ctx context.Context, obj *unstructured.Unstructured) {
+	if obj == nil {
+		return
 	}
+	key := fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GroupVersionKind().String())
+	value, ok := CustomResourceWatcherMap.Load(key)
+	if !ok {
+		return
+	}
+	cw, ok := value.(*CustomResourceWatcher)
+	if !ok {
+		return
+	}
+	removed, empty := cw.removeMember(obj.GetName())
+	if !removed || !empty {
+		return
+	}
+	log.FromContext(ctx).Info("close cr watcher", "key", cw.GetKey())
+	CustomResourceWatcherMap.CompareAndDelete(cw.GetKey(), cw)
 }
 
-func safeClose(ch chan struct{}) {
-	defer func() {
-		if r := recover(); r != nil {
-			ctrl.Log.WithName("watcher").Error(fmt.Errorf("panic: %v", r), "panic recovered in watcher safeClose")
-		}
-	}()
-	close(ch)
+// CloseCRWatcher is retained for callers that use the older name.
+func CloseCRWatcher(ctx context.Context, obj *unstructured.Unstructured) {
+	ReleaseCRWatcher(ctx, obj)
 }
 
 type customResourceUpdateNotifier func(namespace, middlewareName string)
@@ -269,6 +419,9 @@ func newResourceEventHandlerFuncs(ctx context.Context, cli client.Client, notify
 			}
 
 			log.FromContext(ctx).V(1).Info("CR CREATE event", customResourceLogFields("cr", cr)...)
+			// Initial informer LIST objects arrive as Add events. Notify here so a
+			// status transition between SyncV2's first read and LIST cannot be lost.
+			notify(cr.GetNamespace(), middlewareNameForCustomResource(cr))
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			oldCR, ok := customResourceEventObject(oldObj)
@@ -314,14 +467,8 @@ func newResourceEventHandlerFuncs(ctx context.Context, cli client.Client, notify
 				if err != nil {
 					if apiErrors.IsNotFound(err) {
 						// Stop watching
-						CloseCRWatcher(ctx, cr)
-						if resourceStop, ok := synchronizer.SyncCustomResourceStopChanMap.Load(fmt.Sprintf(synchronizer.SyncCustomResourceStopChanMapKey, cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName())); ok {
-							stopChan, ok := resourceStop.(chan struct{})
-							if ok {
-								close(stopChan)
-							}
-							synchronizer.SyncCustomResourceStopChanMap.Delete(fmt.Sprintf(synchronizer.SyncCustomResourceStopChanMapKey, cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName()))
-						}
+						ReleaseCRWatcher(ctx, cr)
+						synchronizer.StopSyncCustomResource(fmt.Sprintf(synchronizer.SyncCustomResourceStopChanMapKey, cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName()))
 					}
 					return
 				}

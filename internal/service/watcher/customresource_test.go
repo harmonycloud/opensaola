@@ -18,53 +18,127 @@ package watcher
 
 import (
 	"context"
-	"sync"
+	"errors"
 	"testing"
+	"time"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-func TestCustomResourceWatcher_CounterConcurrency(t *testing.T) {
+func TestCustomResourceWatcher_MembersRemainIsolated(t *testing.T) {
 	gvk := schema.GroupVersionKind{Group: "test", Version: "v1", Kind: "Foo"}
 	cw := NewCRWatcher(gvk, "ns1")
 
-	// Initial value should be 1
-	if got := cw.Counter.Load(); got != 1 {
-		t.Fatalf("initial counter = %d, want 1", got)
+	if !cw.addMember("first") || !cw.addMember("second") {
+		t.Fatal("expected watcher to accept both members")
+	}
+	if removed, empty := cw.removeMember("first"); !removed || empty {
+		t.Fatalf("release first member = removed:%v empty:%v, want true:false", removed, empty)
+	}
+	select {
+	case <-cw.StopChan:
+		t.Fatal("watcher stopped after releasing one of two members")
+	default:
+	}
+	if removed, empty := cw.removeMember("second"); !removed || !empty {
+		t.Fatalf("release final member = removed:%v empty:%v, want true:true", removed, empty)
+	}
+	select {
+	case <-cw.StopChan:
+	default:
+		t.Fatal("watcher did not stop after final member release")
+	}
+}
+
+func TestEnsureCRWatcher_RetriesInformerFailure(t *testing.T) {
+	StopAllCRWatchers()
+	t.Cleanup(StopAllCRWatchers)
+
+	cr := testCustomResource("ns1", "redis-a", "1", true, map[string]any{"phase": "Creating"}, "mid-a")
+	firstAttempt := make(chan struct{}, 1)
+	secondAttempt := make(chan struct{}, 1)
+	attempt := 0
+	runner := func(_ context.Context, _ client.Client, stop <-chan struct{}, _ schema.GroupVersionKind, _ string, _ cache.ResourceEventHandlerFuncs) error {
+		attempt++
+		if attempt == 1 {
+			firstAttempt <- struct{}{}
+			return errors.New("transient dynamic client failure")
+		}
+		secondAttempt <- struct{}{}
+		<-stop
+		return nil
 	}
 
-	const goroutines = 100
-	var wg sync.WaitGroup
-
-	// Concurrent increments
-	wg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
-		go func() {
-			defer wg.Done()
-			cw.Counter.Add(1)
-		}()
-	}
-	wg.Wait()
-
-	if got := cw.Counter.Load(); got != 1+goroutines {
-		t.Fatalf("after increments counter = %d, want %d", got, 1+goroutines)
+	cw, created, err := ensureCRWatcher(context.Background(), nil, cr, cache.ResourceEventHandlerFuncs{}, runner, func(int) time.Duration { return time.Millisecond })
+	if err != nil || !created {
+		t.Fatalf("ensureCRWatcher() = created:%v err:%v, want created watcher", created, err)
 	}
 
-	// Concurrent decrements
-	wg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
-		go func() {
-			defer wg.Done()
-			cw.Counter.Add(-1)
-		}()
+	select {
+	case <-firstAttempt:
+	case <-time.After(time.Second):
+		t.Fatal("first informer attempt did not run")
 	}
-	wg.Wait()
+	select {
+	case <-secondAttempt:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not retry after informer failure")
+	}
 
-	if got := cw.Counter.Load(); got != 1 {
-		t.Fatalf("after decrements counter = %d, want 1", got)
+	cw.Stop()
+	select {
+	case <-cw.Done():
+	case <-time.After(time.Second):
+		t.Fatal("watcher supervisor did not exit after stop")
+	}
+	if _, ok := CustomResourceWatcherMap.Load(cw.GetKey()); ok {
+		t.Fatal("stopped watcher remained in registry")
+	}
+}
+
+func TestCustomResourceWatcher_CleanupPreservesReplacement(t *testing.T) {
+	StopAllCRWatchers()
+	t.Cleanup(StopAllCRWatchers)
+
+	gvk := schema.GroupVersionKind{Group: "test", Version: "v1", Kind: "Foo"}
+	old := NewCRWatcher(gvk, "ns1")
+	if !old.addMember("old") {
+		t.Fatal("expected old watcher member registration")
+	}
+	CustomResourceWatcherMap.Store(old.GetKey(), old)
+	started := make(chan struct{}, 1)
+	runner := func(_ context.Context, _ client.Client, stop <-chan struct{}, _ schema.GroupVersionKind, _ string, _ cache.ResourceEventHandlerFuncs) error {
+		started <- struct{}{}
+		<-stop
+		return nil
+	}
+	go old.run(context.Background(), nil, cache.ResourceEventHandlerFuncs{}, runner, func(int) time.Duration { return time.Millisecond })
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("old watcher did not start")
+	}
+
+	replacement := NewCRWatcher(gvk, "ns1")
+	if !replacement.addMember("replacement") {
+		t.Fatal("expected replacement watcher member registration")
+	}
+	CustomResourceWatcherMap.Store(old.GetKey(), replacement)
+	old.Stop()
+	select {
+	case <-old.Done():
+	case <-time.After(time.Second):
+		t.Fatal("old watcher did not exit")
+	}
+
+	actual, ok := CustomResourceWatcherMap.Load(old.GetKey())
+	if !ok || actual != replacement {
+		t.Fatalf("watcher registry = %#v, want replacement", actual)
 	}
 }
 
@@ -162,6 +236,69 @@ func TestCustomResourceUpdateNotifyDecision(t *testing.T) {
 			if got[0].namespace != tt.wantNamespace || got[0].middleware != tt.wantMiddleware {
 				t.Fatalf("notification = %s/%s, want %s/%s",
 					got[0].namespace, got[0].middleware, tt.wantNamespace, tt.wantMiddleware)
+			}
+		})
+	}
+}
+
+func TestCustomResourceAddNotifyDecision(t *testing.T) {
+	tests := []struct {
+		name           string
+		obj            any
+		wantNotify     bool
+		wantNamespace  string
+		wantMiddleware string
+	}{
+		{
+			name:           "initial list add notifies middleware owner",
+			obj:            testCustomResource("ns1", "redis-a", "2", true, map[string]any{"phase": "Running"}, "mid-a"),
+			wantNotify:     true,
+			wantNamespace:  "ns1",
+			wantMiddleware: "mid-a",
+		},
+		{
+			name:           "initial list add falls back to custom resource name",
+			obj:            testCustomResource("ns1", "redis-a", "2", true, map[string]any{"phase": "Running"}, ""),
+			wantNotify:     true,
+			wantNamespace:  "ns1",
+			wantMiddleware: "redis-a",
+		},
+		{
+			name: "missing package label does not notify",
+			obj:  testCustomResource("ns1", "redis-a", "2", false, map[string]any{"phase": "Running"}, "mid-a"),
+		},
+		{
+			name: "non custom resource object does not notify",
+			obj:  struct{}{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []struct {
+				namespace  string
+				middleware string
+			}
+			handler := newResourceEventHandlerFuncs(context.Background(), nil, func(namespace, middlewareName string) {
+				got = append(got, struct {
+					namespace  string
+					middleware string
+				}{namespace: namespace, middleware: middlewareName})
+			})
+
+			handler.AddFunc(tt.obj)
+
+			if !tt.wantNotify {
+				if len(got) != 0 {
+					t.Fatalf("notifications = %#v, want none", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("notifications = %#v, want exactly one", got)
+			}
+			if got[0].namespace != tt.wantNamespace || got[0].middleware != tt.wantMiddleware {
+				t.Fatalf("notification = %s/%s, want %s/%s", got[0].namespace, got[0].middleware, tt.wantNamespace, tt.wantMiddleware)
 			}
 		})
 	}

@@ -233,7 +233,7 @@ func applyLocalReadinessDiagnostic(
 // recomputeAndUpdateStatus reads the latest Middleware and CR state, rebuilds
 // the full include list from the local informer cache, and writes the result back
 // to Middleware.status if anything changed.
-func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstructured.Unstructured, mid *v1.Middleware) {
+func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstructured.Unstructured, mid *v1.Middleware, mgr *NsInformerManager) {
 	var err error
 
 	nowMid, err := k8s.GetMiddleware(ctx, cli, mid.Name, mid.Namespace)
@@ -352,9 +352,14 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		}
 	}
 
-	// Obtain the namespace cache from the informer manager.
-	// If the cache is not yet ready, fall back to no-op for this tick.
-	cache := GetNsInformerManager().GetCache(nowMid.Namespace)
+	// Obtain the namespace cache from the manager that registered this SyncV2
+	// session. A stale trigger must not pick up a replacement manager after a
+	// leader handover.
+	if mgr == nil {
+		log.FromContext(ctx).Info("recomputeAndUpdateStatus: informer manager unavailable, skip", "warning", true, "namespace", nowMid.Namespace)
+		return
+	}
+	cache := mgr.GetCache(nowMid.Namespace)
 	if cache == nil {
 		log.FromContext(ctx).Info("recomputeAndUpdateStatus: cache not ready, skip", "warning", true, "namespace", nowMid.Namespace)
 		return
@@ -800,6 +805,16 @@ func SyncCustomResourceV2(ctx context.Context, cli client.Client, cr *unstructur
 
 	ns := mid.Namespace
 	midKey := fmt.Sprintf("%s/%s", ns, mid.Name)
+	key := fmt.Sprintf(SyncCustomResourceStopChanMapKey, cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName())
+	session, owner, err := acquireSyncCustomResourceSession(ctx, key)
+	if err != nil {
+		return err
+	}
+	if !owner {
+		log.FromContext(ctx).Info("SyncCustomResourceV2 already running", "key", key)
+		return nil
+	}
+	defer session.release(key)
 
 	// 1. Ensure NsInformerManager is available.
 	mgr := GetNsInformerManager()
@@ -807,49 +822,50 @@ func SyncCustomResourceV2(ctx context.Context, cli client.Client, cr *unstructur
 		return fmt.Errorf("NsInformerManager not started")
 	}
 
-	// 2. Register namespace informers; blocks until cache is synced or ctx canceled.
-	if err := mgr.Register(ctx, ns, midKey); err != nil {
+	// 2. Register namespace informers. The session lease makes an old cleanup
+	// distinct from a replacement session for the same Middleware.
+	registrationKey := fmt.Sprintf("%s#%d", midKey, session.lease)
+	if err := mgr.Register(session.ctx, ns, registrationKey); err != nil {
+		if session.ctx.Err() != nil {
+			return nil
+		}
 		return fmt.Errorf("register informer for ns %s: %w", ns, err)
 	}
+	defer mgr.Unregister(ns, registrationKey)
 
 	// 3. Register the debouncer; informer events route here via NotifyNamespace.
 	triggerFn := func() {
-		recomputeAndUpdateStatus(ctx, cli, cr, mid)
+		select {
+		case <-session.ctx.Done():
+			return
+		case <-session.stopCh:
+			return
+		default:
+		}
+		recomputeAndUpdateStatus(session.ctx, cli, cr, mid, mgr)
 	}
-	RegisterDebouncer(ns, mid.Name, triggerFn)
+	var debouncer *Debouncer
+	if !session.registerIfActive(func() {
+		debouncer = RegisterDebouncer(ns, mid.Name, triggerFn)
+	}) {
+		return nil
+	}
+	defer UnregisterDebouncerIfCurrent(ns, mid.Name, debouncer)
 
 	// 4. Fire once immediately so status is current before the first event arrives.
 	go triggerFn()
 
-	// 5. Guard against duplicate goroutines using the same stopChan mechanism as V1.
-	key := fmt.Sprintf(SyncCustomResourceStopChanMapKey, cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName())
-	stopChan := make(chan struct{})
-	actual, loaded := SyncCustomResourceStopChanMap.LoadOrStore(key, stopChan)
-	if loaded {
-		// Another goroutine is already running for this CR; discard ours.
-		safeClose(stopChan)
-		log.FromContext(ctx).Info("SyncCustomResourceV2 already running", "key", key)
-		return nil
-	}
-	stopChan, ok := actual.(chan struct{})
-	if !ok {
-		return fmt.Errorf("SyncCustomResourceV2 stop channel %s has unexpected type %T", key, actual)
-	}
+	// 5. Schedule any initial readiness recheck against this session's stop
+	// channel so a replacement cannot inherit an old timer.
 	if deadline, hasDeadline := initialReadinessRecheckDeadline(ctx, cli, cr); hasDeadline {
-		scheduleInitialReadinessRecheck(ctx, stopChan, deadline, triggerFn)
+		scheduleInitialReadinessRecheck(session.ctx, session.stopCh, deadline, triggerFn)
 	}
-
-	defer func() {
-		SyncCustomResourceStopChanMap.Delete(key)
-		UnregisterDebouncer(ns, mid.Name)
-		mgr.Unregister(ns, midKey)
-	}()
 
 	// 6. Block until context is canceled or stop is signaled externally.
 	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-stopChan:
+	case <-session.ctx.Done():
+		return nil
+	case <-session.stopCh:
 		log.FromContext(ctx).Info("SyncCustomResourceV2 stop", "gvk", cr.GroupVersionKind().String(), "namespace", cr.GetNamespace(), "name", cr.GetName())
 		return nil
 	}

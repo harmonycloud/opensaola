@@ -143,6 +143,52 @@ spec:
                       x-kubernetes-preserve-unknown-fields: true
                   type: object
                 type: array
+              reconcileOverrides:
+                description: |-
+                  ReconcileOverrides is an OpenSaola-managed RFC 7396 JSON Merge Patch
+                  applied to the rendered primary custom-resource spec after Baseline and
+                  template rendering. It persists accepted changes to the live primary CR
+                  made during a reconciliation pause when they cannot safely be represented
+                  by Parameters alone, such as removal of a
+                  Baseline default.
+                properties:
+                  baseSpec:
+                    description: |-
+                      BaseSpec is the rendered primary-CR spec that SpecPatch was calculated
+                      against. It lets later explicit MID/Baseline changes win at the same
+                      path while preserving unrelated adopted changes from the pause.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  gvk:
+                    description: |-
+                      GVK, Namespace and Name bind an override to the primary CR it was
+                      adopted from. A Baseline/package target change must not apply an old
+                      schema-specific patch to a different CR.
+                    properties:
+                      group:
+                        description: Group is the API group of the Kubernetes resource.
+                        type: string
+                      kind:
+                        description: Kind is the kind of the Kubernetes resource.
+                        type: string
+                      name:
+                        description: Name is the name identifier for this GVK entry.
+                        type: string
+                      version:
+                        description: Version is the API version of the Kubernetes
+                          resource.
+                        type: string
+                    type: object
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  specPatch:
+                    description: SpecPatch is an RFC 7396 JSON Merge Patch rooted
+                      at the target CR spec.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                type: object
             type: object
           status:
             description: MiddlewareStatus defines the observed state of Middleware.
@@ -506,6 +552,127 @@ spec:
                 description: Reason provides a human-readable explanation of the current
                   state.
                 type: string
+              reconcilePause:
+                description: |-
+                  ReconcilePause stores the durable baseline used to safely merge primary
+                  custom-resource changes made during a suspend-reconcile window.
+                properties:
+                  adoptedLiveSpecHash:
+                    description: |-
+                      AdoptedLiveSpecHash is the hash of the live primary CR spec used to
+                      calculate the most recent merge. It is checked again immediately before
+                      the resumed SSA write so a second live change during the pause is never overwritten using an
+                      older L input.
+                    type: string
+                  capturedAt:
+                    format: date-time
+                    type: string
+                  desiredSpec:
+                    description: |-
+                      DesiredSpec is the effective primary custom-resource spec rendered when
+                      the pause first became active. It is the B input of the B/L/D merge.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  generation:
+                    description: Generation is the Middleware generation at snapshot
+                      capture time.
+                    format: int64
+                    type: integer
+                  gvk:
+                    description: GVK identifies the primary resource rendered for
+                      this session.
+                    properties:
+                      group:
+                        description: Group is the API group of the Kubernetes resource.
+                        type: string
+                      kind:
+                        description: Kind is the kind of the Kubernetes resource.
+                        type: string
+                      name:
+                        description: Name is the name identifier for this GVK entry.
+                        type: string
+                      version:
+                        description: Version is the API version of the Kubernetes
+                          resource.
+                        type: string
+                    type: object
+                  hash:
+                    description: |-
+                      Hash is the SHA-256 of DesiredSpec and makes the snapshot identity
+                      visible to operators and conflict-safe updates.
+                    type: string
+                  name:
+                    type: string
+                  namespace:
+                    description: Namespace and Name identify the target primary custom
+                      resource.
+                    type: string
+                  resourceUID:
+                    description: |-
+                      ResourceUID protects against automatically adopting a deleted and
+                      recreated actual resource during the pause.
+                    type: string
+                type: object
+              renderedConfigurationResources:
+                description: |-
+                  RenderedConfigurationResources is the lifecycle-managed inventory of resources rendered from MiddlewareConfigurations.
+                  It enables kind-aware cleanup when a configuration template becomes empty after a feature is disabled.
+                items:
+                  description: |-
+                    RenderedConfigurationResource records one Kubernetes object successfully
+                    rendered from a MiddlewareConfiguration and managed by an owning
+                    Middleware or MiddlewareOperator. The owner status uses this inventory to
+                    safely prune resources after their Configuration no longer renders them.
+                  properties:
+                    configurationName:
+                      description: ConfigurationName is the MiddlewareConfiguration
+                        name that rendered this resource.
+                      type: string
+                    configurationUID:
+                      description: ConfigurationUID identifies the exact MiddlewareConfiguration
+                        object instance when available.
+                      type: string
+                    disablePolicy:
+                      description: |-
+                        DisablePolicy is the resolved lifecycle policy used when this resource stops rendering.
+                        Valid values are delete and orphan; without an explicit policy, PVC and PV
+                        resources default to orphan while all other resource types default to delete.
+                        CustomResourceDefinitions always resolve to orphan.
+                      type: string
+                    group:
+                      description: Group, Version and Kind identify the rendered Kubernetes
+                        resource.
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      description: Namespace and Name identify the rendered Kubernetes
+                        resource instance.
+                      type: string
+                    namespaced:
+                      description: Namespaced records whether the rendered resource
+                        was namespaced when it was applied.
+                      type: boolean
+                    ownerUID:
+                      description: OwnerUID is the UID of the Middleware or MiddlewareOperator
+                        that owns this inventory.
+                      type: string
+                    resourceUID:
+                      description: ResourceUID protects a same-name resource that
+                        was deleted and recreated outside OpenSaola.
+                      type: string
+                    version:
+                      type: string
+                  type: object
+                type: array
+              renderedConfigurationResourcesGeneration:
+                description: |-
+                  RenderedConfigurationResourcesGeneration is the generation that last successfully reconciled the inventory.
+                  It prevents an older status writer from overwriting a newer inventory snapshot.
+                format: int64
+                type: integer
               state:
                 description: 'State is the high-level state of the middleware. Valid
                   values: Available, Unavailable, Updating.'

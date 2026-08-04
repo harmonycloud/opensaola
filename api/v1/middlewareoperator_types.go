@@ -74,6 +74,13 @@ type MiddlewareOperatorStatus struct {
 	// Runtime is an optional summary field for kubectl display (forward compatible).
 	// +optional
 	Runtime string `json:"runtime,omitempty"`
+
+	// RenderedConfigurationResources is the lifecycle-managed inventory of resources rendered from MiddlewareConfigurations.
+	// It enables kind-aware cleanup when a configuration template becomes empty after a feature is disabled.
+	RenderedConfigurationResources []RenderedConfigurationResource `json:"renderedConfigurationResources,omitempty"`
+	// RenderedConfigurationResourcesGeneration is the generation that last successfully reconciled the inventory.
+	// It prevents an older status writer from overwriting a newer inventory snapshot.
+	RenderedConfigurationResourcesGeneration int64 `json:"renderedConfigurationResourcesGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true

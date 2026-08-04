@@ -20,6 +20,7 @@
   - [4.2 Configuration 类型分类](#42-configuration-类型分类)
   - [4.3 Go 模板语法使用](#43-go-模板语法使用)
   - [4.4 模板变量来源和渲染流程](#44-模板变量来源和渲染流程)
+  - [4.5 Configuration 停用生命周期](#45-configuration-停用生命周期)
 - [5. Actions 系统](#5-actions-系统)
   - [5.1 Action 定义格式和字段说明](#51-action-定义格式和字段说明)
   - [5.2 Action 类型分类](#52-action-类型分类)
@@ -340,6 +341,35 @@ MiddlewareConfiguration.spec.template （只能访问 .Values 和 .Globe）
 最终的 Kubernetes 资源 YAML
 ```
 
+### 4.5 Configuration 停用生命周期
+
+Configuration 模板通过条件渲染为空、或其引用被 Baseline/MID/MO 移除时，属于“功能停用”，并不等同于
+删除 MID/MO。`spec.template` 内资源清单的 `metadata.annotations` 优先于
+`MiddlewareConfiguration.metadata.annotations`；不要给已经存在的 live 资源手工设置策略注解，控制器不会读取它：
+
+| 策略 | 触发时机 | 默认/行为 | 删除保护 |
+|------|----------|-----------|----------|
+| `configurationDisablePolicy` | 模板不再渲染或引用移除后 owner 的下一次 reconcile | 无显式策略时：PVC/PV 为 `orphan`，CRD 始终 `orphan`，其他所有 Kind 为 `delete` | 仅清理此前写入生命周期清单、且 owner UID、资源 UID、Configuration 标记和 owner 关系仍匹配的资源 |
+| `configurationDeletePolicy` | MID/MO 被删除 | 按既有受管资源识别清理 | `orphan` 保留；`delete` 是强删除语义，不能把它当作 disable 路径的 UID 安全删除 |
+| `configurationOwnershipPolicy=managed` | 同名资源已有其他 controller owner | 默认不抢占 owner、保留 OwnerReference 后继续 patch | `managed` 使 reconcile 失败，明确拒绝抢占；未受当前 owner 管理的资源不会进入生命周期清单 |
+
+除 PVC/PV 和 CRD 外，未显式标注的资源会在功能停用时默认清理；如需保留 ConfigMap、Secret、StatefulSet、
+未知/自定义 CR 或任意其他 Kind，必须在仍正常渲染时设置在 `MiddlewareConfiguration.metadata.annotations`
+（或 `spec.template` 内资源清单的 `metadata.annotations`）中：
+
+```yaml
+metadata:
+  annotations:
+    middleware.cn/configurationDisablePolicy: orphan
+```
+
+然后等待一次成功 reconcile，使最终策略写入 MID/MO 的
+`status.renderedConfigurationResources`，最后再令模板为空或移除引用。显式 `delete` 可覆盖 PVC/PV 的
+默认保留；CRD 无论注解为何都不会在停用路径删除。旧的 `orphan` 清单不会在升级后被追溯删除，必须先成功
+reconcile 一次才能采用新默认。直接修改 `MiddlewareConfiguration.spec.template` 不会单独触发 owner reconcile；
+需要由 MID/MO 引用变更或其他 owner 事件触发。这里的“不再引用”只表示 OpenSaola 不再渲染该 Configuration，
+不代表控制器会扫描集群确认没有其他消费者。
+
 ---
 
 ## 5. Actions 系统
@@ -527,10 +557,14 @@ Redis 和 MySQL 未使用此文件。
      |
   5. 用户通过 Middleware.spec.necessary 填写的值
      |
-  6. PreAction 对 Middleware 资源的 CUE patch（最高优先级）
+  6. PreAction 对 Middleware 资源的 CUE patch（常规渲染链中的最高优先级）
 ```
 
 > **关键说明**：源码执行顺序为 TemplateParseWithBaseline（解析 Necessary 并渲染 Parameters）→ HandlePreActions（执行 CUE patch）→ handleExtraResource（渲染 Configuration）。PreAction 的 CUE patch 通过 MergeMap 将输出深度合并到 Middleware 对象上，可以覆盖 Necessary 推导的值，因此 PreAction patch 实际优先级高于用户 Necessary。
+>
+> **控制器托管的实际状态采纳 override**：`spec.reconcileOverrides` 不是包作者可配置的常规输入。它只在 MID 主 CR 完成常规渲染后，条件式作用于该 CR 的 `spec`；不会传入 Configuration 模板或 PreAction。它只保留相对 `baseSpec` 未被后续 MID/Baseline 显式修改的路径，因此后续同路径的显式期望变更优先，其他已采纳的暂停期间差异仍保留。
+>
+> **PreAction 与恢复合并**：暂停快照和 B/L/D 合并会在内存中的 MID 副本上重放仅含 CUE 的 PreAction，因此其对主 CR `spec` 的影响与正常写入一致，且不会执行命令、HTTP 操作或 Kubernetes 写入。若任一 PreAction 含非 CUE 步骤（例如 CMD 或 HTTP），`resume-policy=merge` 会失败关闭；应改为纯 CUE 预动作、把结果固化为 MID/Baseline 的显式期望态，或仅在明确接受覆盖暂停期间改动时使用 `apply`。
 
 **详细说明**：
 
@@ -597,6 +631,7 @@ Redis 和 MySQL 未使用此文件。
 **阶段 3：handleExtraResource + buildCustomResource**
 - 渲染 MiddlewareConfiguration.spec.template，使用阶段 1 已渲染的 configurations[].values 作为 .Values
 - 构建 CR，将阶段 2 修改后的 parameters 整体作为 CR 的 spec 字段发布
+- 如果存在有效 `reconcileOverrides`，仅对 MID 主 CR 的 `spec` 条件式应用该 patch
 
 ### 8.5 冲突处理策略
 
@@ -607,6 +642,7 @@ Redis 和 MySQL 未使用此文件。
 | Configuration `| default` vs values 注入 | values 注入优先（default 只是后备） |
 | PreAction patch vs Necessary 推导的 parameters | PreAction patch 深度合并后的值优先（PreAction 在 Necessary 解析之后执行，优先级最高） |
 | 多个 PreAction 修改同一字段 | 按执行顺序（数组顺序），后执行的覆盖先执行的 |
+| 已采纳的实际状态 override vs 后续 MID/Baseline 显式变更 | 同一路径以后者为准；不相关 override 路径继续生效 |
 
 ### 8.6 实际示例
 

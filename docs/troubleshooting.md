@@ -15,6 +15,7 @@ This guide helps diagnose and resolve common issues with OpenSaola middleware ma
   - [Finalizer preventing deletion](#finalizer-preventing-deletion)
   - [Pod stuck in CrashLoopBackOff](#pod-stuck-in-crashloopbackoff)
   - [CustomResource automatically recreated after deletion](#customresource-automatically-recreated-after-deletion)
+  - [Reconciliation suspension and recovery failures](#reconciliation-suspension-and-recovery-failures)
   - [MiddlewareAction not executing](#middlewareaction-not-executing)
 - [Debugging Commands](#debugging-commands)
 - [Checking Conditions](#checking-conditions)
@@ -290,11 +291,38 @@ kubectl get crds | grep middleware.cn
 
 **Symptoms**: You deleted a CustomResource managed by a Middleware, but it was immediately recreated.
 
-**Cause**: This is expected behavior. The CR Watcher detects the deletion and checks if the owning Middleware still exists. If the Middleware exists, the CR is automatically rebuilt to maintain the desired state.
+**Cause**: This is expected during ordinary reconciliation. The CR Watcher detects deletion and checks that the owning Middleware still exists and is not under write protection. When both are true, it automatically rebuilds the CR to maintain desired state.
 
 **Solution**:
 - To permanently remove the CustomResource, delete the owning Middleware resource instead
-- If you need to modify the CR, update the Middleware spec rather than editing the CR directly
+- For ordinary changes, update the Middleware spec rather than editing the CR directly
+- If a direct primary-CR change is required, first pause the MID through the [Reconciliation Suspension and Recovery Runbook](reconcile-suspension.md); directly deleting the pause annotation is not a safe resume
+
+---
+
+### Reconciliation suspension and recovery failures
+
+**Symptoms**: A direct MID primary-CR change is needed during a pause, or the MID stays paused / shows `ReconcileAdoption=False` after a recovery policy is requested.
+
+**Check**:
+
+```bash
+kubectl get mid <mid-name> -n <namespace> -o json | jq '{
+  pause: .status.reconcilePause,
+  conditions: [.status.conditions[] | select(.type == "ReconcilePaused" or .type == "ReconcileAdoption")]
+}'
+```
+
+**Resolution**:
+
+- Before modifying the primary CR, confirm `ReconcilePaused=True`, a `.status.reconcilePause` with `desiredSpec`, and `ReconcileAdoption` not `False`. If capture failed, first fix the missing primary CR, render error, or size limit.
+- `ReconcileAdoptionConflict` means a live change made during the pause and current desired state changed the same path. Decide the intended value, then request `middleware.cn/resume-policy=merge` again.
+- For another `ReconcileAdoption=False`, keep the pause active and fix the identity, render, JSON-`null`, or size issue reported in `message` before retrying.
+- CUE-only PreActions are replayed on an in-memory copy during pause snapshot/B/L/D merge and may modify the primary CR `spec` safely. If any PreAction contains CMD, HTTP, or another non-CUE step, `merge` fails closed. Make the action pure CUE, make its result explicit desired state, or use `apply` only when intentionally overwriting the change made during the pause.
+- Use `resume-policy=apply` only after explicitly accepting that the paused primary-CR `spec` changes will be overwritten; never remove `suspend-reconcile` directly.
+- An MO does not support B/L/D merging: update its desired configuration, then remove `suspend-reconcile` to resume ordinary reconciliation. Handle each related MID separately.
+
+See the [Reconciliation Suspension and Recovery Runbook](reconcile-suspension.md) for full commands and boundaries.
 
 ---
 
@@ -412,6 +440,8 @@ kubectl get mid <name> -n <namespace> -o jsonpath='{.status.conditions}' | jq '.
 | `ExecuteHttp` | Action | HTTP step executed |
 | `Running` | Middleware, MO | Resource is running normally |
 | `Updating` | Middleware, MO | Upgrade flow status |
+| `ReconcilePaused` | Middleware, MO | Child-resource writes are paused; a MID also needs a present `status.reconcilePause` |
+| `ReconcileAdoption` | Middleware | Result of adopting MID primary-CR changes made during a pause; when `False`, pause remains active and reason/message explain why |
 
 ### Condition status values
 
@@ -462,3 +492,4 @@ kubectl rollout restart deployment opensaola -n <operator-namespace>
 
 - [Technical Documentation](opensaola-technical.md) -- Architecture, CRD field reference, reconcile flows, state machine details, labels/annotations conventions
 - [Package Documentation](opensaola-packaging.md) -- Package format, baseline system, action system, configuration templates, Redis case study
+- [Reconciliation Suspension and Recovery Runbook](reconcile-suspension.md) -- MID/MO pause, recovery, change adoption, conflict handling, and verification commands

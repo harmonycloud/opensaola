@@ -15,6 +15,7 @@
   - [Finalizer 阻止删除](#finalizer-阻止删除)
   - [Pod 卡在 CrashLoopBackOff](#pod-卡在-crashloopbackoff)
   - [CustomResource 删除后自动重建](#customresource-删除后自动重建)
+  - [Reconcile 暂停与恢复失败](#reconcile-暂停与恢复失败)
   - [MiddlewareAction 未执行](#middlewareaction-未执行)
 - [调试命令](#调试命令)
 - [检查 Conditions](#检查-conditions)
@@ -290,11 +291,38 @@ kubectl get crds | grep middleware.cn
 
 **症状**：你删除了由 Middleware 管理的 CustomResource，但它立即被重新创建。
 
-**原因**：这是预期行为。CR Watcher 检测到删除操作后会检查所属的 Middleware 是否仍然存在。如果 Middleware 存在，CR 会自动重建以维持期望状态。
+**原因**：这是常规 reconcile 的预期行为。CR Watcher 检测到删除操作后会检查所属 Middleware 是否存在且未处于写入暂停保护；两者成立时，CR 会自动重建以维持期望状态。
 
 **解决方案**：
 - 要永久移除 CustomResource，请改为删除所属的 Middleware 资源
-- 如果需要修改 CR，请更新 Middleware spec 而不是直接编辑 CR
+- 常规变更请更新 Middleware spec，而不是直接编辑 CR
+- 如需直接修改主 CR，请按[Reconcile 暂停与恢复 Runbook](reconcile-suspension_zh.md)先暂停 MID；直接删除暂停注解不会安全恢复写入
+
+---
+
+### Reconcile 暂停与恢复失败
+
+**症状**：暂停期间需要修改 MID 主 CR，或设置恢复策略后 MID 仍保持暂停/显示 `ReconcileAdoption=False`。
+
+**检查**：
+
+```bash
+kubectl get mid <mid-name> -n <namespace> -o json | jq '{
+  pause: .status.reconcilePause,
+  conditions: [.status.conditions[] | select(.type == "ReconcilePaused" or .type == "ReconcileAdoption")]
+}'
+```
+
+**处理**：
+
+- 开始修改前，必须同时确认 `ReconcilePaused=True`、`.status.reconcilePause` 存在且带 `desiredSpec`、以及 `ReconcileAdoption` 不为 `False`。快照失败时先修复主 CR 缺失、渲染错误或大小超限。
+- `ReconcileAdoptionConflict` 表示暂停期间的实际改动与当前期望态修改了同一路径；确定最终值后再设置 `middleware.cn/resume-policy=merge`。
+- 其他 `ReconcileAdoption=False` 情况保持暂停，按 `message` 修复身份、渲染、JSON `null` 或大小问题后重试。
+- 仅含 CUE 的 PreAction 会在暂停快照/B/L/D 合并中以内存副本重放，可正常使用 `merge`，且不会执行外部操作。若任一 PreAction 含 CMD、HTTP 或其他非 CUE 步骤，`merge` 会失败关闭；应改为纯 CUE 预动作、将结果固化为显式期望态，或仅在明确接受覆盖暂停期间改动时使用 `apply`。
+- 仅明确接受覆盖暂停期间主 CR `spec` 变更时才使用 `resume-policy=apply`；不要直接移除 `suspend-reconcile`。
+- MO 不支持 B/L/D 合并：更新其期望配置后移除 `suspend-reconcile` 即恢复普通 reconcile。关联 MID 需单独处理。
+
+完整命令和边界见[Reconcile 暂停与恢复 Runbook](reconcile-suspension_zh.md)。
 
 ---
 
@@ -412,6 +440,8 @@ kubectl get mid <name> -n <namespace> -o jsonpath='{.status.conditions}' | jq '.
 | `ExecuteHttp` | Action | HTTP 步骤已执行 |
 | `Running` | Middleware, MO | 资源正常运行中 |
 | `Updating` | Middleware, MO | 升级流程状态 |
+| `ReconcilePaused` | Middleware, MO | 向下层资源写入已暂停；MID 还需检查 `status.reconcilePause` 是否存在 |
+| `ReconcileAdoption` | Middleware | MID 主 CR 暂停期间变更的采纳结果；`False` 时保持暂停并查看 reason/message |
 
 ### Condition 状态值
 
@@ -462,3 +492,4 @@ kubectl rollout restart deployment opensaola -n <operator-namespace>
 
 - [技术文档](opensaola-technical.md) -- 架构、CRD 字段参考、reconcile 流程、状态机细节、标签/annotation 约定
 - [Package 文档](opensaola-packaging.md) -- Package 格式、baseline 系统、action 系统、配置模板、Redis 案例研究
+- [Reconcile 暂停与恢复 Runbook](reconcile-suspension_zh.md) -- MID/MO 暂停、恢复、变更采纳、冲突处理与验收命令

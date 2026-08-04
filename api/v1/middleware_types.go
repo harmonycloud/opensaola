@@ -41,8 +41,65 @@ type MiddlewareSpec struct {
 	// The schema varies by middleware type; common fields include port, password, and tuning knobs.
 	// Example: {"port": 6379, "maxmemory": "256mb", "databases": 16}
 	Parameters runtime.RawExtension `json:"parameters,omitempty"`
+	// ReconcileOverrides is an OpenSaola-managed RFC 7396 JSON Merge Patch
+	// applied to the rendered primary custom-resource spec after Baseline and
+// template rendering. It persists accepted changes to the live primary CR
+// made during a reconciliation pause when they cannot safely be represented
+// by Parameters alone, such as removal of a
+	// Baseline default.
+	ReconcileOverrides *ReconcileOverrides `json:"reconcileOverrides,omitempty"`
 	// Configurations is the list of additional configuration resources to create alongside the middleware.
 	Configurations []Configuration `json:"configurations,omitempty"`
+}
+
+// ReconcileOverrides holds the generated merge patch that is applied to the
+// rendered primary custom-resource spec. Users normally do not edit it: the
+// Middleware controller writes it after a successful resume-policy=merge.
+type ReconcileOverrides struct {
+	// SpecPatch is an RFC 7396 JSON Merge Patch rooted at the target CR spec.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	SpecPatch runtime.RawExtension `json:"specPatch,omitempty"`
+	// BaseSpec is the rendered primary-CR spec that SpecPatch was calculated
+	// against. It lets later explicit MID/Baseline changes win at the same
+// path while preserving unrelated adopted changes from the pause.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	BaseSpec runtime.RawExtension `json:"baseSpec,omitempty"`
+	// GVK, Namespace and Name bind an override to the primary CR it was
+	// adopted from. A Baseline/package target change must not apply an old
+	// schema-specific patch to a different CR.
+	GVK       GVK    `json:"gvk,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name,omitempty"`
+}
+
+// ReconcilePauseStatus is a durable, one-shot baseline for a paused
+// Middleware reconciliation session. It is not an in-memory cache: it is
+// retained only until the session resumes successfully or the resource is
+// deleted.
+type ReconcilePauseStatus struct {
+	// DesiredSpec is the effective primary custom-resource spec rendered when
+	// the pause first became active. It is the B input of the B/L/D merge.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	DesiredSpec runtime.RawExtension `json:"desiredSpec,omitempty"`
+	// GVK identifies the primary resource rendered for this session.
+	GVK GVK `json:"gvk,omitempty"`
+	// Namespace and Name identify the target primary custom resource.
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name,omitempty"`
+	// ResourceUID protects against automatically adopting a deleted and
+	// recreated actual resource during the pause.
+	ResourceUID string `json:"resourceUID,omitempty"`
+	// Generation is the Middleware generation at snapshot capture time.
+	Generation int64 `json:"generation,omitempty"`
+	// Hash is the SHA-256 of DesiredSpec and makes the snapshot identity
+	// visible to operators and conflict-safe updates.
+	Hash       string      `json:"hash,omitempty"`
+	CapturedAt metav1.Time `json:"capturedAt,omitempty"`
+	// AdoptedLiveSpecHash is the hash of the live primary CR spec used to
+	// calculate the most recent merge. It is checked again immediately before
+// the resumed SSA write so a second live change during the pause is never overwritten using an
+	// older L input.
+	AdoptedLiveSpecHash string `json:"adoptedLiveSpecHash,omitempty"`
 }
 
 // MiddlewareStatus defines the observed state of Middleware.
@@ -64,6 +121,17 @@ type MiddlewareStatus struct {
 	State State `json:"state,omitempty"`
 	// Reason provides a human-readable explanation of the current state.
 	Reason string `json:"reason,omitempty"`
+
+	// RenderedConfigurationResources is the lifecycle-managed inventory of resources rendered from MiddlewareConfigurations.
+	// It enables kind-aware cleanup when a configuration template becomes empty after a feature is disabled.
+	RenderedConfigurationResources []RenderedConfigurationResource `json:"renderedConfigurationResources,omitempty"`
+	// RenderedConfigurationResourcesGeneration is the generation that last successfully reconciled the inventory.
+	// It prevents an older status writer from overwriting a newer inventory snapshot.
+	RenderedConfigurationResourcesGeneration int64 `json:"renderedConfigurationResourcesGeneration,omitempty"`
+
+	// ReconcilePause stores the durable baseline used to safely merge primary
+	// custom-resource changes made during a suspend-reconcile window.
+	ReconcilePause *ReconcilePauseStatus `json:"reconcilePause,omitempty"`
 }
 
 // CustomResources holds the status of custom sub-resources created by the middleware operator.

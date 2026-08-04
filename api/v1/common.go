@@ -19,6 +19,7 @@ package v1
 import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // Permission defines the RBAC permission for a service account.
@@ -48,6 +49,35 @@ type Configuration struct {
 	// Example (ConfigMap): {"my.cnf": "max_connections=200\ninnodb_buffer_pool_size=1G"}
 	// Example (ServiceAccount): {"automountServiceAccountToken": true}
 	Values runtime.RawExtension `json:"values,omitempty"`
+}
+
+// RenderedConfigurationResource records one Kubernetes object successfully
+// rendered from a MiddlewareConfiguration and managed by an owning
+// Middleware or MiddlewareOperator. The owner status uses this inventory to
+// safely prune resources after their Configuration no longer renders them.
+type RenderedConfigurationResource struct {
+	// ConfigurationName is the MiddlewareConfiguration name that rendered this resource.
+	ConfigurationName string `json:"configurationName,omitempty"`
+	// ConfigurationUID identifies the exact MiddlewareConfiguration object instance when available.
+	ConfigurationUID types.UID `json:"configurationUID,omitempty"`
+	// Group, Version and Kind identify the rendered Kubernetes resource.
+	Group   string `json:"group,omitempty"`
+	Version string `json:"version,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+	// Namespace and Name identify the rendered Kubernetes resource instance.
+	Namespace string `json:"namespace,omitempty"`
+	Name      string `json:"name,omitempty"`
+	// OwnerUID is the UID of the Middleware or MiddlewareOperator that owns this inventory.
+	OwnerUID types.UID `json:"ownerUID,omitempty"`
+	// ResourceUID protects a same-name resource that was deleted and recreated outside OpenSaola.
+	ResourceUID types.UID `json:"resourceUID,omitempty"`
+	// Namespaced records whether the rendered resource was namespaced when it was applied.
+	Namespaced bool `json:"namespaced,omitempty"`
+	// DisablePolicy is the resolved lifecycle policy used when this resource stops rendering.
+	// Valid values are delete and orphan; without an explicit policy, PVC and PV
+	// resources default to orphan while all other resource types default to delete.
+	// CustomResourceDefinitions always resolve to orphan.
+	DisablePolicy string `json:"disablePolicy,omitempty"`
 }
 
 // PermissionScope defines the scope of a permission.
@@ -168,7 +198,9 @@ const (
 	CondTypeRunning                   = "Running"
 	CondTypeTemplateParseWithBaseline = "TemplateParseWithBaseline"
 
-	CondTypeUpdating = "Updating"
+	CondTypeUpdating          = "Updating"
+	CondTypeReconcilePaused   = "ReconcilePaused"
+	CondTypeReconcileAdoption = "ReconcileAdoption"
 )
 
 // Condition reason constants used in status conditions to provide detail about the condition.
@@ -199,6 +231,11 @@ const (
 	CondReasonUpdatingFailed                   string = "UpdatingFailed"
 	CondReasonTemplateParseWithBaselineSuccess        = "TemplateParseWithBaselineSuccess"
 	CondReasonTemplateParseWithBaselineFailed         = "TemplateParseWithBaselineFailed"
+	CondReasonReconcilePaused                         = "ReconcilePaused"
+	CondReasonReconcileSnapshotFailed                 = "ReconcileSnapshotFailed"
+	CondReasonReconcileAdoptionSucceeded              = "ReconcileAdoptionSucceeded"
+	CondReasonReconcileAdoptionFailed                 = "ReconcileAdoptionFailed"
+	CondReasonReconcileAdoptionConflict               = "ReconcileAdoptionConflict"
 )
 
 // NecessaryKeywords defines required keywords and their expected occurrence count

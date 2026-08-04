@@ -25,9 +25,12 @@ import (
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func TestCustomResourceWatcher_MembersRemainIsolated(t *testing.T) {
@@ -301,6 +304,42 @@ func TestCustomResourceAddNotifyDecision(t *testing.T) {
 				t.Fatalf("notification = %s/%s, want %s/%s", got[0].namespace, got[0].middleware, tt.wantNamespace, tt.wantMiddleware)
 			}
 		})
+	}
+}
+
+func TestCustomResourceDeleteSkipsRebuildWhenMiddlewareSuspended(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add scheme: %v", err)
+	}
+
+	mid := &v1.Middleware{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mid-a",
+			Namespace: "ns1",
+			Annotations: map[string]string{
+				v1.AnnotationSuspendReconcile: "true",
+			},
+		},
+	}
+	createCalls := 0
+	cli := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(mid).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, next client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				createCalls++
+				return next.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	cr := testCustomResource("ns1", "redis-a", "1", true, map[string]any{"phase": "Running"}, "mid-a")
+	handler := newResourceEventHandlerFuncs(context.Background(), cli, nil)
+	handler.DeleteFunc(cr)
+
+	if createCalls != 0 {
+		t.Fatalf("custom resource rebuild create calls = %d, want 0 while suspended", createCalls)
 	}
 }
 

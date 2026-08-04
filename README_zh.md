@@ -250,6 +250,7 @@ make lint
 |------|------|
 | [技术文档](docs/opensaola-technical.md) | 架构设计、CRD 字段参考、Reconcile 流程、状态机 |
 | [包适配文档](docs/opensaola-packaging.md) | 包格式、基线体系、操作系统、CUE 模板、Redis 完整案例 |
+| [Reconcile 暂停与恢复 Runbook](docs/reconcile-suspension_zh.md) | 临时暂停 MID/MO 的下层资源写入并安全恢复；MID 支持采纳暂停期间的主 CR 变更 |
 | [故障排查指南](docs/troubleshooting_zh.md) | 常见问题、调试命令、日志配置 |
 | [升级指南](docs/upgrade-guide_zh.md) | 版本升级流程与回滚 |
 | [测试指南](docs/testing-guide_zh.md) | 测试层级、运行测试、覆盖率、基准测试 |

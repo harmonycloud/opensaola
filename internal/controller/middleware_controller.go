@@ -193,11 +193,15 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		)
 		return ctrl.Result{Requeue: true}, nil
 	}
+	if handled, pauseResult, pauseErr := r.handleMiddlewareReconcilePause(ctx, mid); handled {
+		return pauseResult, pauseErr
+	}
 
 	var (
 		generation         = mid.Generation
 		observedGeneration = mid.Status.ObservedGeneration
 	)
+	wasReconcilePaused := hasReconcilePaused(mid.Status.Conditions)
 
 	defer func() {
 		// Status convergence:
@@ -297,11 +301,21 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			log.FromContext(ctx).Error(err, "middleware build failed", "namespace", mid.Namespace, "name", mid.Name)
 			return ctrl.Result{}, err
 		}
+		if wasReconcilePaused {
+			if err = r.finalizeMiddlewareReconcileResume(ctx, mid); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		r.Recorder.Event(mid, "Normal", "Published", "Middleware published successfully")
-	} else if generation > observedGeneration || mid.Status.State == v1.StateUpdating {
+	} else if generation > observedGeneration || mid.Status.State == v1.StateUpdating || wasReconcilePaused {
 		if err = middleware.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionUpdate, mid); err != nil {
 			log.FromContext(ctx).Error(err, "middleware update failed", "namespace", mid.Namespace, "name", mid.Name)
 			return ctrl.Result{}, err
+		}
+		if wasReconcilePaused {
+			if err = r.finalizeMiddlewareReconcileResume(ctx, mid); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 		r.Recorder.Event(mid, "Normal", "Updated", "Middleware updated successfully")
 	}

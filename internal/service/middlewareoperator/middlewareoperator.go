@@ -319,10 +319,7 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 		}
 	}()
 
-	var (
-		errorList []string
-		mcs       []*v1.MiddlewareConfiguration
-	)
+	var mcs []*v1.MiddlewareConfiguration
 
 	switch act {
 	case consts.HandleActionDelete:
@@ -333,16 +330,13 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 		if err != nil {
 			return err
 		}
-		for _, mc := range mcs {
-			err = middlewareconfiguration.Handle(ctx, cli, m, act, mc)
-			if err != nil {
-				errorList = append(errorList, fmt.Sprintf("%s middleware configuration %s error: %v", act, mc.Name, err))
-			}
+		var inventory []v1.RenderedConfigurationResource
+		inventory, err = middlewareconfiguration.ReconcileRenderedConfigurationResources(ctx, cli, m, act, mcs, m.Status.RenderedConfigurationResources)
+		if err != nil {
+			return err
 		}
-	}
-	if len(errorList) > 0 {
-		err = errors.New(strings.Join(errorList, ";"))
-		return err
+		m.Status.RenderedConfigurationResources = inventory
+		m.Status.RenderedConfigurationResourcesGeneration = m.Generation
 	}
 
 	return nil
@@ -352,6 +346,14 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 func HandleResource(ctx context.Context, cli client.Client, action consts.HandleAction, m *v1.MiddlewareOperator) error {
 	if m == nil {
 		return fmt.Errorf("middleware operator is nil")
+	}
+	if action != consts.HandleActionDelete && v1.IsReconcileSuspended(m.GetAnnotations()) {
+		log.FromContext(ctx).Info("skipping MiddlewareOperator child-resource reconciliation because it is suspended",
+			"name", m.Name,
+			"namespace", m.Namespace,
+			"annotation", v1.AnnotationSuspendReconcile,
+		)
+		return nil
 	}
 	if action == consts.HandleActionDelete && IsNoOperatorResource(m) {
 		return nil

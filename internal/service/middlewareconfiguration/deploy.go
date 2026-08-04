@@ -36,19 +36,31 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// Handle handles a MiddlewareConfiguration
-func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act consts.HandleAction, m *v1.MiddlewareConfiguration) (err error) {
+// renderedConfigurationApplyResult separates the physical identity rendered
+// in this reconcile from the subset that is safe to put in the lifecycle
+// inventory. A rendered-but-unmanaged identity still prevents an older status
+// entry with the same target from being deleted.
+type renderedConfigurationApplyResult struct {
+	identity  v1.RenderedConfigurationResource
+	inventory *v1.RenderedConfigurationResource
+}
+
+// Handle applies one rendered MiddlewareConfiguration. An empty template is a
+// deliberate no-op; stale-object cleanup is performed by the caller from the
+// prior status inventory.
+func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act consts.HandleAction, m *v1.MiddlewareConfiguration) (*renderedConfigurationApplyResult, error) {
 	obj := new(unstructured.Unstructured)
-	err = yaml.Unmarshal([]byte(m.Spec.Template), obj)
-	if err != nil {
-		return fmt.Errorf("failed to unmarshal CR: %w", err)
+	if err := yaml.Unmarshal([]byte(m.Spec.Template), obj); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal CR: %w", err)
 	}
-	// Ignore empty template
 	if obj.Object == nil {
-		return nil
+		return nil, nil
 	}
 
-	var resourceIsNamespaced bool
+	var (
+		resourceIsNamespaced bool
+		resourceScopeKnown   bool
+	)
 	namespaced, nsErr := k8s.IsNamespaced(obj)
 	if nsErr != nil {
 		if k8s.IsCRDNotInstalled(nsErr) {
@@ -57,11 +69,12 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 				"apiVersion", obj.GetAPIVersion(),
 			)
 		} else {
-			return fmt.Errorf("failed to check if resource is namespaced: %w", nsErr)
+			return nil, fmt.Errorf("failed to check if resource is namespaced: %w", nsErr)
 		}
-	} else if namespaced {
-		resourceIsNamespaced = true
-		if obj.GetNamespace() == "" {
+	} else {
+		resourceScopeKnown = true
+		resourceIsNamespaced = namespaced
+		if resourceIsNamespaced && obj.GetNamespace() == "" {
 			obj.SetNamespace(owner.GetNamespace())
 		}
 	}
@@ -88,22 +101,34 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 
 	old, err := k8s.GetCustomResource(ctx, cli, obj.GetName(), obj.GetNamespace(), obj.GroupVersionKind())
 	if err != nil && !errors.IsNotFound(err) {
-		return err
+		return nil, err
 	}
 	isExists := old != nil
+	lifecycleManaged := isLifecycleManagedForApply(owner, old, m, resourceIsNamespaced, resourceScopeKnown)
+	if lifecycleManaged {
+		tempAnnotations[v1.AnnotationConfigurationOwnerUID] = string(owner.GetUID())
+		if m.GetUID() != "" {
+			tempAnnotations[v1.AnnotationConfigurationUID] = string(m.GetUID())
+		}
+		obj.SetAnnotations(tempAnnotations)
+	}
 
 	switch act {
 	case consts.HandleActionPublish, consts.HandleActionUpdate:
+		disablePolicy, policyErr := configurationDisablePolicy(m, obj)
+		if policyErr != nil {
+			return nil, policyErr
+		}
+
 		if isExists {
 			if resourceIsNamespaced {
 				setOwnerRef, ownerErr := shouldSetControllerReference(owner, old, m, obj)
 				if ownerErr != nil {
-					return ownerErr
+					return nil, ownerErr
 				}
 				if setOwnerRef {
-					err = ctrl.SetControllerReference(owner, obj, cli.Scheme())
-					if err != nil {
-						return fmt.Errorf("failed to set ControllerReference: %w", err)
+					if err = ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
+						return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
 					}
 				} else {
 					obj.SetOwnerReferences(old.GetOwnerReferences())
@@ -116,33 +141,62 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 					)
 				}
 			}
-			err = k8s.PatchCustomResource(ctx, cli, obj)
-			if err != nil {
-				return err
+			if err = k8s.PatchCustomResource(ctx, cli, obj); err != nil {
+				return nil, err
 			}
 			log.FromContext(ctx).V(1).Info(fmt.Sprintf("updated %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
 		} else {
 			if resourceIsNamespaced {
-				err = ctrl.SetControllerReference(owner, obj, cli.Scheme())
-				if err != nil {
-					return fmt.Errorf("failed to set ControllerReference: %w", err)
+				if err = ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
+					return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
 				}
 			}
 			err = k8s.CreateCustomResource(ctx, cli, obj)
 			if err != nil && !errors.IsAlreadyExists(err) {
 				log.FromContext(ctx).V(1).Info(fmt.Sprintf("failed to create %s", obj.GetKind()), "obj", obj)
-				return fmt.Errorf("failed to create CR: %w", err)
+				return nil, fmt.Errorf("failed to create CR: %w", err)
+			}
+			if errors.IsAlreadyExists(err) {
+				// A race-created object was not proven to be under this lifecycle.
+				lifecycleManaged = false
 			}
 			log.FromContext(ctx).V(1).Info(fmt.Sprintf("created %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
-			if err == nil {
-				return
-			}
 		}
+
+		identity := v1.RenderedConfigurationResource{
+			ConfigurationName: m.Name,
+			Group:             obj.GroupVersionKind().Group,
+			Version:           obj.GroupVersionKind().Version,
+			Kind:              obj.GetKind(),
+			Namespace:         obj.GetNamespace(),
+			Name:              obj.GetName(),
+		}
+		if !lifecycleManaged {
+			return &renderedConfigurationApplyResult{identity: identity}, nil
+		}
+		live, getErr := k8s.GetCustomResource(ctx, cli, obj.GetName(), obj.GetNamespace(), obj.GroupVersionKind())
+		if getErr != nil {
+			return nil, fmt.Errorf("get applied configuration resource: %w", getErr)
+		}
+		inventory := &v1.RenderedConfigurationResource{
+			ConfigurationName: m.Name,
+			ConfigurationUID:  m.GetUID(),
+			Group:             live.GroupVersionKind().Group,
+			Version:           live.GroupVersionKind().Version,
+			Kind:              live.GetKind(),
+			Namespace:         live.GetNamespace(),
+			Name:              live.GetName(),
+			OwnerUID:          owner.GetUID(),
+			ResourceUID:       live.GetUID(),
+			Namespaced:        resourceIsNamespaced,
+			DisablePolicy:     disablePolicy,
+		}
+		return &renderedConfigurationApplyResult{identity: identity, inventory: inventory}, nil
+
 	case consts.HandleActionDelete:
 		if isExists {
-			// If it is a CRD, return
 			if obj.GroupVersionKind().Kind == "CustomResourceDefinition" {
-				return nil
+				return nil, nil
 			}
 			deletePolicy := configurationPolicy(m, obj, v1.AnnotationConfigurationDeletePolicy)
 			if !shouldDeleteRenderedResource(owner, old, m.Name, deletePolicy) {
@@ -153,17 +207,30 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 					"name", old.GetName(),
 					"controllerOwner", metav1.GetControllerOf(old),
 				)
-				return nil
+				return nil, nil
 			}
-			err = k8s.DeleteCustomResource(ctx, cli, obj)
-			if err != nil && !errors.IsNotFound(err) {
+			if err = k8s.DeleteCustomResource(ctx, cli, obj); err != nil && !errors.IsNotFound(err) {
 				log.FromContext(ctx).Error(err, fmt.Sprintf("failed to delete %s", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
-				return fmt.Errorf("failed to delete CR: %w", err)
+				return nil, fmt.Errorf("failed to delete CR: %w", err)
 			}
 			log.FromContext(ctx).V(1).Info(fmt.Sprintf("deleted %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
 		}
 	}
-	return nil
+	return nil, nil
+}
+
+func isLifecycleManagedForApply(owner metav1.Object, old metav1.Object, configuration *v1.MiddlewareConfiguration, resourceIsNamespaced, resourceScopeKnown bool) bool {
+	if owner == nil || owner.GetUID() == "" || !resourceScopeKnown {
+		return false
+	}
+	if old == nil {
+		return true
+	}
+	if resourceIsNamespaced {
+		controller := metav1.GetControllerOf(old)
+		return controller == nil || sameControllerOwner(owner, controller)
+	}
+	return hasConfigurationLifecycleMarkers(owner, old, configuration.Name, configuration.GetUID())
 }
 
 // handleTemplate processes the template

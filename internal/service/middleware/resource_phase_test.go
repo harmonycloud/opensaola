@@ -116,3 +116,23 @@ func TestSeedInitialCustomResourcePhase(t *testing.T) {
 		})
 	}
 }
+
+func TestHandleResourceSuspendedSkipsChildWrites(t *testing.T) {
+	t.Parallel()
+
+	mid := &v1.Middleware{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "suspended-mid",
+			Namespace: "middleware",
+			Annotations: map[string]string{
+				v1.AnnotationSuspendReconcile: "true",
+			},
+		},
+	}
+
+	for _, action := range []consts.HandleAction{consts.HandleActionPublish, consts.HandleActionUpdate} {
+		if err := HandleResource(context.Background(), nil, action, mid); err != nil {
+			t.Fatalf("HandleResource(%s) error = %v, want suspended no-op", action, err)
+		}
+	}
+}

@@ -307,6 +307,14 @@ func TemplateParseWithBaseline(ctx context.Context, cli client.Client, m *v1.Mid
 			}
 		}
 	}()
+	return renderMiddlewareWithBaseline(ctx, cli, m)
+}
+
+// renderMiddlewareWithBaseline performs the Baseline merge and template
+// rendering without writing status or child resources. Callers that need
+// normal reconciliation semantics should use TemplateParseWithBaseline; pause
+// snapshot/adoption code uses this helper only on a Middleware DeepCopy.
+func renderMiddlewareWithBaseline(ctx context.Context, cli client.Client, m *v1.Middleware) (err error) {
 
 	// Get the baseline template
 	baseline, err := middlewarebaseline.Get(ctx, cli, m.Spec.Baseline, m.Labels[v1.LabelPackageName])

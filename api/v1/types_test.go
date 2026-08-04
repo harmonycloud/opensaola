@@ -19,6 +19,8 @@ package v1
 import (
 	"strings"
 	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // TestStateConstants_NonEmpty verifies all State constants are non-empty strings.
@@ -139,8 +141,13 @@ func TestAnnotationConstants_ContainDomain(t *testing.T) {
 		"AnnotationInstallDigest":                AnnotationInstallDigest,
 		"AnnotationInstallError":                 AnnotationInstallError,
 		"AnnotationUninstallError":               AnnotationUninstallError,
+		"AnnotationSuspendReconcile":             AnnotationSuspendReconcile,
+		"AnnotationResumePolicy":                 AnnotationResumePolicy,
 		"AnnotationConfigurationOwnershipPolicy": AnnotationConfigurationOwnershipPolicy,
 		"AnnotationConfigurationDeletePolicy":    AnnotationConfigurationDeletePolicy,
+		"AnnotationConfigurationDisablePolicy":   AnnotationConfigurationDisablePolicy,
+		"AnnotationConfigurationOwnerUID":        AnnotationConfigurationOwnerUID,
+		"AnnotationConfigurationUID":             AnnotationConfigurationUID,
 		"AnnotationDisasterSyncer":               AnnotationDisasterSyncer,
 		"AnnotationDataSyncer":                   AnnotationDataSyncer,
 		"AnnotationOppositeClusterId":            AnnotationOppositeClusterId,
@@ -149,6 +156,75 @@ func TestAnnotationConstants_ContainDomain(t *testing.T) {
 		if !strings.Contains(a, "middleware.cn/") {
 			t.Errorf("%s = %q should contain 'middleware.cn/' domain prefix", name, a)
 		}
+	}
+}
+
+func TestIsReconcileSuspended(t *testing.T) {
+	t.Parallel()
+
+	for name, annotations := range map[string]map[string]string{
+		"enabled":  {AnnotationSuspendReconcile: "true"},
+		"disabled": {AnnotationSuspendReconcile: "false"},
+		"missing":  nil,
+	} {
+		name, annotations := name, annotations
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := IsReconcileSuspended(annotations)
+			want := name == "enabled"
+			if got != want {
+				t.Fatalf("IsReconcileSuspended(%v) = %t, want %t", annotations, got, want)
+			}
+		})
+	}
+}
+
+func TestReconcileResumePolicyFor(t *testing.T) {
+	t.Parallel()
+
+	for name, test := range map[string]struct {
+		annotations map[string]string
+		want        ReconcileResumePolicy
+		ok          bool
+	}{
+		"merge":   {annotations: map[string]string{AnnotationResumePolicy: "merge"}, want: ReconcileResumePolicyMerge, ok: true},
+		"apply":   {annotations: map[string]string{AnnotationResumePolicy: "apply"}, want: ReconcileResumePolicyApply, ok: true},
+		"missing": {annotations: nil},
+		"invalid": {annotations: map[string]string{AnnotationResumePolicy: "discard"}},
+	} {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := ReconcileResumePolicyFor(test.annotations)
+			if ok != test.ok || got != test.want {
+				t.Fatalf("ReconcileResumePolicyFor(%v) = (%q, %t), want (%q, %t)", test.annotations, got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
+func TestIsMiddlewareReconcileWriteSuspended(t *testing.T) {
+	t.Parallel()
+
+	paused := []metav1.Condition{{Type: CondTypeReconcilePaused, Status: metav1.ConditionTrue}}
+	for name, test := range map[string]struct {
+		annotations map[string]string
+		conditions  []metav1.Condition
+		want        bool
+	}{
+		"annotation":               {annotations: map[string]string{AnnotationSuspendReconcile: "true"}, want: true},
+		"unsafe direct unpause":    {conditions: paused, want: true},
+		"approved merge resume":    {annotations: map[string]string{AnnotationResumePolicy: "merge"}, conditions: paused, want: false},
+		"not paused":               {want: false},
+		"invalid resume is paused": {annotations: map[string]string{AnnotationResumePolicy: "invalid"}, conditions: paused, want: true},
+	} {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsMiddlewareReconcileWriteSuspended(test.annotations, test.conditions); got != test.want {
+				t.Fatalf("IsMiddlewareReconcileWriteSuspended(%v, %#v) = %t, want %t", test.annotations, test.conditions, got, test.want)
+			}
+		})
 	}
 }
 
@@ -219,6 +295,8 @@ func TestConditionTypeConstants_Distinct(t *testing.T) {
 		"CondTypeRunning":                   CondTypeRunning,
 		"CondTypeTemplateParseWithBaseline": CondTypeTemplateParseWithBaseline,
 		"CondTypeUpdating":                  CondTypeUpdating,
+		"CondTypeReconcilePaused":           CondTypeReconcilePaused,
+		"CondTypeReconcileAdoption":         CondTypeReconcileAdoption,
 	}
 	seen := make(map[string]bool)
 	for name, ct := range types {
@@ -263,6 +341,11 @@ func TestConditionReasonConstants_NonEmpty(t *testing.T) {
 		"CondReasonUpdatingFailed":                   CondReasonUpdatingFailed,
 		"CondReasonTemplateParseWithBaselineSuccess": CondReasonTemplateParseWithBaselineSuccess,
 		"CondReasonTemplateParseWithBaselineFailed":  CondReasonTemplateParseWithBaselineFailed,
+		"CondReasonReconcilePaused":                  CondReasonReconcilePaused,
+		"CondReasonReconcileSnapshotFailed":          CondReasonReconcileSnapshotFailed,
+		"CondReasonReconcileAdoptionSucceeded":       CondReasonReconcileAdoptionSucceeded,
+		"CondReasonReconcileAdoptionFailed":          CondReasonReconcileAdoptionFailed,
+		"CondReasonReconcileAdoptionConflict":        CondReasonReconcileAdoptionConflict,
 	}
 	for name, r := range reasons {
 		if r == "" {

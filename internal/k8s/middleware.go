@@ -139,6 +139,14 @@ func UpdateMiddlewareStatus(ctx context.Context, cli client.Client, m *v1.Middle
 
 		desiredStatus := *m.Status.DeepCopy()
 		desiredStatus.CustomResources = now.Status.CustomResources
+		// Pause snapshots are changed only through PatchMiddlewareStatusFields.
+		// A normal controller/service status write may be based on an older
+		// reconcile copy, so always retain the latest durable pause baseline.
+		desiredStatus.ReconcilePause = now.Status.ReconcilePause
+		if desiredStatus.RenderedConfigurationResourcesGeneration < now.Status.RenderedConfigurationResourcesGeneration {
+			desiredStatus.RenderedConfigurationResources = now.Status.RenderedConfigurationResources
+			desiredStatus.RenderedConfigurationResourcesGeneration = now.Status.RenderedConfigurationResourcesGeneration
+		}
 
 		// Compare whether status has changed
 		if equality.Semantic.DeepEqual(now.Status, desiredStatus) {
@@ -152,6 +160,63 @@ func UpdateMiddlewareStatus(ctx context.Context, cli client.Client, m *v1.Middle
 			return fmt.Errorf("update middleware status error: %w", err)
 		}
 		return nil
+	})
+}
+
+// CompleteMiddlewareReconcileResume atomically persists a calculated primary
+// CR override and consumes the pause annotation. It intentionally updates only
+// the controller-owned override and annotations, preserving any concurrent edit
+// to the rest of Middleware spec.
+func CompleteMiddlewareReconcileResume(ctx context.Context, cli client.Client, name, namespace string, generation int64, snapshotHash string, expectedPolicy v1.ReconcileResumePolicy, overrides *v1.ReconcileOverrides) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		now, err := GetMiddleware(ctx, cli, name, namespace)
+		if err != nil {
+			return err
+		}
+		if now.Generation != generation {
+			return fmt.Errorf("middleware generation changed during reconcile resume: got %d, want %d", now.Generation, generation)
+		}
+		if snapshotHash != "" && (now.Status.ReconcilePause == nil || now.Status.ReconcilePause.Hash != snapshotHash) {
+			return fmt.Errorf("middleware reconcile pause snapshot changed during resume")
+		}
+		policy, ok := v1.ReconcileResumePolicyFor(now.GetAnnotations())
+		if !ok || policy != expectedPolicy {
+			return fmt.Errorf("middleware reconcile resume policy changed during resume: got %q, want %q", policy, expectedPolicy)
+		}
+
+		now.Spec.ReconcileOverrides = overrides
+		if now.Annotations == nil {
+			now.Annotations = map[string]string{}
+		}
+		// Keep the policy until the following desired-state apply succeeds. It
+		// is the durable approval that prevents a direct annotation removal from
+		// accidentally replaying stale desired state.
+		delete(now.Annotations, v1.AnnotationSuspendReconcile)
+		return cli.Update(ctx, now)
+	})
+}
+
+// FinalizeMiddlewareReconcileResume consumes a resume policy only after the
+// desired primary CR apply has succeeded. It preserves every other concurrent
+// metadata change.
+func FinalizeMiddlewareReconcileResume(ctx context.Context, cli client.Client, name, namespace, snapshotHash string, expectedPolicy v1.ReconcileResumePolicy) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		now, err := GetMiddleware(ctx, cli, name, namespace)
+		if err != nil {
+			return err
+		}
+		if snapshotHash != "" && (now.Status.ReconcilePause == nil || now.Status.ReconcilePause.Hash != snapshotHash) {
+			return fmt.Errorf("middleware reconcile pause snapshot changed before resume finalization")
+		}
+		policy, ok := v1.ReconcileResumePolicyFor(now.GetAnnotations())
+		if !ok {
+			return fmt.Errorf("middleware reconcile resume policy missing before finalization")
+		}
+		if policy != expectedPolicy {
+			return fmt.Errorf("middleware reconcile resume policy changed before finalization: got %q, want %q", policy, expectedPolicy)
+		}
+		delete(now.Annotations, v1.AnnotationResumePolicy)
+		return cli.Update(ctx, now)
 	})
 }
 

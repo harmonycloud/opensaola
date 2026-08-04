@@ -185,6 +185,10 @@ func UpdateMiddlewareOperatorStatus(ctx context.Context, cli client.Client, m *v
 		m.Status.OperatorAvailable = now.Status.OperatorAvailable
 		m.Status.Ready = now.Status.Ready
 		m.Status.Runtime = now.Status.Runtime
+		if m.Status.RenderedConfigurationResourcesGeneration < now.Status.RenderedConfigurationResourcesGeneration {
+			m.Status.RenderedConfigurationResources = now.Status.RenderedConfigurationResources
+			m.Status.RenderedConfigurationResourcesGeneration = now.Status.RenderedConfigurationResourcesGeneration
+		}
 
 		log.FromContext(ctx).V(1).Info("Update MiddlewareOperator status", "version", now.ResourceVersion)
 

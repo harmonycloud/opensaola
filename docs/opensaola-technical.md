@@ -272,10 +272,12 @@ MiddlewareAction (Namespaced) -- 引用 --> MiddlewareActionBaseline
 | `Running` | 运行中 |
 | `TemplateParseWithBaseline` | 模板解析与基线合并 |
 | `Updating` | 更新中 |
+| `ReconcilePaused` | 已暂停向下层资源写入（MID/MO） |
+| `ReconcileAdoption` | MID 主 CR 暂停期间实际变更的采纳结果 |
 
 #### Condition Reason 常量参考表
 
-> 源码位置：`OpenSaola/api/v1/common.go:120-147`
+> 源码位置：`api/v1/common.go`
 
 | 常量名 | 值 | 对应 CondType | 说明 |
 |--------|------|--------------|------|
@@ -304,7 +306,12 @@ MiddlewareAction (Namespaced) -- 引用 --> MiddlewareActionBaseline
 | `CondReasonUpdatingSuccess` | `"UpdatingSuccess"` | `Updating` | 升级成功 |
 | `CondReasonUpdatingFailed` | `"UpdatingFailed"` | `Updating` | 升级失败 |
 | `CondReasonTemplateParseWithBaselineSuccess` | `"TemplateParseWithBaselineSuccess"` | `TemplateParseWithBaseline` | 模板解析与基线合并成功 |
-| `CondReasonTemplateParseWithBaselineFaild` | `"TemplateParseWithBaselineFaild"` | `TemplateParseWithBaseline` | 模板解析与基线合并失败（**注意**：源码中拼写为 `Faild`，应为 `Failed`，属于源码拼写错误，已存在于线上代码中） |
+| `CondReasonTemplateParseWithBaselineFailed` | `"TemplateParseWithBaselineFailed"` | `TemplateParseWithBaseline` | 模板解析与基线合并失败 |
+| `CondReasonReconcilePaused` | `"ReconcilePaused"` | `ReconcilePaused` | 已关闭该 MID/MO 的常规向下层写入；MID 的有效快照还需检查 `status.reconcilePause` |
+| `CondReasonReconcileSnapshotFailed` | `"ReconcileSnapshotFailed"` | `ReconcileAdoption` | 无法安全捕获暂停快照，保持写入保护 |
+| `CondReasonReconcileAdoptionSucceeded` | `"ReconcileAdoptionSucceeded"` | `ReconcileAdoption` | 已将无冲突的实际主 CR `spec` 差异采纳为 override |
+| `CondReasonReconcileAdoptionFailed` | `"ReconcileAdoptionFailed"` | `ReconcileAdoption` | 恢复策略无效、快照/目标不匹配或自动采纳失败，保持暂停 |
+| `CondReasonReconcileAdoptionConflict` | `"ReconcileAdoptionConflict"` | `ReconcileAdoption` | 暂停期间实际值与当前期望同时修改同一路径，需人工处理 |
 
 ---
 
@@ -323,6 +330,7 @@ MiddlewareAction (Namespaced) -- 引用 --> MiddlewareActionBaseline
 | necessary | runtime.RawExtension | 否 | nil | 必填参数（如 image 等） | JSON 格式；与 Baseline 中的 necessary 对比，缺少则报错（repository 除外） |
 | preActions | []PreAction | 否 | nil | 前置操作列表 | 与 Baseline 的 preActions 合并，fixed=true 的不合并 |
 | parameters | runtime.RawExtension | 否 | nil | 自定义参数 | kubebuilder:pruning:PreserveUnknownFields；与 Baseline 深度合并 |
+| reconcileOverrides | *ReconcileOverrides | 否 | nil | 控制器托管的主 CR `spec` 实际状态差异补丁 | 仅由 `resume-policy=merge` 生成；用户通常不应直接编辑 |
 | configurations | []Configuration | 否 | nil | 配置列表 | 与 Baseline 的 configurations 数组合并 |
 
 **接口方法**：
@@ -340,6 +348,44 @@ MiddlewareAction (Namespaced) -- 引用 --> MiddlewareActionBaseline
 | customResources | CustomResources | 否 | 零值 | 关联 CR 的状态快照 | 由 Synchronizer 定时同步 |
 | state | State | 否 | `""` | 整体状态 | 任何 Condition 为 False 则为 Unavailable |
 | reason | string | 否 | `""` | 状态原因 | 取第一个 False Condition 的 Message |
+| renderedConfigurationResources | []RenderedConfigurationResource | 否 | nil | 已受生命周期治理的 Configuration 资源清单 | 模板变空/引用移除后的 Kind 感知清理依据；控制器维护 |
+| renderedConfigurationResourcesGeneration | int64 | 否 | 0 | 上次成功写入清单的 MID Generation | 防止较旧的状态写入覆盖较新的清单 |
+| reconcilePause | *ReconcilePauseStatus | 否 | nil | Reconcile 暂停会话的持久快照 | 成功恢复后自动清理；用户不应编辑 |
+
+#### ReconcileOverrides 子结构
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| specPatch | runtime.RawExtension | 以主 CR `spec` 为根的 RFC 7396 JSON Merge Patch |
+| baseSpec | runtime.RawExtension | 生成 patch 时的常规渲染 `spec`；后续 MID/Baseline 在同路径显式修改时，该修改优先 |
+| gvk | GVK | override 绑定的主 CR 类型 |
+| namespace | string | override 绑定的主 CR 命名空间 |
+| name | string | override 绑定的主 CR 名称 |
+
+#### ReconcilePauseStatus 子结构
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| desiredSpec | runtime.RawExtension | 暂停时的有效主 CR `spec`，即 B/L/D 三方合并中的 B |
+| gvk / namespace / name | GVK / string / string | 暂停会话绑定的主 CR 身份；不匹配时恢复失败关闭写入 |
+| resourceUID | string | 防止暂停期间主 CR 被删除并以同名对象重建后被误采纳 |
+| generation | int64 | 捕获快照时的 MID Generation |
+| hash | string | `desiredSpec` 的 SHA-256，会话身份和并发校验依据 |
+| capturedAt | metav1.Time | 快照捕获时间 |
+| adoptedLiveSpecHash | string | 最近一次三方合并所用 L 的 hash；主 CR 写入前再次核对以防覆盖新的暂停期间实际修改 |
+
+#### RenderedConfigurationResource 子结构
+
+该清单同时被 Middleware 与 MiddlewareOperator 状态复用，只记录已证明受当前 owner 和
+Configuration 管理的资源。
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| configurationName / configurationUID | string / types.UID | 生成该资源的 Configuration 身份 |
+| group / version / kind / namespace / name | string | 资源的完整 GVK 与名称身份 |
+| ownerUID / resourceUID | types.UID | 当前 MID/MO 与已生成资源的 UID，用于拒绝删除外部重建的同名对象 |
+| namespaced | bool | 资源渲染时是否为命名空间资源 |
+| disablePolicy | string | 功能关闭后的最终处理策略：无注解时 PVC/PV 为 `orphan`、CRD 始终为 `orphan`、其他 Kind 为 `delete`；显式策略可覆盖 PVC/PV 默认 |
 
 #### CustomResources 子结构
 
@@ -464,6 +510,10 @@ MiddlewareAction (Namespaced) -- 引用 --> MiddlewareActionBaseline
 | operators | map[string]appsv1.DeploymentStatus | 否 | nil | 关联 Deployment 状态 | key 为 Deployment 名称 |
 | operatorAvailable | string | 否 | `""` | 可用性（格式 "available/replicas"） | 如 "1/1" |
 | reason | string | 否 | `""` | 原因 | - |
+| ready | bool | 否 | false | 所有关联 Deployment 是否健康 | 用于 kubectl 展示和运行态判断 |
+| runtime | string | 否 | `""` | 运行状态摘要 | 向前兼容的展示字段 |
+| renderedConfigurationResources | []RenderedConfigurationResource | 否 | nil | 已受生命周期治理的 Configuration 资源清单 | 模板变空/引用移除后的 Kind 感知清理依据；控制器维护 |
+| renderedConfigurationResourcesGeneration | int64 | 否 | 0 | 上次成功写入清单的 MO Generation | 防止较旧的状态写入覆盖较新的清单 |
 
 **接口方法**：
 - `GetConfigurations()` - 返回 Spec.Configurations
@@ -781,7 +831,7 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 | 删除带 `middleware.cn/package-secret-cleanup` finalizer 的 Secret | MiddlewarePackage | 触发真实包卸载：清理包资源、删除 MiddlewarePackage、移除 finalizer 后让 Secret 删除 |
 | Deployment 变更 | MiddlewareOperator（Owns Deployment） | 同步 Deployment 状态并比较差异 |
 | Secret 创建/更新/删除（带 project 标签） | MiddlewarePackage（Watches Secret） | 创建/更新/删除 MiddlewarePackage |
-| CR 对象删除 | Middleware（通过 Watcher） | 自动重建 CR |
+| CR 对象删除 | Middleware（通过 Watcher） | 未暂停时自动重建 CR |
 
 ---
 
@@ -810,10 +860,33 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 | `middleware.cn/install` | 安装标记 | 用户触发安装时设置 | 存在即触发 |
 | `middleware.cn/uninstall` | 兼容软卸载标记 | 旧客户端触发卸载时设置 | 存在即触发软卸载 |
 | `middleware.cn/uninstallError` | 卸载失败原因 | 卸载被占用资源阻断时由 Operator 设置 | 错误信息 |
+| `middleware.cn/suspend-reconcile` | 临时暂停向下层资源写入 | 用户需要临时阻止 MID/MO 向下层写入时设置 | `true` |
+| `middleware.cn/resume-policy` | MID 暂停后的恢复策略 | 保留 `suspend-reconcile` 时由用户设置 | `merge` / `apply` |
+| `middleware.cn/configurationOwnershipPolicy` | Configuration 已存在 controller owner 时的所有权策略 | 设置在 `MiddlewareConfiguration.metadata.annotations` 或 `spec.template` 内资源清单的 `metadata.annotations` | `managed`（拒绝抢占） |
+| `middleware.cn/configurationDeletePolicy` | MID/MO 删除时 Configuration 资源的既有清理策略 | 设置在 `MiddlewareConfiguration.metadata.annotations` 或 `spec.template` 内资源清单的 `metadata.annotations` | `delete` / `orphan` |
+| `middleware.cn/configurationDisablePolicy` | Configuration 不再渲染资源时的清理策略 | 设置在 `MiddlewareConfiguration.metadata.annotations` 或 `spec.template` 内资源清单的 `metadata.annotations` | `delete` / `orphan`；无注解时 PVC/PV 默认 `orphan`、CRD 始终 `orphan`、其他 Kind 默认 `delete` |
+| `middleware.cn/configurationOwnerUID` | 生命周期资源归属的 owner UID 标记 | 由控制器写入 | - |
+| `middleware.cn/configurationUID` | 生命周期资源来源 Configuration UID 标记 | 由控制器写入 | - |
 | `middleware.cn/configurations` | 关联的 Configuration 名称 | Configuration 发布时设置 | `redis-configmap` |
 | `middleware.cn/disasterSyncer` | 灾备同步器 GVK/Name | 用户配置 | `group/version/kind/name` |
 | `middleware.cn/dataSyncer` | 数据同步器 GVK/Name | 用户配置 | `group/version/kind/name` |
 | `middleware.cn/oppositeClusterId` | 对端集群 ID | 用户配置 | - |
+
+> `middleware.cn/suspend-reconcile: "true"` 仅暂停该 MID/MO 向下层资源写入：MID 的实际 CR、Configuration 和 CR 删除自愈，以及 MO 的 Configuration、RBAC、Deployment 和 Deployment 漂移修复。finalizer 删除清理与运行状态同步继续执行。修改 MID 的实际 CR 前，除确认 `.status.conditions[type=ReconcilePaused]=True` 外，还必须确认 `.status.reconcilePause` 已存在，且 `ReconcileAdoption` 不是 `False`；快照失败时不要开始修改主实际 CR。MO 没有主 CR 快照，只需确认 `ReconcilePaused=True`。灾备只是这一通用能力的典型使用场景之一。
+>
+> MID 的恢复必须显式选择策略，不能直接删除暂停注解。推荐在仍保留暂停注解时执行：`kubectl annotate mid <name> -n <namespace> middleware.cn/resume-policy=merge --overwrite`。控制器以暂停时渲染的期望 CR `spec`（B）、解除前的实际 CR `spec`（L）和当前渲染期望（D）做三方合并；无冲突的暂停期间实际改动会写入 MID 的 `.spec.reconcileOverrides`（包含 patch、其渲染基线和目标 GVK），随后控制器自行移除暂停注解。下一次实际 CR 成功同步后，快照和恢复注解会被清理；同步前还会再次核对实际 `spec`，若外部写入方继续修改则重新合并，不会用旧 L 覆盖新值。`apply` 则明确放弃暂停期间的实际 CR 改动并重新应用当前期望态。若同一路径同时被暂停期间实际变更和当前期望修改，控制器维持暂停并写入 `ReconcileAdoption=False`，不会覆盖实际 CR；处理冲突后重新设置 `resume-policy=merge` 触发重试。直接删除 `suspend-reconcile` 而未给策略同样保持暂停，避免旧版本的强制覆盖行为。
+>
+> 已采纳的实际状态差异会持续保护相同字段，但后续 MID/Baseline 对同一路径的显式期望变更优先，其他暂停期间差异仍保留。若升级后主 CR 的 GVK、名称或命名空间发生变化，旧 override 会被拒绝而不是套用到新对象；此时应确认后移除 `.spec.reconcileOverrides`，再让新期望态生效。
+>
+> 该自动采纳目前只覆盖 MID 的主实际 CR 的 `spec`；CUE-only PreAction 会仅作为渲染输入在内存中重放，但不会采纳对 PreAction 定义、Configuration、CR metadata 或 MiddlewareOperator 资源的直接修改，这些仍需分别确认并回写期望配置。`resume-policy` 仅适用于 MID；MO 恢复时移除 `suspend-reconcile`，随后按普通期望态 reconcile。关联 MID 必须单独暂停和恢复。
+>
+> **PreAction 边界**：暂停快照/B/L/D 合并会在内存中的 MID 副本上重放仅含 CUE 的 PreAction，因此其对主 CR `spec` 的影响与常规主 CR 写入一致，且不会执行命令、HTTP 操作或 Kubernetes 写入。若任一 PreAction 含非 CUE 步骤（例如 CMD 或 HTTP），该 MID 的 `resume-policy=merge` 会失败关闭；应改为纯 CUE 预动作、把结果固化为 MID/Baseline 的显式期望态，或只在明确接受覆盖暂停期间改动时选择 `apply`。
+>
+> **Configuration 停用生命周期**：当 owner 的下一次 reconcile 发现 Configuration 模板为空或其引用被移除时，会依据成功渲染时写入状态清单的最终策略清理资源。`spec.template` 内资源清单的 `metadata.annotations` 优先于 `MiddlewareConfiguration.metadata.annotations`；不要给已存在的 live 资源手工打该策略注解，控制器不会读取它。
+> 无显式策略时，PVC/PV 为 `orphan`，CRD 无论注解为何都为 `orphan`，其他所有 Kind（包含未知/自定义和集群级资源）为 `delete`。显式 `delete` / `orphan` 可覆盖 PVC/PV 的默认；CRD 在解析和删除时均被硬保护。
+> 控制器只会清理状态清单中记录为 `delete`、且 live 对象的 owner UID、Configuration UID、resource UID 和 controller owner 都仍匹配的对象；外部重建、交接或同名复用的资源会被保留。旧的 `orphan` 清单不会在升级后被追溯删除，必须先在资源仍正常渲染时成功 reconcile，后续停用才采用新默认。
+> 直接修改 `MiddlewareConfiguration.spec.template` 不会单独触发 MID/MO reconcile；需要 MID/MO 引用变更或其他 owner 事件触发。这里的“不再引用”只表示 OpenSaola 不再渲染该 Configuration，不表示控制器已分析集群中的其他消费者。该路径与 MID/MO 删除时按 `configurationDeletePolicy` / OwnerReference 清理资源不同。
+> 若同名资源已有其他 controller owner，默认不抢占 owner、保留其 OwnerReference 后继续 patch，且该资源不进入当前 owner 的生命周期清单；设置 `configurationOwnershipPolicy=managed` 则直接失败并拒绝抢占。MID/MO 删除路径中的 `configurationDeletePolicy=delete` 是独立且更强的删除语义，不应当作上述停用路径的 UID 严格删除。
 
 ---
 
@@ -823,6 +896,11 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 
 **Watch 资源**：`v1.Middleware`（自身）  
 **Predicate 过滤器**：忽略仅 Status 字段变更的 Update 事件  
+
+**暂停与恢复门控**：finalizer 删除分支仍正常执行。`middleware.cn/suspend-reconcile: "true"` 时，
+MID 先捕获主 CR 期望 `spec` 快照、写入 `ReconcilePaused=True`，随后跳过前置操作、Configuration、
+主 CR 写入和 Watcher 自愈。恢复必须保留暂停注解并设置 `resume-policy=merge` 或 `apply`；直接删除暂停
+注解但未给有效策略仍保持写入保护。
 
 **Reconcile 主逻辑**：
 
@@ -850,8 +928,8 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 HandleResource(Publish/Update/Delete)
     -> TemplateParseWithBaseline  （获取 Baseline -> 深度合并参数/配置/标签/注解/PreActions -> 模板渲染）
     -> HandlePreActions           （遍历 PreActions，执行 PreAction 类型的 ActionBaseline）
-    -> handleExtraResource        （获取并渲染 MiddlewareConfigurations -> 逐个 Handle）
-    -> buildCustomResource        （通过 GVK 定位 CR 类型 -> 创建/更新/删除 CR -> 启动 Watcher + Synchronizer）
+    -> handleExtraResource        （获取并渲染 MiddlewareConfigurations -> 维护生命周期清单并按策略清理已停用资源）
+    -> buildCustomResource        （通过 GVK 定位 CR 类型 -> 条件式应用实际状态采纳 override -> 创建/更新/删除 CR -> 启动 Watcher + Synchronizer）
 ```
 
 ### 5.2 MiddlewareBaseline Controller
@@ -996,8 +1074,8 @@ HandleResource(Publish)
 | `ReplacePackage` | 处理升级流程：获取新包 -> 获取新 Baseline -> 更新 Spec/Labels -> 等待包就绪 |
 | `TemplateParseWithBaseline` | 获取 Baseline -> 深度合并参数/配置/标签/注解/PreActions -> 模板渲染 Parameters、Configurations、ObjectMeta |
 | `HandleResource` | 总控：模板解析 -> PreActions -> 额外资源 -> CR |
-| `handleExtraResource` | 获取并渲染 MiddlewareConfigurations -> 逐个 Handle（正序发布，倒序删除） |
-| `buildCustomResource` | 通过 GVK 获取 CR 类型 -> 创建/更新 CR -> 启动 Watcher + Synchronizer |
+| `handleExtraResource` | 获取并渲染 MiddlewareConfigurations -> 维护渲染资源清单；停用时仅按先前解析为 `configurationDisablePolicy=delete` 的清单清理（CRD 硬保护） |
+| `buildCustomResource` | 通过 GVK 获取 CR 类型 -> 条件式应用 `reconcileOverrides` -> 创建/更新 CR -> 启动 Watcher + Synchronizer |
 
 **NecessaryIgnore**：`["repository"]` - 校验必填参数时忽略的键列表
 
@@ -1132,7 +1210,8 @@ HandleResource(Publish)
    - **UpdateFunc**：记录日志，比较 ResourceVersion
    - **DeleteFunc**：检查 OwnerReference 的 Middleware 是否存在
      - 不存在：关闭 Watcher + Synchronizer
-     - 存在：自动重建 CR（清除 ResourceVersion 后 Create）
+     - 存在且 MID 未处于写入暂停保护：自动重建 CR（清除 ResourceVersion 后 Create）
+     - 存在但 MID 处于暂停，或直接解除暂停但未给有效恢复策略：不重建
 
 4. **关闭**：`CloseCRWatcher`
    - Counter == 1：close(StopChan) -> 从 Map 删除
@@ -1263,15 +1342,18 @@ Secret 被删除时：
 
 当被 Watcher 监听的 CR 被删除时：
 1. 检查 OwnerReference 的 Middleware 是否存在
-2. 如果存在：自动重建 CR（清除 ResourceVersion 后重新 Create）
-3. 如果不存在：关闭 Watcher 和 Synchronizer
+2. 如果存在且 MID 未处于写入暂停保护：自动重建 CR（清除 ResourceVersion 后重新 Create）
+3. 如果 MID 暂停，或直接解除暂停但未给有效恢复策略：保留删除状态，直到显式恢复
+4. 如果不存在：关闭 Watcher 和 Synchronizer
 
 ### 9.6 Finalizer
 
-当前代码中 **未使用 Finalizer**。删除处理依赖于：
-- Reconcile 中的 NotFound 检测 + Cache 机制
-- K8s 的 OwnerReference 级联删除（ControllerReference）
-- Watcher 的 DeleteFunc 事件处理
+当前代码使用以下 Finalizer：
+- `middleware.cn/middleware-cleanup`：删除 Middleware 前解析删除上下文、清理受管 Configuration 与主 CR，再移除 Finalizer。
+- `middleware.cn/middlewareoperator-cleanup`：删除 MiddlewareOperator 前清理受管 Configuration、RBAC 与 Deployment，再移除 Finalizer。
+- `middleware.cn/package-secret-cleanup`：删除 Package Secret 时完成真实包卸载后再移除。
+
+暂停只影响常规向下层写入，不阻塞上述删除清理流程。
 
 ---
 

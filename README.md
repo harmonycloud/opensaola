@@ -250,6 +250,7 @@ Run `make help` to see all available targets.
 |----------|-------------|
 | [Technical Documentation](docs/opensaola-technical_en.md) | Architecture, CRD reference, reconcile flows, state machine |
 | [Package Documentation](docs/opensaola-packaging_en.md) | Package format, baselines, actions, CUE templates, Redis case study |
+| [Reconciliation Suspension and Recovery Runbook](docs/reconcile-suspension.md) | Temporarily suspend MID/MO child-resource writes and resume safely; MID can adopt primary-CR changes made during the pause |
 | [Troubleshooting Guide](docs/troubleshooting.md) | Common issues, debugging commands, log configuration |
 | [Upgrade Guide](docs/upgrade-guide.md) | Version upgrade procedures and rollback |
 | [Testing Guide](docs/testing-guide.md) | Test tiers, running tests, coverage, benchmarks |

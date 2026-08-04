@@ -19,7 +19,9 @@ package middlewareaction
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	"cuelang.org/go/cue"
 	"cuelang.org/go/cue/cuecontext"
@@ -32,58 +34,120 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// ErrPreActionNotRenderSafe is returned when a pause snapshot or B/L/D merge
+// would need to execute a PreAction step with an external side effect. Those
+// render paths may run repeatedly and must never execute commands, HTTP
+// actions, or Kubernetes writes.
+var ErrPreActionNotRenderSafe = errors.New("pre-action is not render-safe")
+
 func HandlePreActions(ctx context.Context, cli client.Client, m tools.Quoter) (err error) {
+	return handlePreActions(ctx, cli, m, false)
+}
+
+// RenderPreActions applies PreAction CUE patches to an in-memory object for
+// desired-state rendering. It is intentionally strict: every step must have a
+// CUE patch, because rendering a pause snapshot or retrying a B/L/D merge must
+// not run commands, HTTP actions, or Kubernetes writes.
+func RenderPreActions(ctx context.Context, cli client.Client, m tools.Quoter) error {
+	return handlePreActions(ctx, cli, m, true)
+}
+
+func handlePreActions(ctx context.Context, cli client.Client, m tools.Quoter, renderOnly bool) (err error) {
+	if renderOnly {
+		// Validate the entire chain before applying any patch. This prevents a
+		// later unsafe action from leaving earlier CUE patches on the render input.
+		resolved := make([]resolvedPreAction, 0, len(m.GetPreActions()))
+		for _, preAction := range m.GetPreActions() {
+			mad, err := getPreActionBaseline(ctx, cli, preAction, m)
+			if err != nil {
+				return err
+			}
+			if err := validatePreActionRenderSafe(&mad); err != nil {
+				return err
+			}
+			resolved = append(resolved, resolvedPreAction{reference: preAction, baseline: mad})
+		}
+		for _, preAction := range resolved {
+			if err := applyPreAction(ctx, cli, m, preAction.reference, &preAction.baseline, true); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	for _, preAction := range m.GetPreActions() {
-		var mad v1.MiddlewareActionBaseline
-		mad, err = middlewareactionbaseline.Get(ctx, cli, preAction.Name, m.GetLabels()[v1.LabelPackageName])
+		mad, err := getPreActionBaseline(ctx, cli, preAction, m)
 		if err != nil {
-			log.FromContext(ctx).Error(err, "get middleware action baseline error")
 			return err
 		}
-		if mad.Spec.BaselineType != v1.WorkflowPreAction {
-			return fmt.Errorf("pre action %s is not pre action", mad.Name)
+		if err := applyPreAction(ctx, cli, m, preAction, &mad, false); err != nil {
+			return err
 		}
-		// err = TemplateParsePreAction(ctx, cli, &mad, m)
-		// if err != nil {
-		// 	logger.Log.Errorf("handle pre action error: %v", err)
-		// 	return err
-		// }
+	}
+	return nil
+}
 
-		var mBytes []byte
-		mBytes, err = json.Marshal(m)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "marshal middleware error")
-			return err
-		}
-		temp := new(unstructured.Unstructured)
-		err = json.Unmarshal(mBytes, temp)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "unmarshal middleware error")
-			return err
-		}
+type resolvedPreAction struct {
+	reference v1.PreAction
+	baseline  v1.MiddlewareActionBaseline
+}
 
-		ma := new(v1.MiddlewareAction)
-		ma.Spec.Baseline = preAction.Name
-		ma.Labels = m.GetLabels()
-		ma.Spec.Necessary = preAction.Parameters
+func getPreActionBaseline(ctx context.Context, cli client.Client, preAction v1.PreAction, m tools.Quoter) (v1.MiddlewareActionBaseline, error) {
+	mad, err := middlewareactionbaseline.Get(ctx, cli, preAction.Name, m.GetLabels()[v1.LabelPackageName])
+	if err != nil {
+		log.FromContext(ctx).Error(err, "get middleware action baseline error")
+		return v1.MiddlewareActionBaseline{}, err
+	}
+	if mad.Spec.BaselineType != v1.WorkflowPreAction {
+		return v1.MiddlewareActionBaseline{}, fmt.Errorf("pre action %s is not pre action", mad.Name)
+	}
+	return mad, nil
+}
 
-		err = ExecutePreAction(ctx, cli, temp, &mad, ma)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "execute pre action error", "name", mad.Name)
-			return err
-		}
+func applyPreAction(ctx context.Context, cli client.Client, m tools.Quoter, preAction v1.PreAction, mad *v1.MiddlewareActionBaseline, renderOnly bool) (err error) {
+	// err = TemplateParsePreAction(ctx, cli, mad, m)
+	// if err != nil {
+	// 	logger.Log.Errorf("handle pre action error: %v", err)
+	// 	return err
+	// }
 
-		var tempBytes []byte
-		tempBytes, err = json.Marshal(temp)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "marshal temp error")
-			return err
-		}
+	mBytes, err := json.Marshal(m)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "marshal middleware error")
+		return err
+	}
+	temp := new(unstructured.Unstructured)
+	if err = json.Unmarshal(mBytes, temp); err != nil {
+		log.FromContext(ctx).Error(err, "unmarshal middleware error")
+		return err
+	}
 
-		err = json.Unmarshal(tempBytes, m)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "unmarshal temp error")
-			return err
+	ma := new(v1.MiddlewareAction)
+	ma.Spec.Baseline = preAction.Name
+	ma.Labels = m.GetLabels()
+	ma.Spec.Necessary = preAction.Parameters
+
+	if err = executePreAction(ctx, cli, temp, mad, ma, renderOnly); err != nil {
+		log.FromContext(ctx).Error(err, "execute pre action error", "name", mad.Name)
+		return err
+	}
+
+	tempBytes, err := json.Marshal(temp)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "marshal temp error")
+		return err
+	}
+	if err = json.Unmarshal(tempBytes, m); err != nil {
+		log.FromContext(ctx).Error(err, "unmarshal temp error")
+		return err
+	}
+	return nil
+}
+
+func validatePreActionRenderSafe(mad *v1.MiddlewareActionBaseline) error {
+	for _, step := range mad.Spec.Steps {
+		if strings.TrimSpace(step.CUE) == "" {
+			return fmt.Errorf("%w: pre-action %q step %q has a non-CUE execution path", ErrPreActionNotRenderSafe, mad.Name, step.Name)
 		}
 	}
 	return nil
@@ -114,6 +178,10 @@ func TemplateParsePreAction(ctx context.Context, cli client.Client, mad *v1.Midd
 
 // ExecutePreAction executes pre-actions
 func ExecutePreAction(ctx context.Context, cli client.Client, obj *unstructured.Unstructured, mad *v1.MiddlewareActionBaseline, m *v1.MiddlewareAction) (err error) {
+	return executePreAction(ctx, cli, obj, mad, m, false)
+}
+
+func executePreAction(ctx context.Context, cli client.Client, obj *unstructured.Unstructured, mad *v1.MiddlewareActionBaseline, m *v1.MiddlewareAction, renderOnly bool) (err error) {
 	var (
 		quoter   tools.Quoter
 		objBytes []byte
@@ -179,6 +247,8 @@ func ExecutePreAction(ctx context.Context, cli client.Client, obj *unstructured.
 			if err = executePreActionCue(ctx, step.CUE, obj, m); err != nil {
 				return fmt.Errorf("execute cue error: %w", err)
 			}
+		} else if renderOnly {
+			return fmt.Errorf("%w: pre-action %q step %q has a non-CUE execution path", ErrPreActionNotRenderSafe, mad.Name, step.Name)
 		} else if len(step.CMD.Command) != 0 {
 			err = executeCmd(&ctx, cli, step, m)
 			if err != nil {

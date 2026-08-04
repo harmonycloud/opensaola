@@ -20,6 +20,7 @@
   - [4.2 Configuration Type Classification](#42-configuration-type-classification)
   - [4.3 Go Template Syntax Usage](#43-go-template-syntax-usage)
   - [4.4 Template Variable Sources and Rendering Flow](#44-template-variable-sources-and-rendering-flow)
+  - [4.5 Configuration Disable Lifecycle](#45-configuration-disable-lifecycle)
 - [5. Actions System](#5-actions-system)
   - [5.1 Action Definition Format and Field Description](#51-action-definition-format-and-field-description)
   - [5.2 Action Type Classification](#52-action-type-classification)
@@ -340,6 +341,37 @@ MiddlewareConfiguration.spec.template (Can only access .Values and .Globe)
 Final Kubernetes Resource YAML
 ```
 
+### 4.5 Configuration Disable Lifecycle
+
+When a Configuration template conditionally renders empty, or its reference is removed by a Baseline/MID/MO, that is a
+feature-disable event rather than deletion of the MID/MO. A resource manifest's `metadata.annotations` inside
+`spec.template` takes precedence over `MiddlewareConfiguration.metadata.annotations`; do not manually add a policy annotation
+to an existing live resource because the controller does not read it:
+
+| Policy | Trigger | Default/Behavior | Deletion protection |
+|--------|---------|------------------|---------------------|
+| `configurationDisablePolicy` | The owner's next reconcile after a template no longer renders or a reference is removed | Without an explicit policy: PVC/PV use `orphan`, CRDs always use `orphan`, and every other Kind uses `delete` | Removes only a resource previously written to lifecycle inventory whose owner UID, resource UID, Configuration markers, and owner relation still match |
+| `configurationDeletePolicy` | MID/MO deletion | Cleans resources identified as previously managed | `orphan` retains; `delete` is a force-delete semantic and must not be described as the UID-safe disable path |
+| `configurationOwnershipPolicy=managed` | Same-name resource already has another controller owner | By default the controller does not take ownership, retains the OwnerReference, and continues to patch | `managed` fails reconciliation and explicitly refuses takeover; a resource unmanaged by the current owner does not enter lifecycle inventory |
+
+Except for PVC/PV and CRDs, an unannotated resource is deleted by default when the feature is disabled. To retain a ConfigMap,
+Secret, StatefulSet, unknown/custom CR, or any other Kind, set this while it is still rendering in
+`MiddlewareConfiguration.metadata.annotations` (or in a resource manifest's `metadata.annotations` inside `spec.template`):
+
+```yaml
+metadata:
+  annotations:
+    middleware.cn/configurationDisablePolicy: orphan
+```
+
+Then wait for a successful reconcile to record the resolved policy in the MID/MO's
+`status.renderedConfigurationResources`, and only then make the template empty or remove its reference. Explicit `delete`
+can override the default retention of PVC/PV, but a CRD is never deleted by the disable path. An older `orphan` entry is not
+retroactively deleted after upgrade; it must first reconcile successfully to use the new default. Editing
+`MiddlewareConfiguration.spec.template` alone does not trigger owner reconciliation; a MID/MO reference change or another
+owner event must do so. “No longer referenced” means only that OpenSaola no longer renders the Configuration, not that the
+controller has proven no other cluster consumer exists.
+
 ---
 
 ## 5. Actions System
@@ -527,10 +559,14 @@ The middleware package rendering process involves multiple levels of values:
      |
   5. Values provided by the user via Middleware.spec.necessary
      |
-  6. PreAction CUE patches on the Middleware resource (highest priority)
+  6. PreAction CUE patches on the Middleware resource (highest priority within the normal rendering chain)
 ```
 
 > **Key Note**: The source code execution order is TemplateParseWithBaseline (parse Necessary and render Parameters) -> HandlePreActions (execute CUE patches) -> handleExtraResource (render Configurations). PreAction CUE patches are deep-merged onto the Middleware object via MergeMap and can override values derived from Necessary, giving PreAction patches a higher effective priority than user Necessary values.
+>
+> **Controller-managed live-state adoption override**: `spec.reconcileOverrides` is not a normal package-author input. It conditionally affects only the MID primary CR's `spec` after normal rendering; it never flows into Configuration templates or PreActions. It keeps only paths whose normal rendered value has not since been explicitly changed by a MID/Baseline relative to `baseSpec`, so a later explicit desired-state change at the same path wins while unrelated adopted changes from the pause remain.
+>
+> **PreAction and recovery merge:** the pause-snapshot and B/L/D merge renderer replays CUE-only PreActions on an in-memory MID copy, so their primary-CR `spec` effects match a normal write without executing commands, HTTP actions, or Kubernetes writes. If any PreAction contains a non-CUE step (for example CMD or HTTP), `resume-policy=merge` fails closed. Make the action pure CUE, make its result explicit MID/Baseline desired state, or use `apply` only when intentionally overwriting a change made during the pause.
 
 **Detailed Explanation**:
 
@@ -597,6 +633,7 @@ Variable resolution occurs in the following phases, executed in order:
 **Phase 3: handleExtraResource + buildCustomResource**
 - Render MiddlewareConfiguration.spec.template, using the already-rendered configurations[].values from Phase 1 as .Values
 - Build the CR, publishing the parameters modified in Phase 2 as the CR's spec field
+- When valid `reconcileOverrides` exist, conditionally apply the patch only to the MID primary CR `spec`
 
 ### 8.5 Conflict Resolution Strategy
 
@@ -607,6 +644,7 @@ Variable resolution occurs in the following phases, executed in order:
 | Configuration `\| default` vs values injection | Values injection takes priority (default is only a fallback) |
 | PreAction patch vs Necessary-derived parameters | PreAction patch value takes priority after deep merge (PreAction executes after Necessary parsing, giving it the highest priority) |
 | Multiple PreActions modifying the same field | In execution order (array order); later executions override earlier ones |
+| Adopted live-state override vs later explicit MID/Baseline change | The latter wins at the same path; unrelated override paths remain effective |
 
 ### 8.6 Practical Example
 

@@ -118,6 +118,14 @@ func buildDeployment(ctx context.Context, cli client.Client, action consts.Handl
 
 // CompareDeployment compares the Deployment
 func CompareDeployment(ctx context.Context, cli client.Client, deployment *appsv1.Deployment, m *v1.MiddlewareOperator) error {
+	if m != nil && v1.IsReconcileSuspended(m.GetAnnotations()) {
+		log.FromContext(ctx).Info("skipping MiddlewareOperator deployment drift reconciliation because it is suspended",
+			"name", m.Name,
+			"namespace", m.Namespace,
+			"annotation", v1.AnnotationSuspendReconcile,
+		)
+		return nil
+	}
 	err := TemplateParseWithBaseline(ctx, cli, m)
 	if err != nil {
 		return err

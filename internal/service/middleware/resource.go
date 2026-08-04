@@ -18,7 +18,6 @@ package middleware
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -123,6 +122,14 @@ func HandleResource(ctx context.Context, cli client.Client, action consts.Handle
 	if m == nil {
 		return fmt.Errorf("middleware is nil")
 	}
+	if action != consts.HandleActionDelete && v1.IsMiddlewareReconcileWriteSuspended(m.GetAnnotations(), m.Status.Conditions) {
+		log.FromContext(ctx).Info("skipping Middleware child-resource reconciliation because it is suspended",
+			"name", m.Name,
+			"namespace", m.Namespace,
+			"annotation", v1.AnnotationSuspendReconcile,
+		)
+		return nil
+	}
 	// Delete path: do not rely on full template rendering (only need to locate name/namespace)
 	if action == consts.HandleActionDelete {
 		if err := hydrateDeleteContext(ctx, cli, m); err != nil {
@@ -174,6 +181,44 @@ func HandleResource(ctx context.Context, cli client.Client, action consts.Handle
 	return nil
 }
 
+// RenderPrimaryCustomResource renders the effective primary custom resource
+// without writing it. It is used by the pause/recovery state machine to take a
+// durable desired-state snapshot and to calculate B/L/D merges safely.
+func RenderPrimaryCustomResource(ctx context.Context, cli client.Client, m *v1.Middleware) (*unstructured.Unstructured, error) {
+	return renderPrimaryCustomResource(ctx, cli, m, true)
+}
+
+// RenderPrimaryCustomResourceWithoutOverrides renders the current Baseline,
+// template, and pure PreAction output before persistent reconcile overrides
+// are applied. It is the base against which a new complete override patch is
+// generated.
+func RenderPrimaryCustomResourceWithoutOverrides(ctx context.Context, cli client.Client, m *v1.Middleware) (*unstructured.Unstructured, error) {
+	return renderPrimaryCustomResource(ctx, cli, m, false)
+}
+
+func renderPrimaryCustomResource(ctx context.Context, cli client.Client, m *v1.Middleware, applyOverrides bool) (*unstructured.Unstructured, error) {
+	if m == nil {
+		return nil, fmt.Errorf("middleware is nil")
+	}
+	rendered := m.DeepCopy()
+	if err := renderMiddlewareWithBaseline(ctx, cli, rendered); err != nil {
+		return nil, err
+	}
+	if err := middlewareaction.RenderPreActions(ctx, cli, rendered); err != nil {
+		return nil, fmt.Errorf("render pre actions: %w", err)
+	}
+	cr, err := customresource.GetNeedPublishCustomResource(ctx, cli, rendered)
+	if err != nil {
+		return nil, err
+	}
+	if applyOverrides {
+		if err := ApplyReconcileOverrides(rendered, cr); err != nil {
+			return nil, err
+		}
+	}
+	return cr, nil
+}
+
 // handleExtraResource handles extra resources
 func handleExtraResource(ctx context.Context, cli client.Client, act consts.HandleAction, m *v1.Middleware) (err error) {
 	conditionBuildExtraResource := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeBuildExtraResource)
@@ -195,10 +240,7 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 		}
 	}()
 
-	var (
-		errorList []error
-		mcs       []*v1.MiddlewareConfiguration
-	)
+	var mcs []*v1.MiddlewareConfiguration
 
 	switch act {
 	case consts.HandleActionDelete:
@@ -216,16 +258,13 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 		if err != nil {
 			return err
 		}
-		for _, mc := range mcs {
-			err = middlewareconfiguration.Handle(ctx, cli, m, act, mc)
-			if err != nil {
-				errorList = append(errorList, fmt.Errorf("%s middleware configuration %s error: %w", act, mc.Name, err))
-			}
+		var inventory []v1.RenderedConfigurationResource
+		inventory, err = middlewareconfiguration.ReconcileRenderedConfigurationResources(ctx, cli, m, act, mcs, m.Status.RenderedConfigurationResources)
+		if err != nil {
+			return err
 		}
-	}
-	if len(errorList) > 0 {
-		err = errors.Join(errorList...)
-		return err
+		m.Status.RenderedConfigurationResources = inventory
+		m.Status.RenderedConfigurationResourcesGeneration = m.Generation
 	}
 
 	return nil
@@ -294,10 +333,18 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 		if err != nil {
 			return fmt.Errorf("parse cr error: %w", err)
 		}
+		if err = ApplyReconcileOverrides(m, cr); err != nil {
+			return fmt.Errorf("apply reconcile overrides: %w", err)
+		}
 	}
 
 	switch action {
 	case consts.HandleActionPublish, consts.HandleActionUpdate:
+		if policy, ok := v1.ReconcileResumePolicyFor(m.GetAnnotations()); ok && policy == v1.ReconcileResumePolicyMerge && m.Status.ReconcilePause != nil {
+			if err = VerifyPausedPrimaryCustomResourceForApply(ctx, cli, m.Status.ReconcilePause, cr); err != nil {
+				return fmt.Errorf("verify paused primary custom resource before resume apply: %w", err)
+			}
+		}
 		scheme, schemeErr := ctxkeys.SchemeFrom(ctx)
 		if schemeErr != nil {
 			return fmt.Errorf("get scheme from context: %w", schemeErr)

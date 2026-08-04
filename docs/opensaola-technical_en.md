@@ -272,10 +272,12 @@ MiddlewareAction (Namespaced) -- references --> MiddlewareActionBaseline
 | `Running` | Running |
 | `TemplateParseWithBaseline` | Template parsing and baseline merging |
 | `Updating` | Updating |
+| `ReconcilePaused` | Child-resource writes are paused (MID/MO) |
+| `ReconcileAdoption` | Result of adopting changes made to a MID primary CR during a reconciliation pause |
 
 #### Condition Reason Constants Reference
 
-> Source location: `OpenSaola/api/v1/common.go:120-147`
+> Source location: `api/v1/common.go`
 
 | Constant Name | Value | Corresponding CondType | Description |
 |---------------|-------|----------------------|-------------|
@@ -304,7 +306,12 @@ MiddlewareAction (Namespaced) -- references --> MiddlewareActionBaseline
 | `CondReasonUpdatingSuccess` | `"UpdatingSuccess"` | `Updating` | Upgrade succeeded |
 | `CondReasonUpdatingFailed` | `"UpdatingFailed"` | `Updating` | Upgrade failed |
 | `CondReasonTemplateParseWithBaselineSuccess` | `"TemplateParseWithBaselineSuccess"` | `TemplateParseWithBaseline` | Template parsing and baseline merging succeeded |
-| `CondReasonTemplateParseWithBaselineFaild` | `"TemplateParseWithBaselineFaild"` | `TemplateParseWithBaseline` | Template parsing and baseline merging failed (**Note**: The source code contains a typo `Faild` instead of `Failed`; this exists in production code) |
+| `CondReasonTemplateParseWithBaselineFailed` | `"TemplateParseWithBaselineFailed"` | `TemplateParseWithBaseline` | Template parsing and baseline merging failed |
+| `CondReasonReconcilePaused` | `"ReconcilePaused"` | `ReconcilePaused` | Ordinary child-resource writes for this MID/MO are closed; a valid MID snapshot must also be confirmed in `status.reconcilePause` |
+| `CondReasonReconcileSnapshotFailed` | `"ReconcileSnapshotFailed"` | `ReconcileAdoption` | The pause snapshot could not be captured safely; write protection remains active |
+| `CondReasonReconcileAdoptionSucceeded` | `"ReconcileAdoptionSucceeded"` | `ReconcileAdoption` | Non-conflicting live primary-CR `spec` differences were adopted as an override |
+| `CondReasonReconcileAdoptionFailed` | `"ReconcileAdoptionFailed"` | `ReconcileAdoption` | An invalid recovery policy, snapshot/target mismatch, or adoption failure keeps the pause active |
+| `CondReasonReconcileAdoptionConflict` | `"ReconcileAdoptionConflict"` | `ReconcileAdoption` | A live writer during the pause and current desired state changed the same path; manual resolution is required |
 
 ---
 
@@ -323,6 +330,7 @@ MiddlewareAction (Namespaced) -- references --> MiddlewareActionBaseline
 | necessary | runtime.RawExtension | No | nil | Required parameters (e.g., image) | JSON format; compared with the baseline's necessary field, missing keys trigger an error (except repository) |
 | preActions | []PreAction | No | nil | Pre-action list | Merged with baseline's preActions; entries with fixed=true are not merged |
 | parameters | runtime.RawExtension | No | nil | Custom parameters | kubebuilder:pruning:PreserveUnknownFields; deep-merged with baseline |
+| reconcileOverrides | *ReconcileOverrides | No | nil | Controller-managed live-state difference patch for the primary CR `spec` | Generated only by `resume-policy=merge`; users normally must not edit it |
 | configurations | []Configuration | No | nil | Configuration list | Merged with baseline's configurations array |
 
 **Interface Methods**:
@@ -340,6 +348,43 @@ MiddlewareAction (Namespaced) -- references --> MiddlewareActionBaseline
 | customResources | CustomResources | No | zero value | Status snapshot of associated CRs | Periodically synced by the Synchronizer |
 | state | State | No | `""` | Overall state | Set to Unavailable if any Condition is False |
 | reason | string | No | `""` | State reason | Takes the Message from the first False Condition |
+| renderedConfigurationResources | []RenderedConfigurationResource | No | nil | Lifecycle-managed Configuration resource inventory | Used for kind-aware cleanup after a template becomes empty or a reference is removed; controller-managed |
+| renderedConfigurationResourcesGeneration | int64 | No | 0 | MID Generation that last wrote the inventory | Prevents an older status writer from replacing a newer inventory |
+| reconcilePause | *ReconcilePauseStatus | No | nil | Durable snapshot for a reconciliation-pause session | Cleared automatically after a successful resume; users must not edit it |
+
+#### ReconcileOverrides Sub-structure
+
+| Field | Type | Description |
+|-------|------|-------------|
+| specPatch | runtime.RawExtension | RFC 7396 JSON Merge Patch rooted at the primary CR `spec` |
+| baseSpec | runtime.RawExtension | Normal rendered `spec` used to create the patch; a later explicit MID/Baseline change at the same path wins |
+| gvk | GVK | Primary CR type to which the override is bound |
+| namespace | string | Primary CR namespace to which the override is bound |
+| name | string | Primary CR name to which the override is bound |
+
+#### ReconcilePauseStatus Sub-structure
+
+| Field | Type | Description |
+|-------|------|-------------|
+| desiredSpec | runtime.RawExtension | Effective primary-CR `spec` at pause time: B in the B/L/D merge |
+| gvk / namespace / name | GVK / string / string | Identity of the primary CR bound to the pause session; a mismatch fails closed |
+| resourceUID | string | Prevents adoption of a same-name primary CR recreated during the pause |
+| generation | int64 | MID Generation when the snapshot was captured |
+| hash | string | SHA-256 of `desiredSpec`, used as the session identity and for concurrency checks |
+| capturedAt | metav1.Time | Snapshot capture time |
+| adoptedLiveSpecHash | string | Hash of the L input from the most recent merge, verified again before the primary-CR write |
+
+#### RenderedConfigurationResource Sub-structure
+
+This inventory is shared by Middleware and MiddlewareOperator status and records only resources proven to be managed by the current owner and Configuration.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| configurationName / configurationUID | string / types.UID | Identity of the Configuration that rendered the resource |
+| group / version / kind / namespace / name | string | Complete GVK and name identity of the resource |
+| ownerUID / resourceUID | types.UID | Current MID/MO and rendered-resource UIDs; they prevent deletion of an externally recreated same-name object |
+| namespaced | bool | Whether the resource was namespaced at render time |
+| disablePolicy | string | Resolved handling after feature disable: PVC/PV default to `orphan`, CRDs always use `orphan`, and other Kinds default to `delete`; an explicit policy can override the PVC/PV default |
 
 #### CustomResources Sub-structure
 
@@ -464,6 +509,10 @@ MiddlewareAction (Namespaced) -- references --> MiddlewareActionBaseline
 | operators | map[string]appsv1.DeploymentStatus | No | nil | Associated Deployment status | Key is the Deployment name |
 | operatorAvailable | string | No | `""` | Availability (format "available/replicas") | e.g., "1/1" |
 | reason | string | No | `""` | Reason | - |
+| ready | bool | No | false | Whether all associated Deployments are healthy | Used for kubectl display and runtime assessment |
+| runtime | string | No | `""` | Runtime status summary | Forward-compatible display field |
+| renderedConfigurationResources | []RenderedConfigurationResource | No | nil | Lifecycle-managed Configuration resource inventory | Used for kind-aware cleanup after a template becomes empty or a reference is removed; controller-managed |
+| renderedConfigurationResourcesGeneration | int64 | No | 0 | MO Generation that last wrote the inventory | Prevents an older status writer from replacing a newer inventory |
 
 **Interface Methods**:
 - `GetConfigurations()` - Returns Spec.Configurations
@@ -781,7 +830,7 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 | Deleting a Secret with the `middleware.cn/package-secret-cleanup` finalizer | MiddlewarePackage | Triggers real package uninstall: clean package resources, delete MiddlewarePackage, remove finalizer, then let the Secret be deleted |
 | Deployment change | MiddlewareOperator (Owns Deployment) | Syncs Deployment status and compares differences |
 | Secret create/update/delete (with project label) | MiddlewarePackage (Watches Secret) | Creates/updates/deletes MiddlewarePackage |
-| CR object deletion | Middleware (via Watcher) | Automatically rebuilds the CR |
+| CR object deletion | Middleware (via Watcher) | Automatically rebuilds the CR unless the owning Middleware is suspended |
 
 ---
 
@@ -810,10 +859,33 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 | `middleware.cn/install` | Install marker | Set when user triggers installation | Presence triggers installation |
 | `middleware.cn/uninstall` | Compatible soft-uninstall marker | Set by older clients when triggering uninstallation | Presence triggers soft uninstall |
 | `middleware.cn/uninstallError` | Uninstall failure reason | Set by the operator when uninstall is blocked by in-use resources | Error message |
+| `middleware.cn/suspend-reconcile` | Temporarily suspends child-resource writes | Set by the user when temporarily preventing MID/MO child-resource writes | `true` |
+| `middleware.cn/resume-policy` | Recovery policy after a MID pause | Set by the user while `suspend-reconcile` remains present | `merge` / `apply` |
+| `middleware.cn/configurationOwnershipPolicy` | Ownership policy when a Configuration resource already has a controller owner | Set on `MiddlewareConfiguration.metadata.annotations` or a resource manifest's `metadata.annotations` within `spec.template` | `managed` (refuse to take ownership) |
+| `middleware.cn/configurationDeletePolicy` | Existing Configuration cleanup policy when a MID/MO is deleted | Set on `MiddlewareConfiguration.metadata.annotations` or a resource manifest's `metadata.annotations` within `spec.template` | `delete` / `orphan` |
+| `middleware.cn/configurationDisablePolicy` | Cleanup policy after a Configuration no longer renders a resource | Set on `MiddlewareConfiguration.metadata.annotations` or a resource manifest's `metadata.annotations` within `spec.template` | `delete` / `orphan`; without one PVC/PV default to `orphan`, CRDs always use `orphan`, and other Kinds default to `delete` |
+| `middleware.cn/configurationOwnerUID` | Owner UID identity marker for lifecycle-managed resources | Written by the controller | - |
+| `middleware.cn/configurationUID` | Source Configuration UID identity marker for lifecycle-managed resources | Written by the controller | - |
 | `middleware.cn/configurations` | Associated Configuration names | Set during Configuration publishing | `redis-configmap` |
 | `middleware.cn/disasterSyncer` | Disaster recovery syncer GVK/Name | Configured by user | `group/version/kind/name` |
 | `middleware.cn/dataSyncer` | Data syncer GVK/Name | Configured by user | `group/version/kind/name` |
 | `middleware.cn/oppositeClusterId` | Opposite-end cluster ID | Configured by user | - |
+
+> `middleware.cn/suspend-reconcile: "true"` pauses only child-resource writes for that MID/MO: the MID primary CR, Configuration resources, and CR delete self-healing; and the MO Configuration, RBAC, Deployment, and Deployment drift repair. Finalizer cleanup and runtime status synchronization continue. Before changing a MID's actual CR, confirm both `.status.conditions[type=ReconcilePaused]=True` and a present `.status.reconcilePause`, with `ReconcileAdoption` not `False`; do not modify the live primary CR when snapshot capture failed. An MO has no primary-CR snapshot, so confirming `ReconcilePaused=True` is sufficient. Disaster recovery is only one example use case for this general capability.
+>
+> A MID must choose an explicit recovery policy instead of directly deleting the pause annotation. While the pause annotation is still present, the recommended command is: `kubectl annotate mid <name> -n <namespace> middleware.cn/resume-policy=merge --overwrite`. The controller performs a three-way merge of the desired primary-CR `spec` captured at pause time (B), the live CR `spec` immediately before recovery (L), and the currently rendered desired state (D). Non-conflicting live changes from the pause are stored in the MID's `.spec.reconcileOverrides` (the patch, its rendered base, and target GVK), then the controller removes the pause annotation itself. The snapshot and recovery annotation are cleared only after the next primary-CR apply succeeds. Immediately before that apply, the live `spec` is checked again; if an external writer changed it again, the controller re-merges instead of applying an older L. `apply` explicitly discards the live CR changes made during the pause and reapplies current desired state. If a live change from the pause and current desired state changed the same path, the controller keeps the pause and records `ReconcileAdoption=False`; it never overwrites the live CR. Resolve the conflict and set `resume-policy=merge` again to retry. Removing `suspend-reconcile` without a policy also keeps the pause guard, preventing the former forced-replay behavior.
+>
+> An adopted live-state difference continues to protect the same field, but a later explicit MID/Baseline desired change at that path takes precedence while unrelated differences from the pause remain. If an upgrade changes the primary CR GVK, name, or namespace, the old override is rejected instead of being applied to a new target; after confirmation, remove `.spec.reconcileOverrides` and let the new desired state take effect.
+>
+> Automatic adoption currently covers only the primary live CR `spec` owned by a MID. CUE-only PreActions are replayed only as in-memory render input; direct changes to PreAction definitions, Configuration resources, CR metadata, or MiddlewareOperator resources are not adopted and must be put back into desired configuration separately. `resume-policy` applies only to a MID; resume an MO by removing `suspend-reconcile`, after which ordinary desired-state reconciliation resumes. Any related MID must be paused and resumed separately.
+>
+> **PreAction boundary:** the pause-snapshot/B-L-D merge renderer replays CUE-only PreActions on an in-memory MID copy, so their primary-CR `spec` effects match ordinary primary-CR writes without executing commands, HTTP actions, or Kubernetes writes. If any PreAction contains a non-CUE step (for example CMD or HTTP), that MID's `resume-policy=merge` fails closed. Make the action pure CUE, make its result explicit MID/Baseline desired state, or choose `apply` only when intentionally overwriting a change made during the pause.
+>
+> **Configuration disable lifecycle**: When the owner's next reconcile observes that a Configuration template is empty or its reference was removed, it prunes resources using the resolved policy recorded during a successful render. A resource manifest's `metadata.annotations` within `spec.template` takes precedence over `MiddlewareConfiguration.metadata.annotations`; do not manually put this policy annotation on an existing live resource because the controller does not read it.
+> Without an explicit policy, PVC/PV use `orphan`, CRDs use `orphan` regardless of annotation, and every other Kind—including unknown/custom and cluster-scoped resources—uses `delete`. Explicit `delete` / `orphan` can override the PVC/PV default; CRDs are hard-protected during both policy resolution and deletion.
+> The controller removes only an inventory entry recorded as `delete` whose live owner UID, Configuration UID, resource UID, and controller owner still match; externally recreated, transferred, or same-name reused resources are retained. An older `orphan` entry is not retroactively deleted after upgrade: it must successfully reconcile while still rendering before a later disable can use the new default.
+> Editing `MiddlewareConfiguration.spec.template` alone does not trigger MID/MO reconciliation; a MID/MO reference change or another owner event must do so. “No longer referenced” means only that OpenSaola no longer renders the Configuration, not that the controller has analyzed other cluster consumers. This feature-disable path differs from cleanup during MID/MO deletion, which follows `configurationDeletePolicy` / OwnerReference behavior.
+> When a same-name resource already has another controller owner, the default does not take ownership: it retains that OwnerReference and continues to patch, but does not put the resource in the current owner's lifecycle inventory; `configurationOwnershipPolicy=managed` instead fails reconciliation and refuses takeover. `configurationDeletePolicy=delete` on the MID/MO deletion path is an independent, stronger deletion semantic and must not be presented as the UID-safe disable path.
 
 ---
 
@@ -823,6 +895,12 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 
 **Watch Resource**: `v1.Middleware` (itself)  
 **Predicate Filter**: Ignores Update events where only Status fields changed  
+
+**Pause and resume gate**: The finalizer deletion branch continues to run. With
+`middleware.cn/suspend-reconcile: "true"`, a MID first captures the primary-CR desired `spec`, records
+`ReconcilePaused=True`, then skips pre-actions, Configuration resources, primary-CR writes, and Watcher self-healing.
+Recovery must retain the pause annotation and set `resume-policy=merge` or `apply`; directly deleting the pause
+annotation without a valid policy leaves write protection in place.
 
 **Reconcile Main Logic**:
 
@@ -850,8 +928,8 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 HandleResource(Publish/Update/Delete)
     -> TemplateParseWithBaseline  (get Baseline -> deep-merge parameters/configurations/labels/annotations/PreActions -> template rendering)
     -> HandlePreActions           (iterate PreActions, execute PreAction-type ActionBaselines)
-    -> handleExtraResource        (get and render MiddlewareConfigurations -> handle each one)
-    -> buildCustomResource        (locate CR type via GVK -> create/update/delete CR -> start Watcher + Synchronizer)
+    -> handleExtraResource        (get and render MiddlewareConfigurations -> maintain lifecycle inventory and prune disabled resources by policy)
+    -> buildCustomResource        (locate CR type via GVK -> conditionally apply a live-state adoption override -> create/update/delete CR -> start Watcher + Synchronizer)
 ```
 
 ### 5.2 MiddlewareBaseline Controller
@@ -996,8 +1074,8 @@ HandleResource(Publish)
 | `ReplacePackage` | Handle upgrade flow: get new package -> get new Baseline -> update Spec/Labels -> wait for package readiness |
 | `TemplateParseWithBaseline` | Get Baseline -> deep-merge parameters/configurations/labels/annotations/PreActions -> template-render Parameters, Configurations, ObjectMeta |
 | `HandleResource` | Orchestrator: template parsing -> PreActions -> extra resources -> CR |
-| `handleExtraResource` | Get and render MiddlewareConfigurations -> handle each (publish in order, delete in reverse order) |
-| `buildCustomResource` | Locate CR type via GVK -> create/update CR -> start Watcher + Synchronizer |
+| `handleExtraResource` | Get and render MiddlewareConfigurations -> maintain rendered-resource inventory; prune only entries whose resolved `configurationDisablePolicy=delete` was previously recorded (CRDs are hard-protected) |
+| `buildCustomResource` | Locate CR type via GVK -> conditionally apply `reconcileOverrides` -> create/update CR -> start Watcher + Synchronizer |
 
 **NecessaryIgnore**: `["repository"]` - Key list to ignore during required parameter validation
 
@@ -1132,7 +1210,8 @@ Defines all constants:
    - **UpdateFunc**: Log, compare ResourceVersion
    - **DeleteFunc**: Check whether the OwnerReference's Middleware exists
      - Does not exist: Close Watcher + Synchronizer
-     - Exists: Automatically rebuild the CR (clear ResourceVersion and Create)
+     - Exists and the MID is not under write protection: Automatically rebuild the CR (clear ResourceVersion and Create)
+     - Exists but the MID is paused, or was directly unpaused without a valid recovery policy: Do not rebuild
 
 4. **Shutdown**: `CloseCRWatcher`
    - Counter == 1: close(StopChan) -> remove from Map
@@ -1263,15 +1342,18 @@ When a Secret is deleted:
 
 When a CR watched by a Watcher is deleted:
 1. Check whether the OwnerReference's Middleware exists
-2. If it exists: Automatically rebuild the CR (clear ResourceVersion and re-Create)
-3. If it does not exist: Close the Watcher and Synchronizer
+2. If it exists and the MID is not under write protection: Automatically rebuild the CR (clear ResourceVersion and re-Create)
+3. If the MID is paused, or was directly unpaused without a valid recovery policy: Leave the CR deleted until an explicit recovery
+4. If it does not exist: Close the Watcher and Synchronizer
 
 ### 9.6 Finalizer
 
-The current codebase **does not use Finalizers**. Deletion handling relies on:
-- NotFound detection in Reconcile + Cache mechanism
-- K8s OwnerReference cascading deletion (ControllerReference)
-- Watcher DeleteFunc event handling
+The current codebase uses these Finalizers:
+- `middleware.cn/middleware-cleanup`: before deleting a Middleware, resolve deletion context, clean managed Configuration resources and the primary CR, then remove the Finalizer.
+- `middleware.cn/middlewareoperator-cleanup`: before deleting a MiddlewareOperator, clean managed Configuration resources, RBAC, and Deployment, then remove the Finalizer.
+- `middleware.cn/package-secret-cleanup`: complete real package uninstallation before removing the Finalizer from a Package Secret.
+
+A reconciliation pause only stops ordinary child-resource writes; it does not block these deletion-cleanup flows.
 
 ---
 

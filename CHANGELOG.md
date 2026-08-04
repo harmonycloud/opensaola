@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Reconciliation suspension and explicit MID recovery policies: `merge` replays CUE-only PreActions on an in-memory MID copy and adopts non-conflicting primary-CR `spec` changes made during a pause, while `apply` intentionally replays desired state.
+- Durable pause snapshots, `reconcileOverrides`, and reconciliation Conditions that fail closed on unsafe recovery.
+- Kind-aware Configuration disable lifecycle inventory: PVC/PV default to `orphan`, CRDs are hard-protected, and every other Kind defaults to `delete`; cleanup still requires a previously recorded, still-owned resource.
+- Reconciliation suspension and recovery runbooks in English and Chinese.
+
+### Known limitations
+- `resume-policy=merge` fails closed when any PreAction contains a non-CUE step (for example CMD or HTTP), because pause rendering must not execute external side effects. Make the action pure CUE, make its result explicit desired state, or use `apply` only when intentionally overwriting a change made during the pause.
+
 ## [1.5.0] - 2025-01-01
 
 ### Added

@@ -53,7 +53,10 @@ type MiddlewareOperatorReconciler struct {
 	Recorder record.EventRecorder
 }
 
-var errMiddlewareOperatorFinalizerAdded = errors.New("middlewareoperator finalizer added")
+var (
+	errMiddlewareOperatorFinalizerAdded  = errors.New("middlewareoperator finalizer added")
+	errMiddlewareOperatorReconcilePaused = errors.New("middlewareoperator reconciliation paused")
+)
 
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewareoperators,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewareoperators/status,verbs=get;update;patch
@@ -80,6 +83,9 @@ func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 		if errors.Is(err, errMiddlewareOperatorFinalizerAdded) {
 			return ctrl.Result{Requeue: true}, nil
+		}
+		if errors.Is(err, errMiddlewareOperatorReconcilePaused) {
+			return ctrl.Result{}, nil
 		}
 		if errors.Is(err, consts.NoOperator) {
 			return ctrl.Result{}, nil
@@ -203,11 +209,25 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 		)
 		return errMiddlewareOperatorFinalizerAdded
 	}
+	if v1.IsReconcileSuspended(mo.GetAnnotations()) {
+		if markReconcilePaused(ctx, &mo.Status.Conditions, mo.Generation) {
+			if statusErr := k8s.UpdateMiddlewareOperatorStatus(ctx, r.Client, mo); statusErr != nil {
+				return statusErr
+			}
+		}
+		log.FromContext(ctx).Info("MiddlewareOperator reconciliation is suspended",
+			"name", mo.Name,
+			"namespace", mo.Namespace,
+			"annotation", v1.AnnotationSuspendReconcile,
+		)
+		return errMiddlewareOperatorReconcilePaused
+	}
 
 	var (
 		generation         = mo.Generation
 		observedGeneration = mo.Status.ObservedGeneration
 	)
+	wasReconcilePaused := hasReconcilePaused(mo.Status.Conditions)
 
 	defer func() {
 		state := v1.StateAvailable
@@ -301,10 +321,16 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 		if err = middlewareoperator.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionPublish, mo); err != nil {
 			return fmt.Errorf("failed to generate resources: %w", err)
 		}
+		if wasReconcilePaused && status.GetCondition(ctx, &mo.Status.Conditions, v1.CondTypeChecked).Status == metav1.ConditionTrue {
+			clearReconcilePaused(&mo.Status.Conditions)
+		}
 		r.Recorder.Event(mo, "Normal", "Published", "MiddlewareOperator published successfully")
-	} else if generation > observedGeneration || mo.Status.State == v1.StateUpdating { // actual > observed means update needed
+	} else if generation > observedGeneration || mo.Status.State == v1.StateUpdating || wasReconcilePaused { // actual > observed means update needed
 		if err = middlewareoperator.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionUpdate, mo); err != nil {
 			return fmt.Errorf("failed to update resources: %w", err)
+		}
+		if wasReconcilePaused && status.GetCondition(ctx, &mo.Status.Conditions, v1.CondTypeChecked).Status == metav1.ConditionTrue {
+			clearReconcilePaused(&mo.Status.Conditions)
 		}
 		r.Recorder.Event(mo, "Normal", "Updated", "MiddlewareOperator updated successfully")
 	}
@@ -317,6 +343,14 @@ func (r *MiddlewareOperatorReconciler) handleDeployment(ctx context.Context, req
 	mo, err := k8s.GetMiddlewareOperator(ctx, r.Client, req.Name, req.Namespace)
 	if err != nil {
 		return err
+	}
+	if v1.IsReconcileSuspended(mo.GetAnnotations()) {
+		log.FromContext(ctx).Info("skipping MiddlewareOperator deployment reconciliation because it is suspended",
+			"name", mo.Name,
+			"namespace", mo.Namespace,
+			"annotation", v1.AnnotationSuspendReconcile,
+		)
+		return nil
 	}
 	if _, ok := mo.Annotations[v1.LabelUpdate]; ok {
 		log.FromContext(ctx).Info("MiddlewareOperator is updating, please try again later", "warning", true, "name", req.Name)

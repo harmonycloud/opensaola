@@ -388,6 +388,66 @@ spec:
                 description: Reason provides a human-readable explanation of the current
                   state.
                 type: string
+              renderedConfigurationResources:
+                description: |-
+                  RenderedConfigurationResources is the lifecycle-managed inventory of resources rendered from MiddlewareConfigurations.
+                  It enables kind-aware cleanup when a configuration template becomes empty after a feature is disabled.
+                items:
+                  description: |-
+                    RenderedConfigurationResource records one Kubernetes object successfully
+                    rendered from a MiddlewareConfiguration and managed by an owning
+                    Middleware or MiddlewareOperator. The owner status uses this inventory to
+                    safely prune resources after their Configuration no longer renders them.
+                  properties:
+                    configurationName:
+                      description: ConfigurationName is the MiddlewareConfiguration
+                        name that rendered this resource.
+                      type: string
+                    configurationUID:
+                      description: ConfigurationUID identifies the exact MiddlewareConfiguration
+                        object instance when available.
+                      type: string
+                    disablePolicy:
+                      description: |-
+                        DisablePolicy is the resolved lifecycle policy used when this resource stops rendering.
+                        Valid values are delete and orphan; without an explicit policy, PVC and PV
+                        resources default to orphan while all other resource types default to delete.
+                        CustomResourceDefinitions always resolve to orphan.
+                      type: string
+                    group:
+                      description: Group, Version and Kind identify the rendered Kubernetes
+                        resource.
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                    namespace:
+                      description: Namespace and Name identify the rendered Kubernetes
+                        resource instance.
+                      type: string
+                    namespaced:
+                      description: Namespaced records whether the rendered resource
+                        was namespaced when it was applied.
+                      type: boolean
+                    ownerUID:
+                      description: OwnerUID is the UID of the Middleware or MiddlewareOperator
+                        that owns this inventory.
+                      type: string
+                    resourceUID:
+                      description: ResourceUID protects a same-name resource that
+                        was deleted and recreated outside OpenSaola.
+                      type: string
+                    version:
+                      type: string
+                  type: object
+                type: array
+              renderedConfigurationResourcesGeneration:
+                description: |-
+                  RenderedConfigurationResourcesGeneration is the generation that last successfully reconciled the inventory.
+                  It prevents an older status writer from overwriting a newer inventory snapshot.
+                format: int64
+                type: integer
               runtime:
                 description: Runtime is an optional summary field for kubectl display
                   (forward compatible).

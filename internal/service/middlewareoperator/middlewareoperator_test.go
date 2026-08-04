@@ -17,10 +17,12 @@ limitations under the License.
 package middlewareoperator
 
 import (
+	"context"
 	"testing"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
+	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -35,5 +37,27 @@ func TestHandleResourceDeleteNoOperatorReturnsNil(t *testing.T) {
 
 	if err := HandleResource(nil, nil, consts.HandleActionDelete, mo); err != nil {
 		t.Fatalf("expected nil error for nooperator delete, got %v", err)
+	}
+}
+
+func TestHandleResourceSuspendedSkipsChildWrites(t *testing.T) {
+	mo := &v1.MiddlewareOperator{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "suspended-mo",
+			Namespace: "default",
+			Annotations: map[string]string{
+				v1.AnnotationSuspendReconcile: "true",
+			},
+		},
+	}
+
+	for _, action := range []consts.HandleAction{consts.HandleActionPublish, consts.HandleActionUpdate} {
+		if err := HandleResource(context.Background(), nil, action, mo); err != nil {
+			t.Fatalf("HandleResource(%s) error = %v, want suspended no-op", action, err)
+		}
+	}
+
+	if err := CompareDeployment(context.Background(), nil, &appsv1.Deployment{}, mo); err != nil {
+		t.Fatalf("CompareDeployment() error = %v, want suspended no-op", err)
 	}
 }

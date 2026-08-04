@@ -463,13 +463,23 @@ func newResourceEventHandlerFuncs(ctx context.Context, cli client.Client, notify
 
 			// If OwnerReferences no longer exist, stop watching
 			for _, reference := range cr.GetOwnerReferences() {
-				_, err := k8s.GetMiddleware(ctx, cli, reference.Name, cr.GetNamespace())
+				mid, err := k8s.GetMiddleware(ctx, cli, reference.Name, cr.GetNamespace())
 				if err != nil {
 					if apiErrors.IsNotFound(err) {
 						// Stop watching
 						ReleaseCRWatcher(ctx, cr)
 						synchronizer.StopSyncCustomResource(fmt.Sprintf(synchronizer.SyncCustomResourceStopChanMapKey, cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName()))
 					}
+					return
+				}
+				if v1.IsMiddlewareReconcileWriteSuspended(mid.GetAnnotations(), mid.Status.Conditions) {
+					log.FromContext(ctx).Info("skipping custom resource rebuild because owning Middleware reconciliation is suspended",
+						"middleware", mid.Name,
+						"namespace", mid.Namespace,
+						"gvk", cr.GroupVersionKind().String(),
+						"customResource", cr.GetName(),
+						"annotation", v1.AnnotationSuspendReconcile,
+					)
 					return
 				}
 			}

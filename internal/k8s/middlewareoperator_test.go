@@ -128,6 +128,13 @@ func TestUpdateMiddlewareOperatorStatus_PreservesRuntimeOwnedFields(t *testing.T
 			OperatorAvailable: "0/1",
 			Ready:             false,
 			Runtime:           "phase=workload-readiness; failedObject=v1/Pod middleware-operator/opensaola-install-crds",
+			RenderedConfigurationResources: []v1.RenderedConfigurationResource{{
+				ConfigurationName: "old-config",
+				Version:           "v1",
+				Kind:              "ConfigMap",
+				Name:              "old-config",
+			}},
+			RenderedConfigurationResourcesGeneration: 11,
 		},
 	}
 	cli := newMiddlewareOperatorTestClient(t, existing)
@@ -147,6 +154,13 @@ func TestUpdateMiddlewareOperatorStatus_PreservesRuntimeOwnedFields(t *testing.T
 	update.Status.OperatorAvailable = ""
 	update.Status.Ready = true
 	update.Status.Runtime = ""
+	update.Status.RenderedConfigurationResources = []v1.RenderedConfigurationResource{{
+		ConfigurationName: "new-config",
+		Version:           "v1",
+		Kind:              "ConfigMap",
+		Name:              "new-config",
+	}}
+	update.Status.RenderedConfigurationResourcesGeneration = 12
 
 	if err := UpdateMiddlewareOperatorStatus(ctx, cli, update); err != nil {
 		t.Fatalf("UpdateMiddlewareOperatorStatus returned error: %v", err)
@@ -170,5 +184,11 @@ func TestUpdateMiddlewareOperatorStatus_PreservesRuntimeOwnedFields(t *testing.T
 	}
 	if got.Status.Runtime == "" || got.Status.Runtime != existing.Status.Runtime {
 		t.Fatalf("expected runtime diagnostic to be preserved, got %q", got.Status.Runtime)
+	}
+	if got.Status.RenderedConfigurationResourcesGeneration != 12 {
+		t.Fatalf("expected rendered configuration inventory generation 12, got %d", got.Status.RenderedConfigurationResourcesGeneration)
+	}
+	if inventory := got.Status.RenderedConfigurationResources; len(inventory) != 1 || inventory[0].ConfigurationName != "new-config" {
+		t.Fatalf("expected new rendered configuration inventory, got %#v", inventory)
 	}
 }

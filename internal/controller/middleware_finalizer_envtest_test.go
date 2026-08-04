@@ -88,6 +88,9 @@ var _ = Describe("Finalizer Envtest", func() {
 				Labels: map[string]string{
 					v1.LabelPackageName: packageName,
 				},
+				Annotations: map[string]string{
+					v1.AnnotationSuspendReconcile: "true",
+				},
 			},
 			Spec: v1.MiddlewareSpec{Baseline: baselineName},
 		}

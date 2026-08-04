@@ -22,6 +22,7 @@ import (
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -209,5 +210,98 @@ func TestConfigurationPolicyObjectOverridesConfiguration(t *testing.T) {
 	got := configurationPolicy(cfg, obj, v1.AnnotationConfigurationDeletePolicy)
 	if got != v1.ConfigurationDeletePolicyDelete {
 		t.Fatalf("configurationPolicy() = %q, want %q", got, v1.ConfigurationDeletePolicyDelete)
+	}
+}
+
+func TestConfigurationDisablePolicy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                string
+		configurationPolicy string
+		resourcePolicy      string
+		gvk                 schema.GroupVersionKind
+		want                string
+		wantErr             bool
+	}{
+		{
+			name: "default deletes ConfigMap",
+			gvk:  schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"},
+			want: v1.ConfigurationDisablePolicyDelete,
+		},
+		{
+			name: "default retains PVC",
+			gvk:  schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolumeClaim"},
+			want: v1.ConfigurationDisablePolicyOrphan,
+		},
+		{
+			name: "default retains PV",
+			gvk:  schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolume"},
+			want: v1.ConfigurationDisablePolicyOrphan,
+		},
+		{
+			name: "default deletes unknown custom resource",
+			gvk:  schema.GroupVersionKind{Group: "example.io", Version: "v1", Kind: "Example"},
+			want: v1.ConfigurationDisablePolicyDelete,
+		},
+		{
+			name:                "resource policy overrides configuration policy",
+			configurationPolicy: v1.ConfigurationDisablePolicyOrphan,
+			resourcePolicy:      v1.ConfigurationDisablePolicyDelete,
+			gvk:                 schema.GroupVersionKind{Version: "v1", Kind: "PersistentVolumeClaim"},
+			want:                v1.ConfigurationDisablePolicyDelete,
+		},
+		{
+			name:                "configuration policy overrides kind default",
+			configurationPolicy: v1.ConfigurationDisablePolicyOrphan,
+			gvk:                 schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"},
+			want:                v1.ConfigurationDisablePolicyOrphan,
+		},
+		{
+			name:           "CRD is retained even with explicit delete",
+			resourcePolicy: v1.ConfigurationDisablePolicyDelete,
+			gvk:            schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"},
+			want:           v1.ConfigurationDisablePolicyOrphan,
+		},
+		{
+			name:           "rejects unsupported CRD policy",
+			resourcePolicy: "unexpected",
+			gvk:            schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"},
+			wantErr:        true,
+		},
+		{
+			name:           "rejects unsupported policy",
+			resourcePolicy: "unexpected",
+			gvk:            schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"},
+			wantErr:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			configurationAnnotations := map[string]string{}
+			if tt.configurationPolicy != "" {
+				configurationAnnotations[v1.AnnotationConfigurationDisablePolicy] = tt.configurationPolicy
+			}
+			resourceAnnotations := map[string]string{}
+			if tt.resourcePolicy != "" {
+				resourceAnnotations[v1.AnnotationConfigurationDisablePolicy] = tt.resourcePolicy
+			}
+			obj := testResource(nil, nil, resourceAnnotations)
+			obj.SetGroupVersionKind(tt.gvk)
+
+			got, err := configurationDisablePolicy(testConfig(configurationAnnotations), obj)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("configurationDisablePolicy() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if got != tt.want {
+				t.Fatalf("configurationDisablePolicy() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

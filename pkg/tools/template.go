@@ -31,7 +31,6 @@ import (
 	"github.com/harmonycloud/opensaola/internal/k8s/kubeclient"
 	"github.com/harmonycloud/opensaola/pkg/tools/ctxkeys"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/version"
 	"k8s.io/client-go/discovery"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -316,20 +315,27 @@ func GetTemplateValues(ctx context.Context, quoter Quoter) (*TemplateValues, err
 
 	templateValues.Step = ctxkeys.StepFrom(ctx)
 
+	// Discovery is best-effort: environments without a kubeconfig (unit tests,
+	// CI) must still render templates. Mirror the tolerant behavior used for
+	// buildAPIVersions below instead of failing the whole render.
 	disCli, err := kubeclient.GetDiscoveryClient()
 	if err != nil {
-		return nil, err
-	}
-	var serverVersion *version.Info
-	serverVersion, err = disCli.ServerVersion()
-	if err != nil {
-		return nil, err
+		log.FromContext(ctx).Info("Failed to get discovery client, rendering with empty capabilities", "error", err)
+		templateValues.Capabilities.APIVersions = &APIVersions{
+			versions:  make(map[string]bool),
+			resources: make(map[string]bool),
+		}
+		return templateValues, nil
 	}
 
-	templateValues.Capabilities.KubeVersion.Version = serverVersion.String()
-	templateValues.Capabilities.KubeVersion.Major = serverVersion.Major
-	templateValues.Capabilities.KubeVersion.Minor = serverVersion.Minor
-	templateValues.Capabilities.KubeVersion.GitVersion = serverVersion.GitVersion
+	if serverVersion, verr := disCli.ServerVersion(); verr != nil {
+		log.FromContext(ctx).Info("Failed to get server version, rendering with empty kube version", "error", verr)
+	} else {
+		templateValues.Capabilities.KubeVersion.Version = serverVersion.String()
+		templateValues.Capabilities.KubeVersion.Major = serverVersion.Major
+		templateValues.Capabilities.KubeVersion.Minor = serverVersion.Minor
+		templateValues.Capabilities.KubeVersion.GitVersion = serverVersion.GitVersion
+	}
 
 	// Build APIVersions
 	apiVersions, err := buildAPIVersions(disCli)

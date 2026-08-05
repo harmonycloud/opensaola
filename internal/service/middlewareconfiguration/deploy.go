@@ -219,7 +219,7 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 	return nil, nil
 }
 
-func isLifecycleManagedForApply(owner metav1.Object, old metav1.Object, configuration *v1.MiddlewareConfiguration, resourceIsNamespaced, resourceScopeKnown bool) bool {
+func isLifecycleManagedForApply(owner metav1.Object, old *unstructured.Unstructured, configuration *v1.MiddlewareConfiguration, resourceIsNamespaced, resourceScopeKnown bool) bool {
 	if owner == nil || owner.GetUID() == "" || !resourceScopeKnown {
 		return false
 	}

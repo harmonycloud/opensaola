@@ -140,6 +140,38 @@ func TestShouldSetControllerReference(t *testing.T) {
 	}
 }
 
+func TestIsLifecycleManagedForApplyTreatsMissingResourceAsManaged(t *testing.T) {
+	t.Parallel()
+
+	owner := testMiddleware()
+	configuration := testConfig(nil)
+	tests := []struct {
+		name                 string
+		resourceIsNamespaced bool
+	}{
+		{
+			name:                 "namespaced resource",
+			resourceIsNamespaced: true,
+		},
+		{
+			name:                 "cluster scoped resource",
+			resourceIsNamespaced: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var old *unstructured.Unstructured
+			if got := isLifecycleManagedForApply(owner, old, configuration, tt.resourceIsNamespaced, true); !got {
+				t.Fatalf("isLifecycleManagedForApply() = false, want true for a missing resource")
+			}
+		})
+	}
+}
+
 func TestShouldDeleteRenderedResource(t *testing.T) {
 	t.Parallel()
 	owner := testMiddleware()

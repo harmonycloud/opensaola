@@ -43,9 +43,9 @@ type MiddlewareSpec struct {
 	Parameters runtime.RawExtension `json:"parameters,omitempty"`
 	// ReconcileOverrides is an OpenSaola-managed RFC 7396 JSON Merge Patch
 	// applied to the rendered primary custom-resource spec after Baseline and
-// template rendering. It persists accepted changes to the live primary CR
-// made during a reconciliation pause when they cannot safely be represented
-// by Parameters alone, such as removal of a
+	// template rendering. It persists accepted changes to the live primary CR
+	// made during a reconciliation pause when they cannot safely be represented
+	// by Parameters alone, such as removal of a
 	// Baseline default.
 	ReconcileOverrides *ReconcileOverrides `json:"reconcileOverrides,omitempty"`
 	// Configurations is the list of additional configuration resources to create alongside the middleware.
@@ -61,7 +61,7 @@ type ReconcileOverrides struct {
 	SpecPatch runtime.RawExtension `json:"specPatch,omitempty"`
 	// BaseSpec is the rendered primary-CR spec that SpecPatch was calculated
 	// against. It lets later explicit MID/Baseline changes win at the same
-// path while preserving unrelated adopted changes from the pause.
+	// path while preserving unrelated adopted changes from the pause.
 	// +kubebuilder:pruning:PreserveUnknownFields
 	BaseSpec runtime.RawExtension `json:"baseSpec,omitempty"`
 	// GVK, Namespace and Name bind an override to the primary CR it was
@@ -97,7 +97,7 @@ type ReconcilePauseStatus struct {
 	CapturedAt metav1.Time `json:"capturedAt,omitempty"`
 	// AdoptedLiveSpecHash is the hash of the live primary CR spec used to
 	// calculate the most recent merge. It is checked again immediately before
-// the resumed SSA write so a second live change during the pause is never overwritten using an
+	// the resumed SSA write so a second live change during the pause is never overwritten using an
 	// older L input.
 	AdoptedLiveSpecHash string `json:"adoptedLiveSpecHash,omitempty"`
 }

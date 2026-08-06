@@ -18,10 +18,12 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
 
+	jsonpatch "github.com/evanphx/json-patch/v5"
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -91,24 +93,67 @@ func TestMergePausedSpec(t *testing.T) {
 	}
 }
 
-func TestMergePausedSpecRejectsExplicitNullAdoption(t *testing.T) {
+func TestMergePausedSpecTreatsObservedNullAsUnchanged(t *testing.T) {
 	t.Parallel()
 
-	for name, desired := range map[string]map[string]any{
-		"unchanged desired":     {"value": "before"},
-		"matching desired null": {"value": nil},
-	} {
-		name, desired := name, desired
-		t.Run(name, func(t *testing.T) {
-			_, _, err := mergePausedSpec(
-				map[string]any{"value": "before"},
-				map[string]any{"value": nil},
-				desired,
-			)
-			if !errors.Is(err, ErrReconcilePauseNullValue) {
-				t.Fatalf("mergePausedSpec() error = %v, want ErrReconcilePauseNullValue", err)
-			}
-		})
+	base := map[string]any{"value": "before"}
+	actual := map[string]any{"value": nil}
+	desired := map[string]any{"value": "before"}
+
+	got, conflicts, err := mergePausedSpec(base, actual, desired)
+	if err != nil {
+		t.Fatalf("mergePausedSpec() error = %v", err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("conflicts = %#v, want none", conflicts)
+	}
+	if !reflect.DeepEqual(got, desired) {
+		t.Fatalf("merged spec = %#v, want %#v", got, desired)
+	}
+
+	baseRaw, err := json.Marshal(desired)
+	if err != nil {
+		t.Fatalf("marshal desired spec: %v", err)
+	}
+	mergedRaw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal merged spec: %v", err)
+	}
+	patch, err := jsonpatch.CreateMergePatch(baseRaw, mergedRaw)
+	if err != nil {
+		t.Fatalf("create merge patch: %v", err)
+	}
+	if got, want := string(patch), "{}"; got != want {
+		t.Fatalf("merge patch = %s, want %s", got, want)
+	}
+}
+
+func TestMergePausedSpecTreatsNestedObservedNullAsAbsent(t *testing.T) {
+	t.Parallel()
+
+	base := map[string]any{
+		"_statefulset": map[string]any{
+			"spec": map[string]any{
+				"template": map[string]any{"metadata": map[string]any{"labels": map[string]any{"app": "mysql"}}},
+			},
+		},
+	}
+	actual := cloneJSONValue(base).(map[string]any)
+	actual["_statefulset"].(map[string]any)["spec"].(map[string]any)["selector"] = nil
+	desired := cloneJSONValue(base).(map[string]any)
+
+	got, conflicts, err := mergePausedSpec(base, actual, desired)
+	if err != nil {
+		t.Fatalf("mergePausedSpec() error = %v", err)
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("conflicts = %#v, want none", conflicts)
+	}
+	if !reflect.DeepEqual(got, desired) {
+		t.Fatalf("merged spec = %#v, want %#v", got, desired)
+	}
+	if _, exists := got["_statefulset"].(map[string]any)["spec"].(map[string]any)["selector"]; exists {
+		t.Fatalf("merged spec retained selector null: %#v", got)
 	}
 }
 
@@ -355,6 +400,72 @@ func TestPauseSnapshotAndAdoptionBuildsPersistentOverride(t *testing.T) {
 	want := map[string]any{"replicas": float64(5), "storage": "20Gi"}
 	if !reflect.DeepEqual(spec, want) {
 		t.Fatalf("rendered adopted spec = %#v, want %#v", spec, want)
+	}
+}
+
+func TestPauseSnapshotAndAdoptionIgnoresObservedNull(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := v1.AddToScheme(scheme); err != nil {
+		t.Fatalf("add OpenSaola scheme: %v", err)
+	}
+	gvk := schema.GroupVersionKind{Group: "mysql.test.io", Version: "v1", Kind: "MysqlCluster"}
+	scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
+	scheme.AddKnownTypeWithName(gvk.GroupVersion().WithKind("MysqlClusterList"), &unstructured.UnstructuredList{})
+
+	const (
+		name         = "mysql"
+		namespace    = "middleware"
+		baselineName = "mysql-baseline"
+		packageName  = "mysql-package"
+	)
+	parameters := []byte(`{"_statefulset":{"spec":{"template":{"metadata":{"labels":{"app":"mysql"}}}}}}`)
+	baseline := &v1.MiddlewareBaseline{
+		ObjectMeta: metav1.ObjectMeta{Name: baselineName, Labels: map[string]string{v1.LabelPackageName: packageName}},
+		Spec:       v1.MiddlewareBaselineSpec{GVK: v1.GVK{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind}},
+	}
+	mid := &v1.Middleware{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: map[string]string{v1.LabelPackageName: packageName}},
+		Spec: v1.MiddlewareSpec{
+			Baseline:   baselineName,
+			Parameters: runtime.RawExtension{Raw: parameters},
+		},
+	}
+	live := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": gvk.GroupVersion().String(),
+		"kind":       gvk.Kind,
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": namespace,
+			"uid":       "mysql-resource-uid",
+		},
+		"spec": map[string]any{
+			"_statefulset": map[string]any{
+				"spec": map[string]any{
+					"selector": nil,
+					"template": map[string]any{
+						"metadata": map[string]any{"labels": map[string]any{"app": "mysql"}},
+					},
+				},
+			},
+		},
+	}}
+	live.SetGroupVersionKind(gvk)
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseline, live).Build()
+
+	snapshot, err := BuildReconcilePauseSnapshot(ctx, cli, mid)
+	if err != nil {
+		t.Fatalf("BuildReconcilePauseSnapshot() error = %v", err)
+	}
+	adoption, err := AdoptPausedPrimaryCustomResource(ctx, cli, mid, snapshot)
+	if err != nil {
+		t.Fatalf("AdoptPausedPrimaryCustomResource() error = %v", err)
+	}
+	if adoption == nil || adoption.LiveSpecHash == "" {
+		t.Fatalf("unexpected adoption result: %#v", adoption)
+	}
+	if adoption.Overrides != nil {
+		t.Fatalf("unexpected override for observed selector null: %#v", adoption.Overrides)
 	}
 }
 

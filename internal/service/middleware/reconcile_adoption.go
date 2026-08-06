@@ -47,7 +47,6 @@ var (
 	ErrReconcilePauseSnapshotInvalid  = errors.New("reconcile pause snapshot is invalid")
 	ErrReconcilePauseResourceMissing  = errors.New("paused primary custom resource is missing")
 	ErrReconcilePauseResourceChanged  = errors.New("paused primary custom resource identity changed")
-	ErrReconcilePauseNullValue        = errors.New("cannot automatically adopt an explicit JSON null value")
 	ErrReconcileOverrideTargetChanged = errors.New("reconcile override target changed")
 	ErrReconcilePauseLiveSpecChanged  = errors.New("paused primary custom resource spec changed after merge")
 )
@@ -485,18 +484,19 @@ func mergePausedSpec(base, actual, desired map[string]any) (map[string]any, []st
 }
 
 func mergePausedValue(base, actual, desired mergeValue, path string) (mergeValue, []string, error) {
-	// RFC 7396 encodes null as deletion. A nullable live CR field therefore
-	// cannot be faithfully persisted as a merge patch; fail closed rather than
-	// converting a null observed during the pause into an unintended field removal.
-	if actual.exists && actual.value == nil && !mergeValueEqual(actual, base) {
-		return mergeValue{}, nil, fmt.Errorf("%w at %s", ErrReconcilePauseNullValue, displayJSONPointer(path))
+	// Operators that round-trip typed CR specs can serialize an omitted pointer
+	// field as JSON null. Treat that observed live value as unchanged from B so
+	// it does not become an RFC 7396 deletion override. Only L is normalized;
+	// B and D keep their declarative JSON merge-patch semantics.
+	if actual.exists && actual.value == nil {
+		actual = cloneMergeValue(base)
 	}
 	baseMap, baseIsMap := valueAsMap(base)
 	actualMap, actualIsMap := valueAsMap(actual)
 	desiredMap, desiredIsMap := valueAsMap(desired)
 	// Recurse through maps before shortcutting equal parent objects. This lets
-	// the merge preserve independent nested edits and reject an explicit live
-	// null (which RFC 7396 would otherwise reinterpret as a deletion).
+	// the merge preserve independent nested edits while normalizing observed
+	// live null values at their individual paths.
 	if baseIsMap && actualIsMap && desiredIsMap {
 		keys := make(map[string]struct{}, len(baseMap)+len(actualMap)+len(desiredMap))
 		for key := range baseMap {

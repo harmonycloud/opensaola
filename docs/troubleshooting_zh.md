@@ -317,7 +317,7 @@ kubectl get mid <mid-name> -n <namespace> -o json | jq '{
 
 - 开始修改前，必须同时确认 `ReconcilePaused=True`、`.status.reconcilePause` 存在且带 `desiredSpec`、以及 `ReconcileAdoption` 不为 `False`。快照失败时先修复主 CR 缺失、渲染错误或大小超限。
 - `ReconcileAdoptionConflict` 表示暂停期间的实际改动与当前期望态修改了同一路径；确定最终值后再设置 `middleware.cn/resume-policy=merge`。
-- 其他 `ReconcileAdoption=False` 情况保持暂停，按 `message` 修复身份、渲染、JSON `null` 或大小问题后重试。
+- 其他 `ReconcileAdoption=False` 情况保持暂停，按 `message` 修复身份、渲染或大小问题后重试。
 - 仅含 CUE 的 PreAction 会在暂停快照/B/L/D 合并中以内存副本重放，可正常使用 `merge`，且不会执行外部操作。若任一 PreAction 含 CMD、HTTP 或其他非 CUE 步骤，`merge` 会失败关闭；应改为纯 CUE 预动作、将结果固化为显式期望态，或仅在明确接受覆盖暂停期间改动时使用 `apply`。
 - 仅明确接受覆盖暂停期间主 CR `spec` 变更时才使用 `resume-policy=apply`；不要直接移除 `suspend-reconcile`。
 - MO 不支持 B/L/D 合并：更新其期望配置后移除 `suspend-reconcile` 即恢复普通 reconcile。关联 MID 需单独处理。

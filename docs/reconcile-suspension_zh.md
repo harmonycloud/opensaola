@@ -11,7 +11,7 @@
 - **PreAction 边界：**暂停快照和 B/L/D 三方合并会在内存中的 MID 副本上重放仅含 CUE 的 PreAction，因此其对主 CR `spec` 的影响与正常主 CR 写入一致，且不会执行命令、HTTP 操作或 Kubernetes 写入。若任一 PreAction 含非 CUE 步骤（例如 CMD 或 HTTP），该 MID 的 `merge` 会失败关闭；应改为纯 CUE 预动作、将结果固化为 MID/Baseline 的显式期望值，或仅在明确接受覆盖暂停期间变更时使用 `apply`。
 - 不自动采纳 CR metadata、Configuration、PreAction 或 MiddlewareOperator 的变更；这些资源需要分别回写期望配置。
 - 暂停快照保存在 `.status.reconcilePause`，不依赖进程内缓存。
-- 快照和主实际 CR `spec` 输入上限均为 256 KiB。数组按整体比较，显式 JSON `null` 不自动采纳；两者都会失败关闭。
+- 快照和主实际 CR `spec` 输入上限均为 256 KiB，数组按整体比较。合并时，实际 CR 中观察到的显式 JSON `null` 会视为与暂停时的期望值一致，避免类型化 Operator 回写产生无意义的删除 override。
 - 若主 CR 被删除重建，或 GVK、名称、命名空间发生变化，恢复会失败关闭，绝不会把补丁套用到另一个对象。
 
 ## MID：暂停、修改和合并恢复
@@ -94,7 +94,7 @@ kubectl get mid <mid-name> -n <namespace> -o json | jq \
 ```
 
 - `ReconcileAdoptionConflict`：暂停期间的实际改动与当前期望态修改了同一路径。先在主 CR 或 MID/Baseline 期望态中确定最终值，再重新设置 `resume-policy=merge`。
-- `ReconcileSnapshotFailed` 或其他采纳失败：保持暂停，先修复提示的身份、渲染、大小或 JSON `null` 问题，再重试。
+- `ReconcileSnapshotFailed` 或其他采纳失败：保持暂停，先修复提示的身份、渲染或大小问题，再重试。
 
 不要通过直接删除暂停注解绕过失败的合并。只有明确接受暂停期间改动会被覆盖时，才使用 `apply`。
 

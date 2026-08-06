@@ -10,7 +10,7 @@ This runbook explains how to temporarily suspend child-resource writes for a Mid
 - **PreAction boundary:** the pause-snapshot and B/L/D merge renderer replays CUE-only PreActions on an in-memory MID copy, so their primary-CR `spec` effects match a normal primary-CR write without executing commands, HTTP actions, or Kubernetes writes. If any PreAction contains a non-CUE step (for example CMD or HTTP), `merge` fails closed. Make the action pure CUE, make its result an explicit MID/Baseline desired value, or use `apply` only when intentionally overwriting changes made during the pause.
 - It does not adopt changes to CR metadata, Configuration resources, PreActions, or MiddlewareOperator resources. Update their desired configuration separately.
 - The controller persists its pause snapshot in `.status.reconcilePause`; no in-process cache is required.
-- Snapshot and live primary-CR `spec` input are limited to 256 KiB. Arrays are compared as whole values, and an explicit JSON `null` is not automatically adopted. Both cases fail closed.
+- Snapshot and live primary-CR `spec` input are limited to 256 KiB. Arrays are compared as whole values. An explicit JSON `null` observed in the live CR is treated as unchanged from the pause-time desired state during merge, preventing typed-operator round trips from producing no-op deletion overrides.
 - If the primary CR is deleted/recreated, or its GVK, name, or namespace changes, recovery fails closed rather than applying a patch to a different object.
 
 ## MID: pause, modify, and merge
@@ -93,7 +93,7 @@ kubectl get mid <mid-name> -n <namespace> -o json | jq \
 ```
 
 - `ReconcileAdoptionConflict`: a change from the pause and current desired state changed the same path. Resolve the intended value in the primary CR or in MID/Baseline desired state, then request `resume-policy=merge` again.
-- `ReconcileSnapshotFailed` or another adoption failure: keep the pause in place and fix the reported identity, render, size, or JSON-`null` issue before retrying.
+- `ReconcileSnapshotFailed` or another adoption failure: keep the pause in place and fix the reported identity, render, or size issue before retrying.
 
 Never bypass a failed merge by directly removing the pause annotation. Use `apply` only after explicitly accepting that changes from the pause will be overwritten.
 

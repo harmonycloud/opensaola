@@ -317,7 +317,7 @@ kubectl get mid <mid-name> -n <namespace> -o json | jq '{
 
 - Before modifying the primary CR, confirm `ReconcilePaused=True`, a `.status.reconcilePause` with `desiredSpec`, and `ReconcileAdoption` not `False`. If capture failed, first fix the missing primary CR, render error, or size limit.
 - `ReconcileAdoptionConflict` means a live change made during the pause and current desired state changed the same path. Decide the intended value, then request `middleware.cn/resume-policy=merge` again.
-- For another `ReconcileAdoption=False`, keep the pause active and fix the identity, render, JSON-`null`, or size issue reported in `message` before retrying.
+- For another `ReconcileAdoption=False`, keep the pause active and fix the identity, render, or size issue reported in `message` before retrying.
 - CUE-only PreActions are replayed on an in-memory copy during pause snapshot/B/L/D merge and may modify the primary CR `spec` safely. If any PreAction contains CMD, HTTP, or another non-CUE step, `merge` fails closed. Make the action pure CUE, make its result explicit desired state, or use `apply` only when intentionally overwriting the change made during the pause.
 - Use `resume-policy=apply` only after explicitly accepting that the paused primary-CR `spec` changes will be overwritten; never remove `suspend-reconcile` directly.
 - An MO does not support B/L/D merging: update its desired configuration, then remove `suspend-reconcile` to resume ordinary reconciliation. Handle each related MID separately.

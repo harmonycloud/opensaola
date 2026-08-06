@@ -375,6 +375,120 @@ func TestPhaseFromGenericStatus(t *testing.T) {
 	}
 }
 
+func TestProjectEMQXV2beta1Status(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		status       string
+		previous     v1.Phase
+		wantPhase    v1.Phase
+		wantReplicas int
+		wantReason   string
+	}{
+		{
+			name: "latest ready condition wins over retained progressing condition",
+			status: `{
+				"conditions": [
+					{"type":"CoreNodesProgressing","status":"True","reason":"CreateNewStatefulSet","message":"Create new statefulSet","lastTransitionTime":"2026-08-06T04:27:33Z"},
+					{"type":"CoreNodesReady","status":"True","reason":"CoreNodesReady","message":"Core nodes is ready","lastTransitionTime":"2026-08-06T04:45:18Z"},
+					{"type":"Available","status":"True","reason":"Available","message":"Cluster is available","lastTransitionTime":"2026-08-06T04:45:20Z"},
+					{"type":"Ready","status":"True","reason":"Ready","message":"Cluster is ready","lastTransitionTime":"2026-08-06T04:45:21Z"}
+				],
+				"coreNodesStatus":{"replicas":3},
+				"replicantNodesStatus":{}
+			}`,
+			previous:     v1.PhaseCreating,
+			wantPhase:    v1.PhaseRunning,
+			wantReplicas: 3,
+			wantReason:   "Cluster is ready",
+		},
+		{
+			name: "core progression remains creating during first startup",
+			status: `{
+				"conditions":[{"type":"CoreNodesProgressing","status":"True","reason":"CreateNewStatefulSet","message":"Create new statefulSet","lastTransitionTime":"2026-08-06T04:27:33Z"}],
+				"coreNodesStatus":{"replicas":3}
+			}`,
+			previous:     v1.PhaseCreating,
+			wantPhase:    v1.PhaseCreating,
+			wantReplicas: 3,
+			wantReason:   "Create new statefulSet",
+		},
+		{
+			name: "core progression after running is updating",
+			status: `{
+				"conditions":[{"type":"CoreNodesProgressing","status":"True","reason":"UpdateStatefulSet","message":"Update exist statefulSet","lastTransitionTime":"2026-08-06T05:00:00Z"}],
+				"coreNodesStatus":{"replicas":3}
+			}`,
+			previous:     v1.PhaseRunning,
+			wantPhase:    v1.PhaseUpdating,
+			wantReplicas: 3,
+			wantReason:   "Update exist statefulSet",
+		},
+		{
+			name: "replicant replicas are included when configured",
+			status: `{
+				"conditions":[{"type":"Ready","status":"True","reason":"Ready","message":"Cluster is ready","lastTransitionTime":"2026-08-06T05:00:00Z"}],
+				"coreNodesStatus":{"replicas":3},
+				"replicantNodesStatus":{"replicas":2}
+			}`,
+			previous:     v1.PhaseUpdating,
+			wantPhase:    v1.PhaseRunning,
+			wantReplicas: 5,
+			wantReason:   "Cluster is ready",
+		},
+		{
+			name: "unknown true condition preserves previous phase",
+			status: `{
+				"conditions":[{"type":"FutureCondition","status":"True","reason":"Future","message":"Future transition","lastTransitionTime":"2026-08-06T05:00:00Z"}]
+			}`,
+			previous:   v1.PhaseRunning,
+			wantPhase:  v1.PhaseRunning,
+			wantReason: "Future transition",
+		},
+		{
+			name: "dated ready condition wins over malformed retained condition",
+			status: `{
+				"conditions":[
+					{"type":"FutureCondition","status":"True","message":"Malformed historical condition","lastTransitionTime":"not-a-time"},
+					{"type":"Ready","status":"True","reason":"Ready","message":"Cluster is ready","lastTransitionTime":"2026-08-06T05:00:00Z"}
+				]
+			}`,
+			previous:   v1.PhaseCreating,
+			wantPhase:  v1.PhaseRunning,
+			wantReason: "Cluster is ready",
+		},
+		{
+			name: "missing conditions preserve previous phase",
+			status: `{
+				"coreNodesStatus":{"replicas":3}
+			}`,
+			previous:     v1.PhaseRunning,
+			wantPhase:    v1.PhaseRunning,
+			wantReplicas: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := v1.CustomResources{}
+			projectEMQXV2beta1Status([]byte(tt.status), tt.previous, &got)
+
+			if got.Phase != tt.wantPhase {
+				t.Fatalf("phase = %q, want %q", got.Phase, tt.wantPhase)
+			}
+			if got.Replicas != tt.wantReplicas {
+				t.Fatalf("replicas = %d, want %d", got.Replicas, tt.wantReplicas)
+			}
+			if got.Reason != tt.wantReason {
+				t.Fatalf("reason = %q, want %q", got.Reason, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestOperatorOwnsCustomResourceStatus(t *testing.T) {
 	t.Parallel()
 

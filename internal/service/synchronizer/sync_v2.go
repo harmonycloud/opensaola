@@ -195,6 +195,109 @@ func phaseFromGenericStatus(status []byte, fallback v1.Phase) v1.Phase {
 	return phase
 }
 
+var emqxV2beta1GVK = schema.GroupVersionKind{
+	Group:   "apps.emqx.io",
+	Version: "v2beta1",
+	Kind:    "EMQX",
+}
+
+func isEMQXV2beta1(gvk schema.GroupVersionKind) bool {
+	return gvk == emqxV2beta1GVK
+}
+
+// latestTrueEMQXCondition follows the EMQX v2beta1 operator's status-machine
+// convention. The operator retains prior True conditions and orders them by
+// lastTransitionTime, so the newest True condition is the current lifecycle
+// state. In particular, a historical CoreNodesProgressing=True must not
+// override a later Ready=True.
+func latestTrueEMQXCondition(status []byte) (gjson.Result, bool) {
+	var (
+		latest        gjson.Result
+		latestTime    time.Time
+		found         bool
+		latestHasTime bool
+	)
+
+	for _, condition := range gjson.GetBytes(status, "conditions").Array() {
+		if condition.Get("status").String() != string(metav1.ConditionTrue) {
+			continue
+		}
+
+		conditionTime, err := time.Parse(time.RFC3339Nano, condition.Get("lastTransitionTime").String())
+		conditionHasTime := err == nil
+		if !found ||
+			(!latestHasTime && conditionHasTime) ||
+			(conditionHasTime && latestHasTime && conditionTime.After(latestTime)) {
+			latest = condition
+			latestTime = conditionTime
+			latestHasTime = conditionHasTime
+			found = true
+		}
+	}
+
+	return latest, found
+}
+
+func emqxProgressingPhase(previous v1.Phase) v1.Phase {
+	switch previous {
+	case v1.PhaseUnknown, v1.PhaseCreating, v1.PhaseChecking, v1.PhaseChecked:
+		return v1.PhaseCreating
+	default:
+		return v1.PhaseUpdating
+	}
+}
+
+// projectEMQXV2beta1Status projects the EMQX v2beta1 status machine into the
+// existing CustomResources compatibility fields. It intentionally leaves
+// top-level Middleware state and conditions to the main controller.
+func projectEMQXV2beta1Status(status []byte, previous v1.Phase, target *v1.CustomResources) {
+	if target == nil {
+		return
+	}
+
+	// The generic synchronizer only recognizes top-level replicas/size. EMQX
+	// reports core and optional replicant replica groups separately.
+	totalReplicas := int64(0)
+	hasReplicaStatus := false
+	for _, key := range []string{
+		"coreNodesStatus.replicas",
+		"replicantNodesStatus.replicas",
+	} {
+		if replicas := gjson.GetBytes(status, key); replicas.Exists() {
+			totalReplicas += replicas.Int()
+			hasReplicaStatus = true
+		}
+	}
+	if hasReplicaStatus {
+		target.Replicas = int(totalReplicas)
+	}
+
+	condition, ok := latestTrueEMQXCondition(status)
+	if !ok {
+		// status is intentionally rebuilt on every sync. Preserve the prior
+		// lifecycle phase when EMQX has not yet published a condition.
+		target.Phase = previous
+		return
+	}
+
+	if message := strings.TrimSpace(condition.Get("message").String()); message != "" {
+		target.Reason = message
+	} else {
+		target.Reason = strings.TrimSpace(condition.Get("reason").String())
+	}
+
+	switch condition.Get("type").String() {
+	case "Ready":
+		target.Phase = v1.PhaseRunning
+	case "Initialized", "CoreNodesProgressing", "CoreNodesReady", "ReplicantNodesProgressing", "ReplicantNodesReady", "Available":
+		target.Phase = emqxProgressingPhase(previous)
+	default:
+		// Do not invent a phase for future EMQX condition types. The source
+		// status remains visible through Reason and the last known phase is safe.
+		target.Phase = previous
+	}
+}
+
 // operatorOwnsCustomResourceStatus reports whether the primary custom resource
 // is managed by an external middleware operator. Its status is authoritative for
 // the Middleware lifecycle and must not be replaced by inferred Pod/PVC status.
@@ -318,7 +421,9 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	// no-operator Middleware, whose primary resource has no external controller
 	// status to own the lifecycle.
 	operatorOwnsStatus := operatorOwnsCustomResourceStatus(nowMid)
-	if operatorOwnsStatus {
+	if isEMQXV2beta1(nowCr.GroupVersionKind()) {
+		projectEMQXV2beta1Status(nowCrStatusBytes, previousPhase, &nowMid.Status.CustomResources)
+	} else if operatorOwnsStatus {
 		nowMid.Status.CustomResources.Phase = phaseFromGenericStatus(nowCrStatusBytes, previousPhase)
 	} else {
 		switch nowCr.GroupVersionKind() {

@@ -138,9 +138,23 @@ func TestMergePausedSpecTreatsNestedObservedNullAsAbsent(t *testing.T) {
 			},
 		},
 	}
-	actual := cloneJSONValue(base).(map[string]any)
-	actual["_statefulset"].(map[string]any)["spec"].(map[string]any)["selector"] = nil
-	desired := cloneJSONValue(base).(map[string]any)
+	actual, ok := cloneJSONValue(base).(map[string]any)
+	if !ok {
+		t.Fatalf("cloneJSONValue(base) type = %T, want map[string]any", cloneJSONValue(base))
+	}
+	statefulSet, ok := actual["_statefulset"].(map[string]any)
+	if !ok {
+		t.Fatalf("actual._statefulset type = %T, want map[string]any", actual["_statefulset"])
+	}
+	statefulSetSpec, ok := statefulSet["spec"].(map[string]any)
+	if !ok {
+		t.Fatalf("actual._statefulset.spec type = %T, want map[string]any", statefulSet["spec"])
+	}
+	statefulSetSpec["selector"] = nil
+	desired, ok := cloneJSONValue(base).(map[string]any)
+	if !ok {
+		t.Fatalf("cloneJSONValue(base) type = %T, want map[string]any", cloneJSONValue(base))
+	}
 
 	got, conflicts, err := mergePausedSpec(base, actual, desired)
 	if err != nil {
@@ -152,7 +166,15 @@ func TestMergePausedSpecTreatsNestedObservedNullAsAbsent(t *testing.T) {
 	if !reflect.DeepEqual(got, desired) {
 		t.Fatalf("merged spec = %#v, want %#v", got, desired)
 	}
-	if _, exists := got["_statefulset"].(map[string]any)["spec"].(map[string]any)["selector"]; exists {
+	gotStatefulSet, ok := got["_statefulset"].(map[string]any)
+	if !ok {
+		t.Fatalf("merged _statefulset type = %T, want map[string]any", got["_statefulset"])
+	}
+	gotStatefulSetSpec, ok := gotStatefulSet["spec"].(map[string]any)
+	if !ok {
+		t.Fatalf("merged _statefulset.spec type = %T, want map[string]any", gotStatefulSet["spec"])
+	}
+	if _, exists := gotStatefulSetSpec["selector"]; exists {
 		t.Fatalf("merged spec retained selector null: %#v", got)
 	}
 }

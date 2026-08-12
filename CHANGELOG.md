@@ -7,11 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-12
+
 ### Added
 - Reconciliation suspension and explicit MID recovery policies: `merge` replays CUE-only PreActions on an in-memory MID copy and adopts non-conflicting primary-CR `spec` changes made during a pause, while `apply` intentionally replays desired state.
 - Durable pause snapshots, `reconcileOverrides`, and reconciliation Conditions that fail closed on unsafe recovery.
 - Kind-aware Configuration disable lifecycle inventory: PVC/PV default to `orphan`, CRDs are hard-protected, and every other Kind defaults to `delete`; cleanup still requires a previously recorded, still-owned resource.
-- Reconciliation suspension and recovery runbooks in English and Chinese.
+- English and Chinese runbooks for reconciliation suspension and recovery.
+- EMQX v2beta1 status projection, including lifecycle phase, reason, and combined core/replicant replica counts.
+
+### Changed
+- Custom-resource watcher and status-synchronization sessions now use resource-scoped ownership and self-healing restart behavior across retries and leader handovers.
+
+### Fixed
+- Restored custom-resource status synchronization after watcher recovery, without allowing one Middleware cleanup to stop another resource sharing the same GVK and namespace.
+- Prevented a typed-nil panic while applying Configuration lifecycle management.
+- Allow template rendering to proceed with empty Kubernetes capabilities when discovery or the server version is unavailable, such as in unit tests or CI without a kubeconfig.
+- Treat observed live `spec` fields serialized as JSON `null` as unchanged during paused-reconciliation merges, preventing unintended override deletions.
 
 ### Known limitations
 - `resume-policy=merge` fails closed when any PreAction contains a non-CUE step (for example CMD or HTTP), because pause rendering must not execute external side effects. Make the action pure CUE, make its result explicit desired state, or use `apply` only when intentionally overwriting a change made during the pause.

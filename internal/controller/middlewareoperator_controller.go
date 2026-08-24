@@ -344,6 +344,16 @@ func (r *MiddlewareOperatorReconciler) handleDeployment(ctx context.Context, req
 	if err != nil {
 		return err
 	}
+	// Finalization removes the native Deployment before the owner object is gone.
+	// A Deployment event can therefore race with finalization; never treat that
+	// expected absence as drift and recreate Configuration resources.
+	if !mo.DeletionTimestamp.IsZero() {
+		log.FromContext(ctx).Info("skipping MiddlewareOperator deployment reconciliation because it is deleting",
+			"name", mo.Name,
+			"namespace", mo.Namespace,
+		)
+		return nil
+	}
 	if v1.IsReconcileSuspended(mo.GetAnnotations()) {
 		log.FromContext(ctx).Info("skipping MiddlewareOperator deployment reconciliation because it is suspended",
 			"name", mo.Name,

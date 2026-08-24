@@ -285,4 +285,11 @@ type GVK struct {
 	Version string `json:"version,omitempty"`
 	// Kind is the kind of the Kubernetes resource.
 	Kind string `json:"kind,omitempty"`
+	// StatusRules is an ordered list of CEL expressions used to project a custom
+	// resource's status into Middleware.status.customResources. Each rule returns
+	// null when it does not apply, or an object containing any of phase, reason,
+	// and replicas when it does. The first non-null result wins. A CEL conditional
+	// that chooses between an object and null must wrap its object branch in
+	// dyn({ ... }) so CEL can unify the conditional result type.
+	StatusRules []string `json:"statusRules,omitempty"`
 }

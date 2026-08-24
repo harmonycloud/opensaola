@@ -133,6 +133,41 @@ func TestCheck_GVKWithEmptyGroupVersionKind(t *testing.T) {
 	}
 }
 
+func TestCheck_GVKWithInvalidStatusRule(t *testing.T) {
+	ctx := context.Background()
+	m := newBaseline("test-baseline", []v1.GVK{
+		{
+			Name:        "my-resource",
+			Group:       "apps",
+			Version:     "v1",
+			Kind:        "Deployment",
+			StatusRules: []string{"object.status."},
+		},
+	})
+	s := newScheme()
+	cli := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(m).
+		WithStatusSubresource(m).
+		Build()
+
+	err := Check(ctx, cli, m)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	cond := findCondition(m.Status.Conditions, v1.CondTypeChecked)
+	if cond == nil {
+		t.Fatal("expected Checked condition to be set")
+	}
+	if cond.Status != metav1.ConditionFalse {
+		t.Errorf("expected ConditionFalse for invalid status rule, got %v", cond.Status)
+	}
+	if !strings.Contains(cond.Message, "status rules") {
+		t.Errorf("expected message containing status rules, got %q", cond.Message)
+	}
+}
+
 func TestCheck_Valid(t *testing.T) {
 	ctx := context.Background()
 	m := newBaseline("test-baseline", []v1.GVK{

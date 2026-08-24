@@ -20,6 +20,19 @@ spec:
       group: myoperator.example.com
       version: v1
       kind: MyCluster
+      # CEL runs in declaration order. `object` is the full MyCluster CR and
+      # `previous` is the prior Middleware.status.customResources. A null result
+      # continues to the next rule; the first returned object wins. The object
+      # branch needs dyn(...) because CEL otherwise cannot unify map and null.
+      statusRules:
+        - |
+          object.status.phase == "Ready"
+            ? dyn({
+                "phase": "Running",
+                "reason": object.status.message,
+                "replicas": int(object.status.replicas)
+              })
+            : null
   permissionScope: Namespace
   permissions:
     - serviceAccountName: my-operator-sa

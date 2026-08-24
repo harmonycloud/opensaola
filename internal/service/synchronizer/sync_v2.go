@@ -351,6 +351,12 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	}
 	tempCustomResources := deepcopy.Copy(nowMid.Status.CustomResources)
 	previousPhase := nowMid.Status.CustomResources.Phase
+	previousCustomResources, ok := tempCustomResources.(v1.CustomResources)
+	if !ok {
+		copyErr := fmt.Errorf("copy custom resources has unexpected type %T", tempCustomResources)
+		log.FromContext(ctx).Error(copyErr, "recomputeAndUpdateStatus")
+		return
+	}
 
 	nowCr, err := k8s.GetCustomResource(ctx, cli, cr.GetName(), cr.GetNamespace(), cr.GroupVersionKind())
 	if err != nil {
@@ -417,14 +423,35 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	}
 
 	// Operator-managed Middleware mirrors the primary CR lifecycle directly,
-	// regardless of the CR's GVK. Native workload derivation is reserved for
+	// regardless of the CR's GVK. A declared CEL status rule takes precedence
+	// over the generic projection. Native workload derivation is reserved for
 	// no-operator Middleware, whose primary resource has no external controller
 	// status to own the lifecycle.
 	operatorOwnsStatus := operatorOwnsCustomResourceStatus(nowMid)
-	if isEMQXV2beta1(nowCr.GroupVersionKind()) {
+	rulesDeclared := false
+	if operatorOwnsStatus {
+		nowMid.Status.CustomResources.Phase = phaseFromGenericStatus(nowCrStatusBytes, previousPhase)
+		var ruleErr error
+		rulesDeclared, ruleErr = applyDeclaredStatusRules(
+			ctx,
+			cli,
+			nowMid,
+			nowCr,
+			previousCustomResources,
+			&nowMid.Status.CustomResources,
+		)
+		if ruleErr != nil {
+			log.FromContext(ctx).Error(ruleErr, "recomputeAndUpdateStatus: evaluate declared status rules", "middleware", nowMid.Name)
+		}
+	}
+	if rulesDeclared {
+		// A declaration is authoritative even when it returns null or fails. The
+		// generic value above remains intact; do not combine it with a legacy
+		// GVK-specific projector.
+	} else if isEMQXV2beta1(nowCr.GroupVersionKind()) {
 		projectEMQXV2beta1Status(nowCrStatusBytes, previousPhase, &nowMid.Status.CustomResources)
 	} else if operatorOwnsStatus {
-		nowMid.Status.CustomResources.Phase = phaseFromGenericStatus(nowCrStatusBytes, previousPhase)
+		// The generic operator-managed projection was set above.
 	} else {
 		switch nowCr.GroupVersionKind() {
 		case appsv1.SchemeGroupVersion.WithKind("Deployment"):

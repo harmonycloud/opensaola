@@ -23,6 +23,7 @@ import (
 
 	"github.com/harmonycloud/opensaola/internal/cache"
 	"github.com/harmonycloud/opensaola/internal/service/packages"
+	"github.com/harmonycloud/opensaola/internal/service/statusrule"
 	"github.com/mohae/deepcopy"
 	"k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -49,11 +50,15 @@ func Check(ctx context.Context, cli client.Client, m *v1.MiddlewareOperatorBasel
 	if conditionChecked.Status != metav1.ConditionTrue || conditionChecked.ObservedGeneration < m.Generation {
 		if len(m.Spec.GVKs) > 0 {
 			var checkErrs []string
-			for _, gvk := range m.Spec.GVKs {
+			for index, gvk := range m.Spec.GVKs {
 				if gvk.Name == "" {
 					checkErrs = append(checkErrs, "name must not be empty")
-				} else if gvk.Group == "" || gvk.Version == "" || gvk.Kind == "" {
+				}
+				if gvk.Group == "" || gvk.Version == "" || gvk.Kind == "" {
 					checkErrs = append(checkErrs, "GVK must not be empty")
+				}
+				if err := statusrule.Validate(gvk.StatusRules); err != nil {
+					checkErrs = append(checkErrs, fmt.Sprintf("gvks[%d] status rules: %v", index, err))
 				}
 			}
 			if len(checkErrs) > 0 {

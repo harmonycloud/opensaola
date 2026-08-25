@@ -112,6 +112,134 @@ func collectOwnedPods(podList []corev1.Pod, candidates []ownerCandidate, middlew
 	return pods
 }
 
+func hasMiddlewareLabel(labels map[string]string, middlewareName string) bool {
+	for _, key := range GeneralLabelKeys {
+		if labels[key] == middlewareName {
+			return true
+		}
+	}
+	return false
+}
+
+// collectLabelSelectedPods returns Pods selected solely by one of OpenSaola's
+// recognized labels. A conflicting owner UID blocks this fallback, matching the
+// stale-resource safety behavior of collectOwnedPods.
+func collectLabelSelectedPods(podList []corev1.Pod, candidates []ownerCandidate, middlewareName string) map[string]corev1.Pod {
+	pods := make(map[string]corev1.Pod)
+	for _, pod := range podList {
+		_, conflicted := ownerReferencesMatch(pod.OwnerReferences, candidates...)
+		if conflicted || !hasMiddlewareLabel(pod.GetLabels(), middlewareName) {
+			continue
+		}
+		pods[pod.Name] = pod
+	}
+	return pods
+}
+
+// collectPodOwnerWorkloads resolves native workload ancestors for Pods already
+// selected by a recognized OpenSaola label. Some operators expose a label only
+// on a PodTemplate, not on the generated Deployment/StatefulSet/DaemonSet; the
+// Pod label remains the sole association signal and OwnerReferences provide the
+// safe native workload traversal.
+func collectPodOwnerWorkloads(
+	pods map[string]corev1.Pod,
+	replicaSetList []appsv1.ReplicaSet,
+	deploymentList []appsv1.Deployment,
+	statefulsetList []appsv1.StatefulSet,
+	daemonsetList []appsv1.DaemonSet,
+) (
+	map[string]appsv1.ReplicaSet,
+	map[string]appsv1.Deployment,
+	map[string]appsv1.StatefulSet,
+	map[string]appsv1.DaemonSet,
+) {
+	replicaSetsByUID := make(map[types.UID]appsv1.ReplicaSet, len(replicaSetList))
+	for _, replicaSet := range replicaSetList {
+		if replicaSet.UID != "" {
+			replicaSetsByUID[replicaSet.UID] = replicaSet
+		}
+	}
+	deploymentsByUID := make(map[types.UID]appsv1.Deployment, len(deploymentList))
+	for _, deployment := range deploymentList {
+		if deployment.UID != "" {
+			deploymentsByUID[deployment.UID] = deployment
+		}
+	}
+	statefulsetsByUID := make(map[types.UID]appsv1.StatefulSet, len(statefulsetList))
+	for _, statefulset := range statefulsetList {
+		if statefulset.UID != "" {
+			statefulsetsByUID[statefulset.UID] = statefulset
+		}
+	}
+	daemonsetsByUID := make(map[types.UID]appsv1.DaemonSet, len(daemonsetList))
+	for _, daemonset := range daemonsetList {
+		if daemonset.UID != "" {
+			daemonsetsByUID[daemonset.UID] = daemonset
+		}
+	}
+
+	replicaSets := make(map[string]appsv1.ReplicaSet)
+	deployments := make(map[string]appsv1.Deployment)
+	statefulsets := make(map[string]appsv1.StatefulSet)
+	daemonsets := make(map[string]appsv1.DaemonSet)
+	for _, pod := range pods {
+		for _, ownerReference := range pod.OwnerReferences {
+			if ownerReference.APIVersion != appsv1.SchemeGroupVersion.String() || ownerReference.UID == "" {
+				continue
+			}
+			switch ownerReference.Kind {
+			case "Deployment":
+				if deployment, found := deploymentsByUID[ownerReference.UID]; found {
+					deployments[deployment.Name] = deployment
+				}
+			case "ReplicaSet":
+				replicaSet, found := replicaSetsByUID[ownerReference.UID]
+				if !found {
+					continue
+				}
+				replicaSets[replicaSet.Name] = replicaSet
+				for _, parentReference := range replicaSet.OwnerReferences {
+					if parentReference.APIVersion != appsv1.SchemeGroupVersion.String() || parentReference.Kind != "Deployment" || parentReference.UID == "" {
+						continue
+					}
+					if deployment, found := deploymentsByUID[parentReference.UID]; found {
+						deployments[deployment.Name] = deployment
+					}
+				}
+			case "StatefulSet":
+				if statefulset, found := statefulsetsByUID[ownerReference.UID]; found {
+					statefulsets[statefulset.Name] = statefulset
+				}
+			case "DaemonSet":
+				if daemonset, found := daemonsetsByUID[ownerReference.UID]; found {
+					daemonsets[daemonset.Name] = daemonset
+				}
+			}
+		}
+	}
+
+	return replicaSets, deployments, statefulsets, daemonsets
+}
+
+func serviceSelectsAnyPod(service corev1.Service, pods map[string]corev1.Pod) bool {
+	if len(service.Spec.Selector) == 0 {
+		return false
+	}
+	for _, pod := range pods {
+		matched := true
+		for key, value := range service.Spec.Selector {
+			if pod.GetLabels()[key] != value {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
 func pvcBelongsToStatefulSet(pvc corev1.PersistentVolumeClaim, sts appsv1.StatefulSet) bool {
 	if !pvcNameMatchesStatefulSetClaimTemplate(pvc.Name, sts) {
 		return false
@@ -421,7 +549,6 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 			UID:        nowMid.UID,
 		},
 	}
-
 	// Operator-managed Middleware mirrors the primary CR lifecycle directly,
 	// regardless of the CR's GVK. A declared CEL status rule takes precedence
 	// over the generic projection. Native workload derivation is reserved for
@@ -497,11 +624,43 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		return
 	}
 
+	statefulsetList := cache.ListStatefulSets(nowMid.Namespace)
+	deploymentList := cache.ListDeployments(nowMid.Namespace)
+	daemonsetList := cache.ListDaemonSets(nowMid.Namespace)
+	replicaSetList := cache.ListReplicaSets(nowMid.Namespace)
+	podList := cache.ListPods(nowMid.Namespace)
+
+	// Start label-only associations from Pods, where a PodTemplate label is
+	// always rendered by Kubernetes even when an operator does not expose an
+	// equivalent top-level workload label.
+	labeledPods := collectLabelSelectedPods(podList, baseOwnerCandidates, nowMid.Name)
+	labeledReplicaSets, labeledDeployments, labeledStatefulsets, labeledDaemonsets := collectPodOwnerWorkloads(
+		labeledPods,
+		replicaSetList,
+		deploymentList,
+		statefulsetList,
+		daemonsetList,
+	)
+	for name, pod := range labeledPods {
+		pods[name] = pod
+	}
+	for name, replicaSet := range labeledReplicaSets {
+		replicaSets[name] = replicaSet
+	}
+	for name, deployment := range labeledDeployments {
+		deployments[name] = deployment
+	}
+	for name, statefulset := range labeledStatefulsets {
+		statefulsets[name] = statefulset
+	}
+	for name, daemonset := range labeledDaemonsets {
+		daemonsets[name] = daemonset
+	}
+
 	// StatefulSets — list from local cache, filter by ownerRef or label.
 	//
 	// Must full-list then filter locally: some middleware operators do not set
 	// middleware.cn/app labels, so pre-filtering by label would miss resources.
-	statefulsetList := cache.ListStatefulSets(nowMid.Namespace)
 	for _, statefulset := range statefulsetList {
 		matched, conflicted := ownerReferencesMatch(statefulset.OwnerReferences, baseOwnerCandidates...)
 		if matched {
@@ -526,7 +685,6 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	}
 
 	// Deployments — list from local cache, filter by ownerRef or label.
-	deploymentList := cache.ListDeployments(nowMid.Namespace)
 	for _, deployment := range deploymentList {
 		matched, conflicted := ownerReferencesMatch(deployment.OwnerReferences, baseOwnerCandidates...)
 		if matched {
@@ -551,7 +709,6 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 	}
 
 	// DaemonSets — list from local cache, filter by ownerRef or label.
-	daemonsetList := cache.ListDaemonSets(nowMid.Namespace)
 	for _, daemonset := range daemonsetList {
 		matched, conflicted := ownerReferencesMatch(daemonset.OwnerReferences, baseOwnerCandidates...)
 		if matched {
@@ -585,7 +742,6 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 			UID:        deployment.UID,
 		})
 	}
-	replicaSetList := cache.ListReplicaSets(nowMid.Namespace)
 	for name, replicaSet := range collectOwnedReplicaSets(replicaSetList, deploymentOwnerCandidates) {
 		replicaSets[name] = replicaSet
 	}
@@ -616,7 +772,6 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 			UID:        daemonset.UID,
 		})
 	}
-	podList := cache.ListPods(nowMid.Namespace)
 	for name, pod := range collectOwnedPods(podList, podOwnerCandidates, nowMid.Name) {
 		pods[name] = pod
 	}
@@ -633,7 +788,8 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		}
 	}
 
-	// Services — list from local cache, filter by ownerRef or label.
+	// Services — list from local cache, filter by ownerRef, label, or a selector
+	// that targets a Pod already selected by a recognized label.
 	serviceList := cache.ListServices(nowMid.Namespace)
 	for _, service := range serviceList {
 		matched, conflicted := ownerReferencesMatch(service.OwnerReferences, baseOwnerCandidates...)
@@ -644,11 +800,8 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		if conflicted {
 			continue
 		}
-		for _, key := range GeneralLabelKeys {
-			if service.GetLabels()[key] == nowMid.Name {
-				services[service.Name] = service
-				continue
-			}
+		if hasMiddlewareLabel(service.GetLabels(), nowMid.Name) || serviceSelectsAnyPod(service, pods) {
+			services[service.Name] = service
 		}
 	}
 	nowMid.Status.CustomResources.Include.Services = []v1.IncludeModel{}

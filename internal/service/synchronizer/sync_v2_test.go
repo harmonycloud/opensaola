@@ -329,6 +329,118 @@ func TestCollectOwnedPodsAllowsLabelFallbackForDifferentOwnerIdentity(t *testing
 	}
 }
 
+func TestLabeledPodsCollectNativeWorkloadAncestorsAndServices(t *testing.T) {
+	deployment := appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Name: "kong-dataplane", UID: types.UID("deployment-uid"),
+	}}
+	replicaSet := appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "kong-dataplane-7d8d9",
+		UID:  types.UID("replicaset-uid"),
+		OwnerReferences: []metav1.OwnerReference{{
+			APIVersion: appsv1.SchemeGroupVersion.String(),
+			Kind:       "Deployment",
+			Name:       deployment.Name,
+			UID:        deployment.UID,
+		}},
+	}}
+	statefulset := appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "example-stateful", UID: types.UID("statefulset-uid"),
+	}}
+	daemonset := appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "example-daemon", UID: types.UID("daemonset-uid"),
+	}}
+	pods := []corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{
+			Name: "kong-dataplane-7d8d9-abcde",
+			Labels: map[string]string{
+				v1.LabelApp:              "demo",
+				"app.kubernetes.io/name": "kong",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: appsv1.SchemeGroupVersion.String(),
+				Kind:       "ReplicaSet",
+				Name:       replicaSet.Name,
+				UID:        replicaSet.UID,
+			}},
+		}},
+		{ObjectMeta: metav1.ObjectMeta{
+			Name:   "example-stateful-0",
+			Labels: map[string]string{v1.LabelApp: "demo"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: appsv1.SchemeGroupVersion.String(),
+				Kind:       "StatefulSet",
+				Name:       statefulset.Name,
+				UID:        statefulset.UID,
+			}},
+		}},
+		{ObjectMeta: metav1.ObjectMeta{
+			Name:   "example-daemon-abcde",
+			Labels: map[string]string{v1.LabelApp: "demo"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: appsv1.SchemeGroupVersion.String(),
+				Kind:       "DaemonSet",
+				Name:       daemonset.Name,
+				UID:        daemonset.UID,
+			}},
+		}},
+		{ObjectMeta: metav1.ObjectMeta{
+			Name:   "stale-deployment-pod",
+			Labels: map[string]string{v1.LabelApp: "demo"},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: appsv1.SchemeGroupVersion.String(),
+				Kind:       "Deployment",
+				Name:       "recreated",
+				UID:        types.UID("old-deployment-uid"),
+			}},
+		}},
+	}
+	baseCandidates := []ownerCandidate{{
+		APIVersion: appsv1.SchemeGroupVersion.String(),
+		Kind:       "Deployment",
+		Name:       "recreated",
+		UID:        types.UID("new-deployment-uid"),
+	}}
+
+	labeledPods := collectLabelSelectedPods(pods, baseCandidates, "demo")
+	if len(labeledPods) != 3 {
+		t.Fatalf("got %d labeled Pods, want 3; stale owner must be excluded: %#v", len(labeledPods), labeledPods)
+	}
+	labeledReplicaSets, labeledDeployments, labeledStatefulsets, labeledDaemonsets := collectPodOwnerWorkloads(
+		labeledPods,
+		[]appsv1.ReplicaSet{replicaSet},
+		[]appsv1.Deployment{deployment},
+		[]appsv1.StatefulSet{statefulset},
+		[]appsv1.DaemonSet{daemonset},
+	)
+	if _, ok := labeledReplicaSets[replicaSet.Name]; !ok {
+		t.Fatal("expected labeled Pod to resolve its ReplicaSet")
+	}
+	if _, ok := labeledDeployments[deployment.Name]; !ok {
+		t.Fatal("expected labeled Pod to resolve its Deployment through ReplicaSet")
+	}
+	if _, ok := labeledStatefulsets[statefulset.Name]; !ok {
+		t.Fatal("expected labeled Pod to resolve its StatefulSet")
+	}
+	if _, ok := labeledDaemonsets[daemonset.Name]; !ok {
+		t.Fatal("expected labeled Pod to resolve its DaemonSet")
+	}
+
+	service := corev1.Service{Spec: corev1.ServiceSpec{
+		Selector: map[string]string{"app.kubernetes.io/name": "kong"},
+	}}
+	if !serviceSelectsAnyPod(service, labeledPods) {
+		t.Fatal("expected Service selector to resolve an already-labeled Pod")
+	}
+	if serviceSelectsAnyPod(corev1.Service{}, labeledPods) {
+		t.Fatal("a Service without a selector must not be associated")
+	}
+	if serviceSelectsAnyPod(corev1.Service{Spec: corev1.ServiceSpec{
+		Selector: map[string]string{"app.kubernetes.io/name": "other"},
+	}}, labeledPods) {
+		t.Fatal("an unrelated Service selector must not be associated")
+	}
+}
+
 func TestCustomResourcesFromStatusClearsMissingReason(t *testing.T) {
 	status := []byte(`{"phase":"Running"}`)
 

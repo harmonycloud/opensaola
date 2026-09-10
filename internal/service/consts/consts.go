@@ -39,9 +39,10 @@ const (
 type HandleAction string
 
 const (
-	HandleActionPublish HandleAction = "publish"
-	HandleActionDelete  HandleAction = "delete"
-	HandleActionUpdate  HandleAction = "update"
+	HandleActionPublish          HandleAction = "publish"
+	HandleActionDelete           HandleAction = "delete"
+	HandleActionUpdate           HandleAction = "update"
+	HandleActionSSACompatibility HandleAction = "ssa-compatibility"
 )
 
 const (

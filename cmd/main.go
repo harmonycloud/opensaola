@@ -267,6 +267,7 @@ func main() {
 	// Set APIReader for status update retries to bypass the informer cache,
 	// preventing stale-cache 409 loops under high concurrency.
 	k8s.SetStatusAPIReader(mgr.GetAPIReader())
+	k8s.ConfigureManagedResources(mgr.GetAPIReader())
 
 	if err = (&controller.MiddlewareOperatorBaselineReconciler{
 		Client:   mgr.GetClient(),

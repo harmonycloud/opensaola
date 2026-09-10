@@ -314,6 +314,15 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 	if middlewareoperator.IsNoOperatorResource(mo) {
 		return consts.NoOperator
 	}
+	ctx = k8s.WithSSACompatibilityTracking(ctx)
+	if k8s.SteadyStateSSAReady(generation, observedGeneration, mo.Status.State, mo.GetAnnotations(), wasReconcilePaused) &&
+		status.GetCondition(ctx, &mo.Status.Conditions, v1.CondTypeChecked).Status == metav1.ConditionTrue {
+		if err = k8s.RunSSACompatibility(ctx, r.Recorder, mo, func(ctx context.Context) error {
+			return middlewareoperator.ReconcileSSACompatibility(ctx, r.Client, mo)
+		}); err != nil {
+			return fmt.Errorf("SSA compatibility: %w", err)
+		}
+	}
 	// Compare generation
 	// observedGeneration == 0 means initial publish
 	// generation > observedGeneration or State == Updating means update is needed
@@ -333,6 +342,10 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 			clearReconcilePaused(&mo.Status.Conditions)
 		}
 		r.Recorder.Event(mo, "Normal", "Updated", "MiddlewareOperator updated successfully")
+	}
+
+	if err = k8s.MarkSSACompatible(ctx, r.Client, mo); err != nil {
+		return err
 	}
 
 	return nil

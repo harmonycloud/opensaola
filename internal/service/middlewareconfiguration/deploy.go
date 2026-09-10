@@ -22,6 +22,7 @@ import (
 
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
 
@@ -49,6 +50,10 @@ type renderedConfigurationApplyResult struct {
 // deliberate no-op; stale-object cleanup is performed by the caller from the
 // prior status inventory.
 func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act consts.HandleAction, m *v1.MiddlewareConfiguration) (*renderedConfigurationApplyResult, error) {
+	ownerObj, ok := owner.(client.Object)
+	if !ok {
+		return nil, fmt.Errorf("unsupported owner type %T", owner)
+	}
 	obj := new(unstructured.Unstructured)
 	if err := yaml.Unmarshal([]byte(m.Spec.Template), obj); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal CR: %w", err)
@@ -61,9 +66,10 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		resourceIsNamespaced bool
 		resourceScopeKnown   bool
 	)
-	namespaced, nsErr := k8s.IsNamespaced(obj)
+	mapping, nsErr := cli.RESTMapper().RESTMapping(obj.GroupVersionKind().GroupKind(), obj.GroupVersionKind().Version)
+	namespaced := nsErr == nil && mapping.Scope.Name() == meta.RESTScopeNameNamespace
 	if nsErr != nil {
-		if k8s.IsCRDNotInstalled(nsErr) {
+		if meta.IsNoMatchError(nsErr) || k8s.IsCRDNotInstalled(nsErr) {
 			log.FromContext(ctx).Info("CRD not installed in cluster, skipping namespace/owner-ref setup",
 				"kind", obj.GetKind(),
 				"apiVersion", obj.GetAPIVersion(),
@@ -113,6 +119,23 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		obj.SetAnnotations(tempAnnotations)
 	}
 
+	if act == consts.HandleActionSSACompatibility {
+		if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() {
+			setOwnerRef, ownerErr := shouldSetControllerReference(owner, old, m, obj)
+			if ownerErr != nil {
+				return nil, ownerErr
+			}
+			if setOwnerRef {
+				if err = ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
+					return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
+				}
+			} else {
+				obj.SetOwnerReferences(old.GetOwnerReferences())
+			}
+		}
+		return nil, k8s.NewManagedResourceWriter(cli).Reconcile(ctx, ownerObj, obj, m.Name, true)
+	}
+
 	switch act {
 	case consts.HandleActionPublish, consts.HandleActionUpdate:
 		disablePolicy, policyErr := configurationDisablePolicy(m, obj)
@@ -141,7 +164,7 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 					)
 				}
 			}
-			if err = k8s.PatchCustomResource(ctx, cli, obj); err != nil {
+			if err = k8s.NewManagedResourceWriter(cli).Reconcile(ctx, ownerObj, obj, m.Name, false); err != nil {
 				return nil, err
 			}
 			log.FromContext(ctx).V(1).Info(fmt.Sprintf("updated %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
@@ -151,7 +174,7 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 					return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
 				}
 			}
-			err = k8s.CreateCustomResource(ctx, cli, obj)
+			err = k8s.NewManagedResourceWriter(cli).Reconcile(ctx, ownerObj, obj, m.Name, false)
 			if err != nil && !errors.IsAlreadyExists(err) {
 				log.FromContext(ctx).V(1).Info(fmt.Sprintf("failed to create %s", obj.GetKind()), "obj", obj)
 				return nil, fmt.Errorf("failed to create CR: %w", err)

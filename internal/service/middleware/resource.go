@@ -364,7 +364,7 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 			log.FromContext(ctx).Error(err, "CustomResource set controller reference error", status.DiagnosticLogValues(err)...)
 			return err
 		}
-		err = k8s.CreateOrPatchCustomResource(ctx, cli, cr)
+		err = k8s.NewManagedResourceWriter(cli).Reconcile(ctx, m, cr, "", false)
 		if err != nil && !apiErrors.IsAlreadyExists(err) {
 			// Stop watching
 			err = status.WrapDiagnostic(err, status.Diagnostic{

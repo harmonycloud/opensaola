@@ -157,11 +157,11 @@ func TestBuildCustomResource_CreateFailureWritesApplyClusterDiagnostic(t *testin
 		WithStatusSubresource(&v1.Middleware{}).
 		WithObjects(baseline, mid).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 				if obj.GetObjectKind().GroupVersionKind().Kind == "Deployment" {
 					return errors.New("admission denied: replicas exceeds namespace quota")
 				}
-				return c.Create(ctx, obj, opts...)
+				return c.Patch(ctx, obj, patch, opts...)
 			},
 		}).
 		Build()

@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-func deleteTemplateLineValues(template string) (apiVersion string, kind string, nameExpr string) {
+func deleteTemplateLineValues(template string) (apiVersion string, kind string, nameExpr string, namespaceExpr string) {
 	lines := strings.Split(template, "\n")
 	metadataIndent := -1
 	for _, line := range lines {
@@ -67,9 +67,13 @@ func deleteTemplateLineValues(template string) (apiVersion string, kind string, 
 				nameExpr = strings.TrimSpace(strings.TrimPrefix(trimmed, "name:"))
 				continue
 			}
+			if namespaceExpr == "" && strings.HasPrefix(trimmed, "namespace:") {
+				namespaceExpr = strings.TrimSpace(strings.TrimPrefix(trimmed, "namespace:"))
+				continue
+			}
 		}
 	}
-	return apiVersion, kind, nameExpr
+	return apiVersion, kind, nameExpr, namespaceExpr
 }
 
 func normalizeRenderedName(s string) string {
@@ -162,8 +166,8 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 			continue
 		}
 
-		apiVersion, kind, nameExpr := deleteTemplateLineValues(mc.Spec.Template)
-		log.FromContext(ctx).Info("extracted delete info from configuration template", "cfgName", cfg.Name, "apiVersion", apiVersion, "kind", kind, "nameExpr", nameExpr)
+		apiVersion, kind, nameExpr, namespaceExpr := deleteTemplateLineValues(mc.Spec.Template)
+		log.FromContext(ctx).Info("extracted delete info from configuration template", "cfgName", cfg.Name, "apiVersion", apiVersion, "kind", kind, "nameExpr", nameExpr, "namespaceExpr", namespaceExpr)
 		if apiVersion == "" || kind == "" {
 			errList = append(errList, fmt.Sprintf("configuration %s missing apiVersion/kind", cfg.Name))
 			continue
@@ -194,7 +198,19 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 			}
 		}
 
-		// Determine if the resource is namespaced: if so, use namespace=owner.Namespace; otherwise leave empty
+		// Mirror the apply-time namespace semantics: an explicit template namespace
+		// wins; otherwise the resource lives in the owner's namespace.
+		renderedNS := ""
+		if namespaceExpr != "" {
+			if n, renderErr := tools.TemplateParse(ctx, namespaceExpr, &templateValues); renderErr == nil {
+				renderedNS = normalizeRenderedName(n)
+			} else {
+				log.FromContext(ctx).Info("failed to render configuration delete namespace, falling back to owner namespace", "warning", true, "cfgName", cfg.Name, "namespaceExpr", namespaceExpr, "err", renderErr)
+			}
+		}
+
+		// Determine if the resource is namespaced: a template-specified namespace
+		// wins (same rule as apply); otherwise default to the owner's namespace.
 		ns := ""
 		tmp := new(unstructured.Unstructured)
 		tmp.SetGroupVersionKind(gvk)
@@ -210,7 +226,11 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 			continue
 		}
 		if namespaced {
-			ns = owner.GetNamespace()
+			if renderedNS != "" {
+				ns = renderedNS
+			} else {
+				ns = owner.GetNamespace()
+			}
 		}
 		log.FromContext(ctx).Info("configuration delete target resolved", "cfgName", cfg.Name, "gvk", gvk.String(), "renderedName", renderedName, "namespaced", namespaced, "namespace", ns)
 

@@ -144,7 +144,7 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		}
 
 		if isExists {
-			if resourceIsNamespaced {
+			if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() {
 				setOwnerRef, ownerErr := shouldSetControllerReference(owner, old, m, obj)
 				if ownerErr != nil {
 					return nil, ownerErr
@@ -169,7 +169,7 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 			}
 			log.FromContext(ctx).V(1).Info(fmt.Sprintf("updated %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
 		} else {
-			if resourceIsNamespaced {
+			if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() {
 				if err = ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
 					return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
 				}

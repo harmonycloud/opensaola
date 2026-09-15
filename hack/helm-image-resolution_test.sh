@@ -84,22 +84,40 @@ rendered="$(helm template opensaola "${chart}" --namespace middleware-operator \
 assert_image "${rendered}" 'manager.example.com/operators/opensaola:dev'
 assert_image "${rendered}" 'tools.example.com/platform-tools/kubectl:v1.30.14'
 
-assert_template_fails 'empty manager registry' 'manager image registry is required' \
+rendered="$(helm template opensaola "${chart}" --namespace middleware-operator \
   --set-string global.registry=/ \
   --set-string image.registry=/ \
-  --set-string kubectl.image.registry=tools.example.com
-assert_template_fails 'empty manager repository prefix' 'manager image repository prefix is required' \
+  --set-string kubectl.image.registry=tools.example.com)"
+assert_image "${rendered}" 'harmonycloud/opensaola:dev'
+assert_image "${rendered}" 'tools.example.com/harmonycloud/kubectl:v1.30.14'
+
+rendered="$(helm template opensaola "${chart}" --namespace middleware-operator \
   --set-string global.repository=/ \
   --set-string image.repository=/ \
-  --set-string kubectl.image.repository=platform-tools
-assert_template_fails 'empty kubectl registry' 'kubectl image registry is required' \
+  --set-string kubectl.image.repository=platform-tools)"
+assert_image "${rendered}" 'ghcr.io/opensaola:dev'
+assert_image "${rendered}" 'ghcr.io/platform-tools/kubectl:v1.30.14'
+
+rendered="$(helm template opensaola "${chart}" --namespace middleware-operator \
   --set-string global.registry=/ \
   --set-string image.registry=manager.example.com \
-  --set-string kubectl.image.registry=/
-assert_template_fails 'empty kubectl repository prefix' 'kubectl image repository prefix is required' \
+  --set-string kubectl.image.registry=/)"
+assert_image "${rendered}" 'manager.example.com/harmonycloud/opensaola:dev'
+assert_image "${rendered}" 'harmonycloud/kubectl:v1.30.14'
+
+rendered="$(helm template opensaola "${chart}" --namespace middleware-operator \
   --set-string global.repository=/ \
   --set-string image.repository=operators \
-  --set-string kubectl.image.repository=/
+  --set-string kubectl.image.repository=/)"
+assert_image "${rendered}" 'ghcr.io/operators/opensaola:dev'
+assert_image "${rendered}" 'ghcr.io/kubectl:v1.30.14'
+
+rendered="$(helm template opensaola "${chart}" --namespace middleware-operator \
+  --set-string global.registry=/ \
+  --set-string global.repository=/)"
+assert_image "${rendered}" 'opensaola:dev'
+assert_image "${rendered}" 'kubectl:v1.30.14'
+
 assert_template_fails_with_fragments 'manager image name override' 'name' 'not allowed' -- \
   --set-string image.name=manager-replacement
 assert_template_fails_with_fragments 'kubectl image name override' 'name' 'not allowed' -- \
@@ -107,5 +125,5 @@ assert_template_fails_with_fragments 'kubectl image name override' 'name' 'not a
 
 echo 'PASS: Helm image prefixes resolve with fixed image names'
 echo 'PASS: Helm image prefixes trim surrounding whitespace and slashes'
-echo 'PASS: Helm rejects every empty resolved image prefix'
+echo 'PASS: Helm omits empty image prefix segments'
 echo 'PASS: Helm schema rejects manager and kubectl image name overrides'

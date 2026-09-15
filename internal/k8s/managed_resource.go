@@ -1,3 +1,19 @@
+/*
+Copyright 2025 The OpenSaola Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package k8s
 
 import (
@@ -41,6 +57,16 @@ func NewManagedResourceWriter(cli client.Client) *ManagedResourceWriter {
 }
 func migrationBlocked(format string, args ...any) error {
 	return fmt.Errorf("SSA compatibility blocked: "+format, args...)
+}
+
+// deepCopyClientObject deep-copies a client.Object without an unchecked type
+// assertion; the copy always keeps the concrete type, so a mismatch is a bug.
+func deepCopyClientObject(owner client.Object) (client.Object, error) {
+	fresh, ok := owner.DeepCopyObject().(client.Object)
+	if !ok {
+		return nil, migrationBlocked("owner deep copy lost client.Object: %T", owner.DeepCopyObject())
+	}
+	return fresh, nil
 }
 func verifyManagedIdentity(owner client.Object, live *unstructured.Unstructured) error {
 	kind := ""
@@ -89,7 +115,10 @@ func (w *ManagedResourceWriter) Reconcile(ctx context.Context, owner client.Obje
 		return nil
 	}
 	for attempt := 0; attempt < 5; attempt++ {
-		fresh := owner.DeepCopyObject().(client.Object)
+		fresh, err := deepCopyClientObject(owner)
+		if err != nil {
+			return err
+		}
 		if err := w.Reader.Get(ctx, client.ObjectKeyFromObject(owner), fresh); err != nil {
 			return err
 		}
@@ -108,7 +137,7 @@ func (w *ManagedResourceWriter) Reconcile(ctx context.Context, owner client.Obje
 		}
 		live := &unstructured.Unstructured{}
 		live.SetGroupVersionKind(desired.GroupVersionKind())
-		err := w.Reader.Get(ctx, client.ObjectKeyFromObject(desired), live)
+		err = w.Reader.Get(ctx, client.ObjectKeyFromObject(desired), live)
 		var trustedUID types.UID
 		if apierrors.IsNotFound(err) {
 			if compatibilityOnly && (configuration != "" || isImmutableResource(desired)) {

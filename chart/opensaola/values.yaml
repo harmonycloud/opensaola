@@ -1,8 +1,11 @@
 # OpenSaola Helm Chart Values
 # OpenSaola Helm Chart 配置项
 
-# -- Global image prefix configuration
-# -- 全局镜像前缀配置
+# -- Global image prefix configuration. Both values may be empty: an empty
+# registry defers to the container runtime default (docker.io) or node-local
+# images, and an empty repository renders bare image names.
+# -- 全局镜像前缀配置。两者均可为空：registry 为空时交给容器运行时默认仓库
+# -- （docker.io）或节点本地镜像解析，repository 为空时输出裸镜像名。
 global:
   registry: "ghcr.io"
   repository: harmonycloud

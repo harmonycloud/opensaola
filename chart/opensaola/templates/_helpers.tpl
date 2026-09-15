@@ -50,26 +50,29 @@ Namespace where middleware package Secrets live. Empty value defaults to the rel
 
 {{/*
 Operator image.
-控制器镜像。
+控制器镜像。registry 与 repository 均可为空：空段直接省略，
+空 registry 表示交给容器运行时的默认仓库（如 docker.io）或本地镜像解析。
 */}}
 {{- define "opensaola.image" -}}
 {{- $registry := default .Values.global.registry .Values.image.registry | trim | trimAll "/" -}}
 {{- $repository := default .Values.global.repository .Values.image.repository | trim | trimAll "/" -}}
-{{- $registry = required "manager image registry is required" $registry -}}
-{{- $repository = required "manager image repository prefix is required" $repository -}}
-{{- printf "%s/%s/opensaola:%s" $registry $repository (.Values.image.tag | default .Chart.AppVersion) -}}
+{{- $image := "opensaola" -}}
+{{- if $repository -}}{{- $image = printf "%s/%s" $repository $image -}}{{- end -}}
+{{- if $registry -}}{{- $image = printf "%s/%s" $registry $image -}}{{- end -}}
+{{- printf "%s:%s" $image (.Values.image.tag | default .Chart.AppVersion) -}}
 {{- end }}
 
 {{/*
 Kubectl image used by the CRD hook job.
-CRD 钩子 Job 使用的 kubectl 镜像。
+CRD 钩子 Job 使用的 kubectl 镜像。与控制器镜像一样支持空 registry/repository。
 */}}
 {{- define "opensaola.kubectlImage" -}}
 {{- $registry := default .Values.global.registry .Values.kubectl.image.registry | trim | trimAll "/" -}}
 {{- $repository := default .Values.global.repository .Values.kubectl.image.repository | trim | trimAll "/" -}}
-{{- $registry = required "kubectl image registry is required" $registry -}}
-{{- $repository = required "kubectl image repository prefix is required" $repository -}}
-{{- printf "%s/%s/kubectl:%s" $registry $repository .Values.kubectl.image.tag -}}
+{{- $image := "kubectl" -}}
+{{- if $repository -}}{{- $image = printf "%s/%s" $repository $image -}}{{- end -}}
+{{- if $registry -}}{{- $image = printf "%s/%s" $registry $image -}}{{- end -}}
+{{- printf "%s:%s" $image .Values.kubectl.image.tag -}}
 {{- end }}
 
 {{/*

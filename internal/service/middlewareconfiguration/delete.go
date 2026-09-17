@@ -178,7 +178,7 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 		if gvk.Kind == "CustomResourceDefinition" {
 			continue
 		}
-		deletePolicy := configurationPolicy(&mc, nil, v1.AnnotationConfigurationDeletePolicy)
+		deletePolicy := resolveConfigurationDeletePolicy(&mc, nil)
 
 		templateValues := *templateValuesBase
 		// Avoid nil pointer from missing values in template .Values.xxx: ensure map exists (missing keys may still be nil)

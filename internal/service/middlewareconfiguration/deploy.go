@@ -120,31 +120,21 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 	}
 
 	if act == consts.HandleActionSSACompatibility {
+		stripOrphanOwnerRef := false
 		if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() {
-			setOwnerRef, ownerErr := shouldSetControllerReference(owner, old, m, obj)
-			if ownerErr != nil {
-				return nil, ownerErr
+			disablePolicy, policyErr := configurationDisablePolicy(m, obj)
+			if policyErr != nil {
+				return nil, policyErr
 			}
-			if setOwnerRef {
-				if err = ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
-					return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
+			if disablePolicy == v1.ConfigurationDisablePolicyOrphan {
+				// Resources meant to outlive their owner must stay outside the
+				// owner's garbage-collection domain; migrate any controller
+				// reference we set in an earlier revision.
+				if old != nil {
+					obj.SetOwnerReferences(removeControllerOwnerReference(old.GetOwnerReferences(), owner))
+					stripOrphanOwnerRef = true
 				}
 			} else {
-				obj.SetOwnerReferences(old.GetOwnerReferences())
-			}
-		}
-		return nil, k8s.NewManagedResourceWriter(cli).Reconcile(ctx, ownerObj, obj, m.Name, true)
-	}
-
-	switch act {
-	case consts.HandleActionPublish, consts.HandleActionUpdate:
-		disablePolicy, policyErr := configurationDisablePolicy(m, obj)
-		if policyErr != nil {
-			return nil, policyErr
-		}
-
-		if isExists {
-			if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() {
 				setOwnerRef, ownerErr := shouldSetControllerReference(owner, old, m, obj)
 				if ownerErr != nil {
 					return nil, ownerErr
@@ -155,21 +145,68 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 					}
 				} else {
 					obj.SetOwnerReferences(old.GetOwnerReferences())
-					log.FromContext(ctx).Info("patching configuration resource without taking controller ownership",
-						"configuration", m.Name,
-						"gvk", obj.GroupVersionKind().String(),
-						"namespace", obj.GetNamespace(),
-						"name", obj.GetName(),
-						"controllerOwner", metav1.GetControllerOf(old),
-					)
+				}
+			}
+		}
+		if err = k8s.NewManagedResourceWriter(cli).Reconcile(ctx, ownerObj, obj, m.Name, true); err != nil {
+			return nil, err
+		}
+		if stripOrphanOwnerRef {
+			if err = stripLiveControllerOwnerReference(ctx, cli, obj, owner); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	}
+
+	switch act {
+	case consts.HandleActionPublish, consts.HandleActionUpdate:
+		disablePolicy, policyErr := configurationDisablePolicy(m, obj)
+		if policyErr != nil {
+			return nil, policyErr
+		}
+
+		if isExists {
+			stripOrphanOwnerRef := false
+			if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() {
+				if disablePolicy == v1.ConfigurationDisablePolicyOrphan {
+					// Keep orphan-marked resources out of the owner's
+					// garbage-collection domain; drop a controller reference we
+					// set in an earlier revision.
+					obj.SetOwnerReferences(removeControllerOwnerReference(old.GetOwnerReferences(), owner))
+					stripOrphanOwnerRef = true
+				} else {
+					setOwnerRef, ownerErr := shouldSetControllerReference(owner, old, m, obj)
+					if ownerErr != nil {
+						return nil, ownerErr
+					}
+					if setOwnerRef {
+						if err = ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
+							return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
+						}
+					} else {
+						obj.SetOwnerReferences(old.GetOwnerReferences())
+						log.FromContext(ctx).Info("patching configuration resource without taking controller ownership",
+							"configuration", m.Name,
+							"gvk", obj.GroupVersionKind().String(),
+							"namespace", obj.GetNamespace(),
+							"name", obj.GetName(),
+							"controllerOwner", metav1.GetControllerOf(old),
+						)
+					}
 				}
 			}
 			if err = k8s.NewManagedResourceWriter(cli).Reconcile(ctx, ownerObj, obj, m.Name, false); err != nil {
 				return nil, err
 			}
+			if stripOrphanOwnerRef {
+				if err = stripLiveControllerOwnerReference(ctx, cli, obj, owner); err != nil {
+					return nil, err
+				}
+			}
 			log.FromContext(ctx).V(1).Info(fmt.Sprintf("updated %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
 		} else {
-			if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() {
+			if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() && disablePolicy != v1.ConfigurationDisablePolicyOrphan {
 				if err = ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
 					return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
 				}
@@ -221,13 +258,14 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 			if obj.GroupVersionKind().Kind == "CustomResourceDefinition" {
 				return nil, nil
 			}
-			deletePolicy := configurationPolicy(m, obj, v1.AnnotationConfigurationDeletePolicy)
+			deletePolicy := resolveConfigurationDeletePolicy(m, obj)
 			if !shouldDeleteRenderedResource(owner, old, m.Name, deletePolicy) {
-				log.FromContext(ctx).Info("skipping configuration rendered resource delete because it is not owned by OpenSaola lifecycle",
+				log.FromContext(ctx).Info("skipping configuration rendered resource delete",
 					"configuration", m.Name,
 					"gvk", obj.GroupVersionKind().String(),
 					"namespace", old.GetNamespace(),
 					"name", old.GetName(),
+					"deletePolicy", deletePolicy,
 					"controllerOwner", metav1.GetControllerOf(old),
 				)
 				return nil, nil

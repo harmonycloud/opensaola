@@ -346,7 +346,7 @@ Final Kubernetes Resource YAML
 When a Configuration template conditionally renders empty, or its reference is removed by a Baseline/MID/MO, that is a
 feature-disable event rather than deletion of the MID/MO. A resource manifest's `metadata.annotations` inside
 `spec.template` takes precedence over `MiddlewareConfiguration.metadata.annotations`; do not manually add a policy annotation
-to an existing live resource because the controller does not read it:
+to an existing live resource to change disable behavior: disable cleanup uses the policy recorded during successful rendering.
 
 | Policy | Trigger | Default/Behavior | Deletion protection |
 |--------|---------|------------------|---------------------|
@@ -371,6 +371,17 @@ retroactively deleted after upgrade; it must first reconcile successfully to use
 `MiddlewareConfiguration.spec.template` alone does not trigger owner reconciliation; a MID/MO reference change or another
 owner event must do so. “No longer referenced” means only that OpenSaola no longer renders the Configuration, not that the
 controller has proven no other cluster consumer exists.
+
+Same-namespace resources must also match the controller ownerReference. Cross-namespace and cluster-scoped resources use
+the inventory UIDs and source markers without requiring a cross-namespace ownerReference; an external controller still
+prevents disable cleanup. On MID/MO deletion, policy is read from the live resource with the MCF metadata as fallback.
+An explicit `configurationDeletePolicy` takes precedence; otherwise `configurationDisablePolicy=orphan` also retains it.
+
+An already-disabled cross-namespace resource whose inventory was lost in an older version is not automatically deleted
+by upgrading or retrying. After checking its identity and current use, and only if reapplying the configuration is acceptable,
+restore the original reference/rendering, wait for successful reconciliation, verify the recorded resource UID matches
+the live resource, and disable it again. Review resources that cannot safely be reapplied individually; do not bulk-delete
+them by name labels.
 
 ---
 

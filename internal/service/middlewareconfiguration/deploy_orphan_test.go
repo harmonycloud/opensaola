@@ -23,6 +23,7 @@ import (
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -223,5 +224,59 @@ func TestDeleteTemplateRenderedResourcesKeepsOrphanResource(t *testing.T) {
 	cm := &corev1.ConfigMap{}
 	if err := cli.Get(context.Background(), client.ObjectKey{Namespace: "mv1", Name: "shared-sample"}, cm); err != nil {
 		t.Fatalf("orphan resource must survive the owner delete cleanup: %v", err)
+	}
+}
+
+// Exercise the owner deletion entry point, including its list fallback, with
+// policies on the actual rendered object rather than only the MCF metadata.
+func TestDeleteTemplateRenderedResourcePolicies(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		top     map[string]string
+		live    map[string]string
+		deleted bool
+	}{
+		{name: "resource disable orphan", live: map[string]string{v1.AnnotationConfigurationDisablePolicy: "orphan"}},
+		{name: "resource delete orphan", live: map[string]string{v1.AnnotationConfigurationDeletePolicy: "orphan"}},
+		{name: "resource delete overrides top orphan", top: map[string]string{v1.AnnotationConfigurationDeletePolicy: "orphan"}, live: map[string]string{v1.AnnotationConfigurationDeletePolicy: "delete"}, deleted: true},
+		{name: "resource orphan overrides top delete", top: map[string]string{v1.AnnotationConfigurationDeletePolicy: "delete"}, live: map[string]string{v1.AnnotationConfigurationDeletePolicy: "orphan"}},
+		{name: "explicit top delete overrides disable orphan", top: map[string]string{v1.AnnotationConfigurationDeletePolicy: "delete"}, live: map[string]string{v1.AnnotationConfigurationDisablePolicy: "orphan"}, deleted: true},
+		{name: "default deletes", deleted: true},
+	}
+	for _, tt := range tests {
+		for _, path := range []string{"by-name", "fallback"} {
+			t.Run(tt.name+"/"+path, func(t *testing.T) {
+				t.Parallel()
+				owner := testMiddleware()
+				owner.Labels = map[string]string{v1.LabelPackageName: "redis"}
+				owner.Spec.Configurations = []v1.Configuration{{Name: "redis-sentinel-configmap"}}
+				cfg := orphanTestConfig(tt.top)
+				cfg.Labels = map[string]string{v1.LabelPackageName: "redis"}
+				name := "shared-sample"
+				if path == "fallback" {
+					name = "previous-name"
+				}
+				annotations := map[string]string{v1.LabelConfigurations: cfg.Name}
+				for k, v := range tt.live {
+					annotations[k] = v
+				}
+				existing := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+					Name: name, Namespace: "mv1", Labels: map[string]string{v1.LabelApp: owner.Name}, Annotations: annotations,
+				}}
+				cli := orphanTestClient(t, owner, cfg, existing)
+				if err := DeleteTemplateRenderedResources(context.Background(), cli, owner, owner); err != nil {
+					t.Fatal(err)
+				}
+				err := cli.Get(context.Background(), client.ObjectKeyFromObject(existing), &corev1.ConfigMap{})
+				if tt.deleted {
+					if !apierrors.IsNotFound(err) {
+						t.Fatalf("expected deletion, got %v", err)
+					}
+				} else if err != nil {
+					t.Fatalf("expected retained resource, got %v", err)
+				}
+			})
+		}
 	}
 }

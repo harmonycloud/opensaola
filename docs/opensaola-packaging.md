@@ -345,7 +345,7 @@ MiddlewareConfiguration.spec.template （只能访问 .Values 和 .Globe）
 
 Configuration 模板通过条件渲染为空、或其引用被 Baseline/MID/MO 移除时，属于“功能停用”，并不等同于
 删除 MID/MO。`spec.template` 内资源清单的 `metadata.annotations` 优先于
-`MiddlewareConfiguration.metadata.annotations`；不要给已经存在的 live 资源手工设置策略注解，控制器不会读取它：
+`MiddlewareConfiguration.metadata.annotations`。停用清理使用成功渲染时记录的策略，手工修改 live 资源注解不会更新这份记录：
 
 | 策略 | 触发时机 | 默认/行为 | 删除保护 |
 |------|----------|-----------|----------|
@@ -369,6 +369,15 @@ metadata:
 reconcile 一次才能采用新默认。直接修改 `MiddlewareConfiguration.spec.template` 不会单独触发 owner reconcile；
 需要由 MID/MO 引用变更或其他 owner 事件触发。这里的“不再引用”只表示 OpenSaola 不再渲染该 Configuration，
 不代表控制器会扫描集群确认没有其他消费者。
+
+同命名空间资源还需匹配 controller ownerReference；跨命名空间和集群级资源使用清单中的 UID 及来源标记
+校验，不要求跨命名空间 ownerReference，但仍拒绝清理带外部 controller 的资源。MID/MO 删除时则读取实际
+资源上的策略，并以 MCF 顶层策略作为回退；显式 `configurationDeletePolicy` 优先，否则
+`configurationDisablePolicy=orphan` 也会保留资源。
+
+旧版本已经停用、且状态清单已丢失的跨命名空间残留，不会仅因升级或重试自动删除。需要核实其身份和当前
+用途后，在允许重新应用配置的前提下恢复原配置引用/渲染，等待成功 reconcile 并确认清单中的资源 UID
+与现存资源一致，再停用配置。无法安全重新应用的资源应单独审查处理，不按名称标签批量删除。
 
 ---
 

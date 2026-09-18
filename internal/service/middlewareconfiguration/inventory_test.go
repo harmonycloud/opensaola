@@ -232,3 +232,57 @@ func TestNormalizeRenderedConfigurationResourcesRejectsSharedIdentity(t *testing
 		t.Fatal("expected duplicate rendered resource identity to be rejected")
 	}
 }
+
+func TestDeleteDisabledCrossNamespaceResources(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		mutate        func(*unstructured.Unstructured)
+		sameNamespace bool
+		deleted       bool
+	}{
+		{name: "cross namespace valid identity", deleted: true},
+		{name: "same namespace missing controller", sameNamespace: true},
+		{name: "replacement UID", mutate: func(o *unstructured.Unstructured) { o.SetUID("replacement") }},
+		{name: "wrong owner UID", mutate: func(o *unstructured.Unstructured) {
+			a := o.GetAnnotations()
+			a[v1.AnnotationConfigurationOwnerUID] = "other"
+			o.SetAnnotations(a)
+		}},
+		{name: "wrong configuration UID", mutate: func(o *unstructured.Unstructured) {
+			a := o.GetAnnotations()
+			a[v1.AnnotationConfigurationUID] = "other"
+			o.SetAnnotations(a)
+		}},
+		{name: "external controller", mutate: func(o *unstructured.Unstructured) {
+			yes := true
+			o.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: "example.io/v1", Kind: "External", Name: "other", UID: "other", Controller: &yes}})
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			owner := inventoryTestOwner()
+			resource := inventoryTestResource(true, v1.ConfigurationDisablePolicyDelete)
+			if !tt.sameNamespace {
+				resource.Namespace = "another-namespace"
+			}
+			live := inventoryLiveObject(owner, resource, resource.ResourceUID, false)
+			if tt.mutate != nil {
+				tt.mutate(live)
+			}
+			cli := inventoryTestClient(t, live)
+			if err := DeleteDisabledRenderedConfigurationResources(context.Background(), cli, owner, []v1.RenderedConfigurationResource{resource}, nil); err != nil {
+				t.Fatal(err)
+			}
+			err := getInventoryObject(context.Background(), cli, resource)
+			if tt.deleted {
+				if !apierrors.IsNotFound(err) {
+					t.Fatalf("expected deletion, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("expected protected resource, got %v", err)
+			}
+		})
+	}
+}

@@ -168,7 +168,10 @@ func shouldDeleteDisabledRenderedResource(owner metav1.Object, obj metav1.Object
 		return false
 	}
 	controller := metav1.GetControllerOf(obj)
-	if resource.Namespaced {
+	// Only same-namespace resources can carry a namespaced owner's controller
+	// reference. Cross-namespace resources use the UID/marker checks above,
+	// just like cluster-scoped resources, while still rejecting foreign owners.
+	if resource.Namespaced && obj.GetNamespace() == owner.GetNamespace() {
 		return sameControllerOwner(owner, controller)
 	}
 	return controller == nil || sameControllerOwner(owner, controller)

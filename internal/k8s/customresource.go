@@ -96,10 +96,8 @@ func UpdateCustomResource(ctx context.Context, cli client.Client, cr *unstructur
 		return nil
 	}
 
-	cr.SetResourceVersion("")
-	cr.SetManagedFields(nil)
-	if metadata, ok := cr.Object["metadata"].(map[string]interface{}); ok {
-		delete(metadata, "creationTimestamp")
+	if err := prepareCustomResourceApply(cr); err != nil {
+		return err
 	}
 
 	return cli.Patch(ctx, cr, client.Apply, client.FieldOwner(v1.FieldOwner), client.ForceOwnership)
@@ -184,22 +182,32 @@ func IsNamespaced(obj *unstructured.Unstructured) (bool, error) {
 	return false, fmt.Errorf("%w: kind %s not found in %s", ErrGroupVersionNotFound, gvk.Kind, gvk.GroupVersion().String())
 }
 
-// PatchCustomResource uses Server-Side Apply to update a CustomResource.
-// SSA only manages fields owned by "opensaola"; fields added manually
-// (owned by other managers like "kubectl") are preserved automatically.
-// (see English comment above)
+// PatchCustomResource uses the existing Force Apply behavior for Action edits.
+// Intent-bearing live objects retain their original UID/resourceVersion guard.
 func PatchCustomResource(ctx context.Context, cli client.Client, cr *unstructured.Unstructured) error {
 	if isImmutableResource(cr) {
 		return nil
 	}
 
-	// SSA requires clean metadata: no resourceVersion, no managedFields, no creationTimestamp.
-	// (see English comment above)
-	cr.SetResourceVersion("")
-	cr.SetManagedFields(nil)
-	if metadata, ok := cr.Object["metadata"].(map[string]interface{}); ok {
-		delete(metadata, "creationTimestamp")
+	if err := prepareCustomResourceApply(cr); err != nil {
+		return err
 	}
 
 	return cli.Patch(ctx, cr, client.Apply, client.FieldOwner(v1.FieldOwner), client.ForceOwnership)
+}
+
+// Actions can carry a live resource's intent pointer through a CUE edit. Keep
+// that read's UID/RV guard: an unguarded delayed Apply could restore a superseded
+// pointer after its record was deleted. Do not refresh RV on a stale payload.
+func prepareCustomResourceApply(cr *unstructured.Unstructured) error {
+	if cr.GetAnnotations()[AnnotationResourceIntent] != "" || cr.GetLabels()[LabelResourceIntentGCFence] != "" {
+		if cr.GetUID() == "" || cr.GetResourceVersion() == "" {
+			return managedWriteBlocked("intent-bearing Apply requires the original resource UID and resourceVersion")
+		}
+	} else {
+		cr.SetResourceVersion("")
+	}
+	cr.SetManagedFields(nil)
+	unstructured.RemoveNestedField(cr.Object, "metadata", "creationTimestamp")
+	return nil
 }

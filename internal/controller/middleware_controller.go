@@ -296,15 +296,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, fmt.Errorf("upgrade failed: %w", err)
 	}
 
-	ctx = k8s.WithSSACompatibilityTracking(ctx)
-	if k8s.SteadyStateSSAReady(generation, observedGeneration, mid.Status.State, mid.GetAnnotations(), wasReconcilePaused) {
-		if err = k8s.RunSSACompatibility(ctx, r.Recorder, mid, func(ctx context.Context) error {
-			return middleware.ReconcileSSACompatibility(ctx, r.Client, mid)
-		}); err != nil {
-			return ctrl.Result{}, fmt.Errorf("SSA compatibility: %w", err)
-		}
-	}
-
+	ctx = k8s.WithResourceIntentEvents(ctx, r.Recorder)
 	// Compare generation with observedGeneration
 	// observedGeneration == 0 means initial publish
 	// generation > observedGeneration or State == Updating means update is needed
@@ -330,9 +322,6 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 		}
 		r.Recorder.Event(mid, "Normal", "Updated", "Middleware updated successfully")
-	}
-	if err = k8s.MarkSSACompatible(ctx, r.Client, mid); err != nil {
-		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil

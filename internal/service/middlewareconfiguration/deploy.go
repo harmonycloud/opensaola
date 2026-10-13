@@ -119,46 +119,6 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		obj.SetAnnotations(tempAnnotations)
 	}
 
-	if act == consts.HandleActionSSACompatibility {
-		stripOrphanOwnerRef := false
-		if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() {
-			disablePolicy, policyErr := configurationDisablePolicy(m, obj)
-			if policyErr != nil {
-				return nil, policyErr
-			}
-			if disablePolicy == v1.ConfigurationDisablePolicyOrphan {
-				// Resources meant to outlive their owner must stay outside the
-				// owner's garbage-collection domain; migrate any controller
-				// reference we set in an earlier revision.
-				if old != nil {
-					obj.SetOwnerReferences(removeControllerOwnerReference(old.GetOwnerReferences(), owner))
-					stripOrphanOwnerRef = true
-				}
-			} else {
-				setOwnerRef, ownerErr := shouldSetControllerReference(owner, old, m, obj)
-				if ownerErr != nil {
-					return nil, ownerErr
-				}
-				if setOwnerRef {
-					if err = ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
-						return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
-					}
-				} else {
-					obj.SetOwnerReferences(old.GetOwnerReferences())
-				}
-			}
-		}
-		if err = k8s.NewManagedResourceWriter(cli).Reconcile(ctx, ownerObj, obj, m.Name, true); err != nil {
-			return nil, err
-		}
-		if stripOrphanOwnerRef {
-			if err = stripLiveControllerOwnerReference(ctx, cli, obj, owner); err != nil {
-				return nil, err
-			}
-		}
-		return nil, nil
-	}
-
 	switch act {
 	case consts.HandleActionPublish, consts.HandleActionUpdate:
 		disablePolicy, policyErr := configurationDisablePolicy(m, obj)
@@ -196,7 +156,7 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 					}
 				}
 			}
-			if err = k8s.NewManagedResourceWriter(cli).Reconcile(ctx, ownerObj, obj, m.Name, false); err != nil {
+			if err = k8s.NewManagedResourceWriter(cli).Reconcile(ctx, ownerObj, obj, m.Name); err != nil {
 				return nil, err
 			}
 			if stripOrphanOwnerRef {
@@ -211,7 +171,7 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 					return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
 				}
 			}
-			err = k8s.NewManagedResourceWriter(cli).Reconcile(ctx, ownerObj, obj, m.Name, false)
+			err = k8s.NewManagedResourceWriter(cli).Reconcile(ctx, ownerObj, obj, m.Name)
 			if err != nil && !errors.IsAlreadyExists(err) {
 				log.FromContext(ctx).V(1).Info(fmt.Sprintf("failed to create %s", obj.GetKind()), "obj", obj)
 				return nil, fmt.Errorf("failed to create CR: %w", err)

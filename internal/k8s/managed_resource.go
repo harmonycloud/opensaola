@@ -139,6 +139,18 @@ func (w *ManagedResourceWriter) Reconcile(ctx context.Context, owner client.Obje
 		live := &unstructured.Unstructured{}
 		live.SetGroupVersionKind(desired.GroupVersionKind())
 		err = w.Reader.Get(ctx, client.ObjectKeyFromObject(desired), live)
+		if err == nil || apierrors.IsNotFound(err) {
+			observed := live
+			if err != nil {
+				observed = nil
+			}
+			// Check the exact live object used to build the RV-guarded patch,
+			// including on conflict retries. An earlier service-layer GET alone
+			// cannot fence changes arriving between that GET and this read.
+			if verifyErr := verifyObservedSpecForWrite(fresh, observed, configuration); verifyErr != nil {
+				return verifyErr
+			}
+		}
 		if apierrors.IsNotFound(err) {
 			intent := cleanApplyObject(desired)
 			if w.IntentSchemas != nil && !isImmutableResource(intent) {

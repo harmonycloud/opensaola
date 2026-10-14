@@ -461,6 +461,15 @@ func (c *localGCInitClient) Create(ctx context.Context, obj client.Object, opts 
 	if err := c.Client.Create(ctx, obj, opts...); err != nil {
 		return err
 	}
+	options := &client.CreateOptions{}
+	for _, opt := range opts {
+		opt.ApplyToCreate(options)
+	}
+	// Only persisted preparations can race collection; a dry-run Secret has
+	// not been published and must not consume the first-preparation hook.
+	if len(options.DryRun) != 0 {
+		return nil
+	}
 	if _, ok := obj.(*corev1.Secret); ok {
 		c.prepared = append(c.prepared, obj.GetName())
 		if len(c.prepared) == 1 {

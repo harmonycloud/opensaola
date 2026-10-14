@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -104,7 +105,7 @@ func TestLocalIntentReconcile(t *testing.T) {
 			desired.Object["data"] = map[string]interface{}{"KEEP": "before", "AUTH": "enabled"}
 			if legacy {
 				old := desired.DeepCopy()
-				old.Object["data"].(map[string]interface{})["UNKNOWN"] = "external-or-old"
+				localIntentMap(t, old.Object["data"])["UNKNOWN"] = "external-or-old"
 				if err := cli.Create(ctx, old, client.FieldOwner("manager")); err != nil {
 					t.Fatal(err)
 				}
@@ -162,7 +163,7 @@ func TestLocalIntentReconcile(t *testing.T) {
 			localIntentPatch(t, ctx, cli, desired, "manager", `[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"EXTERNAL","value":"preserve"}}]`)
 			localIntentKubectl(t, ctx, kubeconfig, owner.Namespace, "rollout", "status", "deployment/redis", "--timeout=90s")
 			containers, _, _ := unstructured.NestedSlice(desired.Object, "spec", "template", "spec", "containers")
-			containers[0].(map[string]interface{})["env"] = []interface{}{map[string]interface{}{"name": "KEEP", "value": "after"}}
+			localIntentMap(t, containers[0])["env"] = []interface{}{map[string]interface{}{"name": "KEEP", "value": "after"}}
 			if err := unstructured.SetNestedSlice(desired.Object, containers, "spec", "template", "spec", "containers"); err != nil {
 				t.Fatal(err)
 			}
@@ -222,7 +223,7 @@ func TestLocalIntentReconcile(t *testing.T) {
 				t.Fatal(err)
 			}
 			containers, _, _ := unstructured.NestedSlice(desired.Object, "spec", "template", "spec", "containers")
-			container := containers[0].(map[string]interface{})
+			container := localIntentMap(t, containers[0])
 			container["env"] = []interface{}{
 				map[string]interface{}{"name": "KEEP", "value": "before"},
 				map[string]interface{}{"name": "NACOS_AUTH_TOKEN", "valueFrom": map[string]interface{}{"secretKeyRef": map[string]interface{}{"name": "auth-secret", "key": "token"}}},
@@ -244,7 +245,7 @@ func TestLocalIntentReconcile(t *testing.T) {
 			}
 			enabledDesired := desired.DeepCopy()
 			containers, _, _ = unstructured.NestedSlice(desired.Object, "spec", "template", "spec", "containers")
-			container = containers[0].(map[string]interface{})
+			container = localIntentMap(t, containers[0])
 			container["env"] = []interface{}{map[string]interface{}{"name": "KEEP", "value": "after"}}
 			delete(container, "volumeMounts")
 			if err := unstructured.SetNestedSlice(desired.Object, containers, "spec", "template", "spec", "containers"); err != nil {
@@ -260,7 +261,7 @@ func TestLocalIntentReconcile(t *testing.T) {
 				t.Fatalf("known secret env reference was not deleted: %v", env)
 			}
 			containers, _, _ = unstructured.NestedSlice(live.Object, "spec", "template", "spec", "containers")
-			mounts, _, _ := unstructured.NestedSlice(containers[0].(map[string]interface{}), "volumeMounts")
+			mounts, _, _ := unstructured.NestedSlice(localIntentMap(t, containers[0]), "volumeMounts")
 			if len(mounts) != 0 {
 				t.Fatalf("known volumeMount was not deleted: %v", mounts)
 			}
@@ -491,6 +492,58 @@ func TestLocalIntentReconcile(t *testing.T) {
 			t.Fatalf("retry lost deletion intent: %v", data)
 		}
 	})
+	for _, committed := range []bool{false, true} {
+		name := "response_lost_before_commit"
+		if committed {
+			name = "response_lost_after_commit"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			owner := localIntentOwner(t, ctx, cli)
+			desired := localIntentObject(owner, "v1", "ConfigMap", "uncertain-commit")
+			desired.Object["data"] = map[string]any{"KEEP": "before", "AUTH": "remove"}
+			if err := w.Reconcile(ctx, owner, desired, ""); err != nil {
+				t.Fatal(err)
+			}
+			wrapped := &localIntentResponseLostClient{Client: cli, key: client.ObjectKeyFromObject(desired), commit: committed}
+			writer := &k8s.ManagedResourceWriter{Client: wrapped, Reader: cli, IntentSchemas: resolver}
+			desired.Object["data"] = map[string]any{"KEEP": "after"}
+			if err := writer.Reconcile(ctx, owner, desired, ""); err == nil || !wrapped.injected {
+				t.Fatalf("expected uncertain response: injected=%v err=%v", wrapped.injected, err)
+			}
+			live := localIntentGet(t, ctx, cli, desired)
+			data, _, err := unstructured.NestedStringMap(live.Object, "data")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (data["KEEP"] == "after") != committed {
+				t.Fatalf("unexpected server commit outcome: %v", data)
+			}
+			var records corev1.SecretList
+			if err := cli.List(ctx, &records, client.InNamespace(owner.Namespace)); err != nil || len(records.Items) != 2 {
+				t.Fatalf("uncertain publication lost prepared record: count=%d err=%v", len(records.Items), err)
+			}
+			pointer := live.GetAnnotations()[k8s.AnnotationResourceIntent]
+			if err := cli.Get(ctx, client.ObjectKey{Namespace: owner.Namespace, Name: pointer}, &corev1.Secret{}); err != nil {
+				t.Fatalf("live pointer references missing record: %v", err)
+			}
+			if err := w.Reconcile(ctx, owner, desired, ""); err != nil {
+				t.Fatal(err)
+			}
+			live = localIntentGet(t, ctx, cli, desired)
+			data, _, err = unstructured.NestedStringMap(live.Object, "data")
+			if err != nil || data["KEEP"] != "after" || len(data) != 1 {
+				t.Fatalf("retry failed to converge: %v err=%v", data, err)
+			}
+			// Scope accelerated collection to this fixture, leaving the separate
+			// default-interval GC acceptance test and other namespaces untouched.
+			result, err := localGC(cli, owner.Namespace).Sweep(ctx)
+			if err != nil || result.Deleted != 1 || result.Kept != 1 {
+				t.Fatalf("orphan preparation collection: %+v err=%v", result, err)
+			}
+		})
+	}
 	for _, failure := range []string{"missing_record", "recreated_resource"} {
 		t.Run(failure+"_fails_closed", func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -544,7 +597,7 @@ func TestLocalIntentReconcile(t *testing.T) {
 				t.Fatal(err)
 			}
 			containers, _, _ := unstructured.NestedSlice(desired.Object, "spec", "template", "spec", "containers")
-			containers[0].(map[string]interface{})["env"] = []interface{}{map[string]interface{}{"name": "AUTH", "valueFrom": map[string]interface{}{"secretKeyRef": map[string]interface{}{"name": "auth-secret", "key": "token"}}}}
+			localIntentMap(t, containers[0])["env"] = []interface{}{map[string]interface{}{"name": "AUTH", "valueFrom": map[string]interface{}{"secretKeyRef": map[string]interface{}{"name": "auth-secret", "key": "token"}}}}
 			if err := unstructured.SetNestedSlice(desired.Object, containers, "spec", "template", "spec", "containers"); err != nil {
 				t.Fatal(err)
 			}
@@ -556,7 +609,7 @@ func TestLocalIntentReconcile(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			containers[0].(map[string]interface{})["env"] = []interface{}{map[string]interface{}{"name": "AUTH", "value": "inline-value"}}
+			localIntentMap(t, containers[0])["env"] = []interface{}{map[string]interface{}{"name": "AUTH", "value": "inline-value"}}
 			if err := unstructured.SetNestedSlice(desired.Object, containers, "spec", "template", "spec", "containers"); err != nil {
 				t.Fatal(err)
 			}
@@ -569,8 +622,8 @@ func TestLocalIntentReconcile(t *testing.T) {
 			}
 			live := localIntentGet(t, ctx, cli, desired)
 			containers, _, _ = unstructured.NestedSlice(live.Object, "spec", "template", "spec", "containers")
-			env, _, _ := unstructured.NestedSlice(containers[0].(map[string]interface{}), "env")
-			entry := env[0].(map[string]interface{})
+			env, _, _ := unstructured.NestedSlice(localIntentMap(t, containers[0]), "env")
+			entry := localIntentMap(t, env[0])
 			if snapshot {
 				if _, found := entry["valueFrom"]; found || entry["value"] != "inline-value" {
 					t.Fatalf("non-atomic valueFrom/value transition: %v", entry)
@@ -722,7 +775,7 @@ func TestLocalIntentReconcile(t *testing.T) {
 			entries, _, _ := unstructured.NestedSlice(live.Object, "spec", "entries")
 			found := make(map[string]string)
 			for _, item := range entries {
-				entry := item.(map[string]interface{})
+				entry := localIntentMap(t, item)
 				found[fmt.Sprint(entry["name"])] = fmt.Sprint(entry["value"])
 			}
 			if _, exists := found["auth"]; exists || found["keep"] != "after" || found["external"] != "preserve" || found["protected"] != "retain-if-external-child" {
@@ -1004,6 +1057,33 @@ func localIntentBatchTemplate(auth bool) map[string]interface{} {
 	return map[string]interface{}{"spec": map[string]interface{}{"restartPolicy": "Never", "containers": []interface{}{map[string]interface{}{"name": "job", "image": "redis:7.2.7-alpine", "env": env}}}}
 }
 
+// localIntentResponseLostClient injects a transport-style EOF at the boundary
+// of an actual API request. The committed branch executes the real server patch
+// before dropping its response; neither branch treats dry-run as publication.
+type localIntentResponseLostClient struct {
+	client.Client
+	key      client.ObjectKey
+	commit   bool
+	injected bool
+}
+
+func (c *localIntentResponseLostClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+	options := &client.PatchOptions{}
+	for _, opt := range opts {
+		opt.ApplyToPatch(options)
+	}
+	if !c.injected && client.ObjectKeyFromObject(obj) == c.key && patch.Type() == types.JSONPatchType && len(options.DryRun) == 0 {
+		c.injected = true
+		if c.commit {
+			if err := c.Client.Patch(ctx, obj, patch, opts...); err != nil {
+				return err
+			}
+		}
+		return io.ErrUnexpectedEOF
+	}
+	return c.Client.Patch(ctx, obj, patch, opts...)
+}
+
 type localIntentRaceClient struct {
 	client.Client
 	namespace string
@@ -1094,6 +1174,15 @@ func localIntentGet(t *testing.T, ctx context.Context, cli client.Client, obj *u
 	return live
 }
 
+func localIntentMap(t *testing.T, value any) map[string]any {
+	t.Helper()
+	object, ok := value.(map[string]any)
+	if !ok || object == nil {
+		t.Fatalf("expected object, got %T", value)
+	}
+	return object
+}
+
 func localIntentPatch(t *testing.T, ctx context.Context, cli client.Client, obj *unstructured.Unstructured, manager, patch string) {
 	t.Helper()
 	live := localIntentGet(t, ctx, cli, obj)
@@ -1108,13 +1197,13 @@ func localIntentEnvironment(t *testing.T, obj *unstructured.Unstructured) map[st
 	if err != nil || !found || len(containers) == 0 {
 		t.Fatalf("containers missing: found=%t err=%v", found, err)
 	}
-	env, _, err := unstructured.NestedSlice(containers[0].(map[string]interface{}), "env")
+	env, _, err := unstructured.NestedSlice(localIntentMap(t, containers[0]), "env")
 	if err != nil {
 		t.Fatal(err)
 	}
 	values := make(map[string]string)
 	for _, item := range env {
-		entry := item.(map[string]interface{})
+		entry := localIntentMap(t, item)
 		values[fmt.Sprint(entry["name"])] = fmt.Sprint(entry["value"])
 	}
 	return values

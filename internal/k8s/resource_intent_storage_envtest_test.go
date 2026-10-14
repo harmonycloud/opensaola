@@ -95,7 +95,10 @@ func TestResourceIntentStorageAPI(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			owner := ownerFor(t)
-			value := intentSizeFixture(700<<10, false).Object["data"].(map[string]any)["large"].(string)
+			value, found, err := unstructured.NestedString(intentSizeFixture(700<<10, false).Object, "data", "large")
+			if err != nil || !found {
+				t.Fatalf("missing large fixture value: %v", err)
+			}
 			desired := deploymentFor(t, owner, value)
 			if legacy {
 				if err := cli.Create(ctx, desired.DeepCopy(), client.FieldOwner("manager")); err != nil {
@@ -127,10 +130,14 @@ func TestResourceIntentStorageAPI(t *testing.T) {
 			next := deploymentFor(t, owner, "temporary")
 			env := []any{map[string]any{"name": "KEEP", "value": "yes"}}
 			containers, _, err := unstructured.NestedSlice(next.Object, "spec", "template", "spec", "containers")
-			if err != nil {
-				t.Fatal(err)
+			if err != nil || len(containers) != 1 {
+				t.Fatalf("expected one fixture container: %v", err)
 			}
-			containers[0].(map[string]any)["env"] = env
+			main, ok := containers[0].(map[string]any)
+			if !ok {
+				t.Fatal("fixture container is not an object")
+			}
+			main["env"] = env
 			if err := unstructured.SetNestedSlice(next.Object, containers, "spec", "template", "spec", "containers"); err != nil {
 				t.Fatal(err)
 			}
@@ -141,11 +148,15 @@ func TestResourceIntentStorageAPI(t *testing.T) {
 				t.Fatal(err)
 			}
 			got, _, err := unstructured.NestedSlice(live.Object, "spec", "template", "spec", "containers")
-			if err != nil {
-				t.Fatal(err)
+			if err != nil || len(got) != 1 {
+				t.Fatalf("expected one live container: %v", err)
 			}
-			gotEnv := got[0].(map[string]any)["env"].([]any)
-			if len(gotEnv) != 1 || gotEnv[0].(map[string]any)["name"] != "KEEP" {
+			gotMain, ok := got[0].(map[string]any)
+			if !ok {
+				t.Fatal("live container is not an object")
+			}
+			gotEnv, found, err := unstructured.NestedSlice(gotMain, "env")
+			if err != nil || !found || !reflect.DeepEqual(gotEnv, env) {
 				t.Fatal("large prior record did not support omitted env deletion")
 			}
 			if err := cli.Get(ctx, client.ObjectKeyFromObject(secret), &corev1.Secret{}); !apierrors.IsNotFound(err) {
@@ -210,7 +221,10 @@ func TestResourceIntentStorageAPI(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			value := intentSizeFixture(1280<<10, true).Object["data"].(map[string]any)["large"].(string)
+			value, found, err := unstructured.NestedString(intentSizeFixture(1280<<10, true).Object, "data", "large")
+			if err != nil || !found {
+				t.Fatalf("missing oversized fixture value: %v", err)
+			}
 			desired := deploymentFor(t, owner, value)
 			// A valid business dry-run distinguishes Secret validation from a generic
 			// request-size failure or resource-schema rejection.
@@ -218,7 +232,7 @@ func TestResourceIntentStorageAPI(t *testing.T) {
 			if err := cli.Patch(ctx, preview, client.Apply, client.FieldOwner(v1.FieldOwner), client.ForceOwnership, client.DryRunAll); err != nil {
 				t.Fatalf("business resource dry-run rejected: %v", err)
 			}
-			err := writer.Reconcile(ctx, owner, desired, "")
+			err = writer.Reconcile(ctx, owner, desired, "")
 			if !apierrors.IsInvalid(err) {
 				t.Fatalf("want API Secret validation error, got %v", err)
 			}
@@ -239,7 +253,12 @@ func TestResourceIntentStorageAPI(t *testing.T) {
 				if err := cli.Get(ctx, client.ObjectKeyFromObject(after), after); err != nil {
 					t.Fatal(err)
 				}
-				if !reflect.DeepEqual(before.Object, after.Object) {
+				// A real cluster can update Deployment status while the rejected
+				// request is in flight. Compare the writable surface and record
+				// pointer separately instead of treating status/RV drift as a write.
+				if !reflect.DeepEqual(intentObject(before).Object, intentObject(after).Object) ||
+					before.GetUID() != after.GetUID() ||
+					before.GetAnnotations()[AnnotationResourceIntent] != after.GetAnnotations()[AnnotationResourceIntent] {
 					t.Fatal("failed record write changed business resource or pointer")
 				}
 			} else {

@@ -125,7 +125,7 @@ func (c *ResourceIntentCollector) collect(ctx context.Context, secret *corev1.Se
 		return false, managedWriteBlocked("invalid intent collection identity")
 	}
 	record, err := decodeResourceIntent(secret.Data)
-	if err != nil || record.Version != 1 || record.Desired == nil || record.OwnerUID == "" || record.ResourceUID == "" || record.SchemaHash == "" {
+	if err != nil || record.Version != 1 || record.Desired == nil || record.OwnerUID == "" || record.ResourceUID == "" || record.Pause == nil && record.SchemaHash == "" {
 		return false, managedWriteBlocked("invalid intent collection record")
 	}
 	ref := metav1.GetControllerOf(secret)
@@ -154,6 +154,9 @@ func (c *ResourceIntentCollector) collect(ctx context.Context, secret *corev1.Se
 	// by an old writer. Never infer their safety from age or the current pointer.
 	if record.PublicationProtocol != intentPublicationProtocol || record.BaseResourceVersion == "" {
 		return false, nil
+	}
+	if record.Pause != nil {
+		return c.collectPauseSnapshot(ctx, secret, record, owner)
 	}
 	gvk := record.Desired.GroupVersionKind()
 	if gvk.Version == "" || gvk.Kind == "" || record.Desired.GetName() == "" {
@@ -198,6 +201,50 @@ func (c *ResourceIntentCollector) collect(ctx context.Context, secret *corev1.Se
 	}
 	// Either the object's RV already changed, or a metadata-only fence changed
 	// it. All delayed publications of THIS record now fail their UID/RV guard.
+	return c.deleteRecord(ctx, secret)
+}
+
+// Pause references are published in MID status, not in the primary CR. Fence
+// the MID RV before deleting an abandoned preparation; never collect an active
+// session, even if it has been paused for longer than MinAge.
+func (c *ResourceIntentCollector) collectPauseSnapshot(ctx context.Context, secret *corev1.Secret, record *resourceIntent, owner client.Object) (bool, error) {
+	mid, ok := owner.(*v1.Middleware)
+	if !ok || mid.ResourceVersion == "" {
+		return false, invalidPauseSnapshot("invalid collection owner")
+	}
+	gvk := record.Desired.GroupVersionKind()
+	hash, err := pauseRecordHash(record)
+	if err != nil {
+		return false, err
+	}
+	snapshot := &v1.ReconcilePauseStatus{
+		SnapshotSecret: secret.Name, Hash: hash, Generation: record.Pause.Generation,
+		GVK:  v1.GVK{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind},
+		Name: record.Desired.GetName(), Namespace: record.Desired.GetNamespace(), ResourceUID: string(record.ResourceUID),
+	}
+	w := &ManagedResourceWriter{Client: c.Client, Reader: c.Reader}
+	if _, err := w.LoadReconcilePauseSnapshot(ctx, mid, snapshot); err != nil {
+		return false, err
+	}
+	if mid.Status.ReconcilePause != nil && mid.Status.ReconcilePause.SnapshotSecret == secret.Name {
+		return false, nil
+	}
+	if mid.ResourceVersion == record.BaseResourceVersion {
+		// Read the exact API representation. Converting a typed MID can insert
+		// omitted empty structs/nulls and make a metadata-only dry-run appear
+		// to have modified business fields after API pruning.
+		target := &unstructured.Unstructured{}
+		target.SetGroupVersionKind(v1.GroupVersion.WithKind("Middleware"))
+		if err := c.Reader.Get(ctx, client.ObjectKeyFromObject(mid), target); err != nil {
+			return false, err
+		}
+		if target.GetUID() != mid.UID || target.GetResourceVersion() != mid.ResourceVersion {
+			return false, invalidPauseSnapshot("owner changed before collection fence; retry collection")
+		}
+		if err := c.fencePublication(ctx, target, secret); err != nil {
+			return false, err
+		}
+	}
 	return c.deleteRecord(ctx, secret)
 }
 

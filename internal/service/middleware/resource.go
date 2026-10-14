@@ -183,7 +183,7 @@ func HandleResource(ctx context.Context, cli client.Client, action consts.Handle
 
 // RenderPrimaryCustomResource renders the effective primary custom resource
 // without writing it. It is used by the pause/recovery state machine to take a
-// durable desired-state snapshot and to calculate B/L/D merges safely.
+// target identity and desired state onto which observed changes are applied.
 func RenderPrimaryCustomResource(ctx context.Context, cli client.Client, m *v1.Middleware) (*unstructured.Unstructured, error) {
 	return renderPrimaryCustomResource(ctx, cli, m, true)
 }

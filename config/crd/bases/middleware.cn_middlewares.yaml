@@ -572,18 +572,12 @@ spec:
                     description: |-
                       AdoptedLiveSpecHash is the hash of the live primary CR spec used to
                       calculate the most recent merge. It is checked again immediately before
-                      the resumed SSA write so a second live change during the pause is never overwritten using an
-                      older L input.
+                      the resumed write so a second live change is not overwritten using an
+                      outdated observation.
                     type: string
                   capturedAt:
                     format: date-time
                     type: string
-                  desiredSpec:
-                    description: |-
-                      DesiredSpec is the effective primary custom-resource spec rendered when
-                      the pause first became active. It is the B input of the B/L/D merge.
-                    type: object
-                    x-kubernetes-preserve-unknown-fields: true
                   generation:
                     description: Generation is the Middleware generation at snapshot
                       capture time.
@@ -620,7 +614,7 @@ spec:
                     type: object
                   hash:
                     description: |-
-                      Hash is the SHA-256 of DesiredSpec and makes the snapshot identity
+                      Hash is the SHA-256 of the complete Secret record and makes its identity
                       visible to operators and conflict-safe updates.
                     type: string
                   name:
@@ -633,6 +627,11 @@ spec:
                     description: |-
                       ResourceUID protects against automatically adopting a deleted and
                       recreated actual resource during the pause.
+                    type: string
+                  snapshotSecret:
+                    description: |-
+                      SnapshotSecret references an immutable Secret in the Middleware namespace.
+                      The actual pause-start spec and previous overrides are stored only there.
                     type: string
                 type: object
               renderedConfigurationResources:

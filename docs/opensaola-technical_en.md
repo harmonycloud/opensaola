@@ -309,9 +309,8 @@ MiddlewareAction (Namespaced) -- references --> MiddlewareActionBaseline
 | `CondReasonTemplateParseWithBaselineFailed` | `"TemplateParseWithBaselineFailed"` | `TemplateParseWithBaseline` | Template parsing and baseline merging failed |
 | `CondReasonReconcilePaused` | `"ReconcilePaused"` | `ReconcilePaused` | Ordinary child-resource writes for this MID/MO are closed; a valid MID snapshot must also be confirmed in `status.reconcilePause` |
 | `CondReasonReconcileSnapshotFailed` | `"ReconcileSnapshotFailed"` | `ReconcileAdoption` | The pause snapshot could not be captured safely; write protection remains active |
-| `CondReasonReconcileAdoptionSucceeded` | `"ReconcileAdoptionSucceeded"` | `ReconcileAdoption` | Non-conflicting live primary-CR `spec` differences were adopted as an override |
+| `CondReasonReconcileAdoptionSucceeded` | `"ReconcileAdoptionSucceeded"` | `ReconcileAdoption` | Changes between pause-time and current actual specs were adopted as an override |
 | `CondReasonReconcileAdoptionFailed` | `"ReconcileAdoptionFailed"` | `ReconcileAdoption` | An invalid recovery policy, snapshot/target mismatch, or adoption failure keeps the pause active |
-| `CondReasonReconcileAdoptionConflict` | `"ReconcileAdoptionConflict"` | `ReconcileAdoption` | A live writer during the pause and current desired state changed the same path; manual resolution is required |
 
 ---
 
@@ -366,13 +365,13 @@ MiddlewareAction (Namespaced) -- references --> MiddlewareActionBaseline
 
 | Field | Type | Description |
 |-------|------|-------------|
-| desiredSpec | runtime.RawExtension | Effective primary-CR `spec` at pause time: B in the B/L/D merge |
+| snapshotSecret | string | Immutable Secret name in the MID namespace; actual spec and pre-pause overrides reside only in that Secret, using fast zstd compression |
 | gvk / namespace / name | GVK / string / string | Identity of the primary CR bound to the pause session; a mismatch fails closed |
 | resourceUID | string | Prevents adoption of a same-name primary CR recreated during the pause |
 | generation | int64 | MID Generation when the snapshot was captured |
-| hash | string | SHA-256 of `desiredSpec`, used as the session identity and for concurrency checks |
+| hash | string | SHA-256 of the complete Secret record, used as the session identity and for concurrency checks |
 | capturedAt | metav1.Time | Snapshot capture time |
-| adoptedLiveSpecHash | string | Hash of the L input from the most recent merge, verified again before the primary-CR write |
+| adoptedLiveSpecHash | string | Hash of the actual spec from the most recent adoption, verified again before the primary-CR write |
 
 #### RenderedConfigurationResource Sub-structure
 
@@ -873,7 +872,7 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 
 > `middleware.cn/suspend-reconcile: "true"` pauses only child-resource writes for that MID/MO: the MID primary CR, Configuration resources, and CR delete self-healing; and the MO Configuration, RBAC, Deployment, and Deployment drift repair. Finalizer cleanup and runtime status synchronization continue. Before changing a MID's actual CR, confirm both `.status.conditions[type=ReconcilePaused]=True` and a present `.status.reconcilePause`, with `ReconcileAdoption` not `False`; do not modify the live primary CR when snapshot capture failed. An MO has no primary-CR snapshot, so confirming `ReconcilePaused=True` is sufficient. Disaster recovery is only one example use case for this general capability.
 >
-> A MID must choose an explicit recovery policy instead of directly deleting the pause annotation. While the pause annotation is still present, the recommended command is: `kubectl annotate mid <name> -n <namespace> middleware.cn/resume-policy=merge --overwrite`. The controller performs a three-way merge of the desired primary-CR `spec` captured at pause time (B), the live CR `spec` immediately before recovery (L), and the currently rendered desired state (D). Non-conflicting live changes from the pause are stored in the MID's `.spec.reconcileOverrides` (the patch, its rendered base, and target GVK), then the controller removes the pause annotation itself. The snapshot and recovery annotation are cleared only after the next primary-CR apply succeeds. Immediately before that apply, the live `spec` is checked again; if an external writer changed it again, the controller re-merges instead of applying an older L. `apply` explicitly discards the live CR changes made during the pause and reapplies current desired state. If a live change from the pause and current desired state changed the same path, the controller keeps the pause and records `ReconcileAdoption=False`; it never overwrites the live CR. Resolve the conflict and set `resume-policy=merge` again to retry. Removing `suspend-reconcile` without a policy also keeps the pause guard, preventing the former forced-replay behavior.
+> A MID must explicitly choose `merge` or `apply`; deleting the pause annotation alone keeps protection active. `merge` compares the actual pause-start snapshot referenced by `.status.reconcilePause.snapshotSecret` with the current actual spec, applies only that interval’s changes to current desired state, and persists `.spec.reconcileOverrides`. Unchanged defaults, nulls and pre-existing drift are excluded. Observed changed paths use current CR values; unrelated desired inputs remain. Associative lists use API schema keys and atomic values are handled as a whole. Live spec is checked again before writing; further changes trigger recomputation from `previousOverrides`, retaining pre-pause overrides without stale intermediate adoption. Successful writes clear the status reference and recovery annotations, then delete the pause Secret. Failed cleanup is retried by the existing collector; MID deletion garbage-collects the owned Secret. Status holds no full spec or previous overrides, and no application snapshot size ceiling is imposed. `apply` explicitly discards paused changes. Identity, schema or snapshot failures keep protection active. Legacy `desiredSpec` snapshots are never treated as actual observations; finish old paused sessions before upgrading.
 >
 > An adopted live-state difference continues to protect the same field, but a later explicit MID/Baseline desired change at that path takes precedence while unrelated differences from the pause remain. If an upgrade changes the primary CR GVK, name, or namespace, the old override is rejected instead of being applied to a new target; after confirmation, remove `.spec.reconcileOverrides` and let the new desired state take effect.
 >

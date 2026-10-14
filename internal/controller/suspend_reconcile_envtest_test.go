@@ -19,20 +19,224 @@ limitations under the License.
 package controller
 
 import (
+	"encoding/json"
+	"fmt"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/k8s"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 var _ = Describe("Suspend reconcile", func() {
+	BeforeEach(func() {
+		resolver, err := k8s.NewIntentSchemaResolver(cfg)
+		Expect(err).NotTo(HaveOccurred())
+		k8s.ConfigureResourceIntents(resolver)
+		DeferCleanup(func() { k8s.ConfigureResourceIntents(nil) })
+	})
+	for _, failure := range []string{"missing Secret", "corrupt hash"} {
+		It("keeps merge protected without recapturing a "+failure, func() {
+			name := "pause-secret-failure-" + randomSuffix()
+			labels := map[string]string{v1.LabelPackageName: name}
+			baseline := &v1.MiddlewareBaseline{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}, Spec: v1.MiddlewareBaselineSpec{GVK: v1.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}}}
+			Expect(k8sClient.Create(ctx, baseline)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, baseline) })
+			spec := map[string]any{
+				"replicas": int64(0), "selector": map[string]any{"matchLabels": map[string]any{"app": name}},
+				"template": map[string]any{"metadata": map[string]any{"labels": map[string]any{"app": name}}, "spec": map[string]any{"containers": []any{map[string]any{"name": "main", "image": "registry.k8s.io/pause:3.10"}}}},
+			}
+			raw, err := json.Marshal(spec)
+			Expect(err).NotTo(HaveOccurred())
+			mid := &v1.Middleware{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: labels}, Spec: v1.MiddlewareSpec{Baseline: name, Parameters: runtime.RawExtension{Raw: raw}}}
+			Expect(k8sClient.Create(ctx, mid)).To(Succeed())
+			_, err = reconcileMiddleware(name, "default") // finalizer
+			Expect(err).NotTo(HaveOccurred())
+			_, err = reconcileMiddleware(name, "default") // initial publish
+			Expect(err).NotTo(HaveOccurred())
+			key := client.ObjectKeyFromObject(mid)
+			Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+			mid.Annotations = map[string]string{v1.AnnotationSuspendReconcile: "true"}
+			Expect(k8sClient.Update(ctx, mid)).To(Succeed())
+			_, err = reconcileMiddleware(name, "default")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+			Expect(mid.Status.ReconcilePause).NotTo(BeNil())
+			secretName := mid.Status.ReconcilePause.SnapshotSecret
+			if failure == "missing Secret" {
+				secret := &corev1.Secret{}
+				Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: mid.Namespace, Name: secretName}, secret)).To(Succeed())
+				Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+			} else {
+				mid.Status.ReconcilePause.Hash = "corrupt"
+				Expect(k8sClient.Status().Update(ctx, mid)).To(Succeed())
+			}
+			primary := &unstructured.Unstructured{}
+			primary.SetGroupVersionKind(appsv1.SchemeGroupVersion.WithKind("Deployment"))
+			Expect(k8sClient.Get(ctx, key, primary)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, primary) })
+			Expect(unstructured.SetNestedField(primary.Object, int64(2), "spec", "replicas")).To(Succeed())
+			Expect(k8sClient.Update(ctx, primary)).To(Succeed())
+			primaryRV := primary.GetResourceVersion()
+			mid.Annotations[v1.AnnotationResumePolicy] = "merge"
+			Expect(k8sClient.Update(ctx, mid)).To(Succeed())
+			_, err = reconcileMiddleware(name, "default")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+			Expect(mid.Annotations).To(HaveKey(v1.AnnotationSuspendReconcile))
+			Expect(mid.Status.ReconcilePause.SnapshotSecret).To(Equal(secretName))
+			Expect(mid.Spec.ReconcileOverrides).To(BeNil())
+			Expect(findCondition(mid.Status.Conditions, v1.CondTypeReconcileAdoption).Status).To(Equal(metav1.ConditionFalse))
+			Expect(k8sClient.Get(ctx, key, primary)).To(Succeed())
+			Expect(primary.GetResourceVersion()).To(Equal(primaryRV))
+		})
+	}
+	for _, legacy := range []bool{false, true} {
+		for _, scenario := range []string{"unchanged actual", "replicas", "env changes", "second change before write"} {
+			It(fmt.Sprintf("resumes full controller writes using only observed changes (legacy=%t): %s", legacy, scenario), func() {
+				name := "pause-delta-" + randomSuffix()
+				labels := map[string]string{v1.LabelPackageName: name}
+				baseline := &v1.MiddlewareBaseline{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}, Spec: v1.MiddlewareBaselineSpec{GVK: v1.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}}}
+				Expect(k8sClient.Create(ctx, baseline)).To(Succeed())
+				DeferCleanup(func() { _ = k8sClient.Delete(ctx, baseline) })
+				spec := map[string]any{
+					"replicas": int64(0), "selector": map[string]any{"matchLabels": map[string]any{"app": name}},
+					"template": map[string]any{"metadata": map[string]any{"labels": map[string]any{"app": name}}, "spec": map[string]any{"containers": []any{
+						map[string]any{"name": "main", "image": "registry.k8s.io/pause:3.10", "ports": []any{map[string]any{"containerPort": int64(8080)}}, "env": []any{map[string]any{"name": "KEEP", "value": "old"}, map[string]any{"name": "REMOVE", "value": "old"}}},
+					}}},
+				}
+				raw, err := json.Marshal(spec)
+				Expect(err).NotTo(HaveOccurred())
+				mid := &v1.Middleware{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: labels, Finalizers: []string{v1.FinalizerMiddleware}}, Spec: v1.MiddlewareSpec{Baseline: name, Parameters: runtime.RawExtension{Raw: raw}}}
+				Expect(k8sClient.Create(ctx, mid)).To(Succeed())
+				primary := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": name, "namespace": "default"}, "spec": runtime.DeepCopyJSONValue(spec)}}
+				if legacy {
+					Expect(ctrl.SetControllerReference(mid, primary, k8sClient.Scheme())).To(Succeed())
+					Expect(k8sClient.Create(ctx, primary, client.FieldOwner("manager"))).To(Succeed())
+					mid.Status.ObservedGeneration = mid.Generation
+					mid.Status.State = v1.StateAvailable
+					Expect(k8sClient.Status().Update(ctx, mid)).To(Succeed())
+				} else {
+					_, err = reconcileMiddleware(name, "default")
+					Expect(err).NotTo(HaveOccurred())
+				}
+				key := types.NamespacedName{Name: name, Namespace: "default"}
+				Expect(k8sClient.Get(ctx, key, primary)).To(Succeed())
+				DeferCleanup(func() { _ = k8sClient.Delete(ctx, primary) })
+				if legacy {
+					Expect(primary.GetAnnotations()).NotTo(HaveKey(k8s.AnnotationResourceIntent))
+				}
+				// Default fields must really exist before the pause, not just be
+				// introduced by the test fixture.
+				containers, _, err := unstructured.NestedSlice(primary.Object, "spec", "template", "spec", "containers")
+				Expect(err).NotTo(HaveOccurred())
+				container, ok := containers[0].(map[string]any)
+				Expect(ok).To(BeTrue())
+				Expect(container["terminationMessagePath"]).To(Equal("/dev/termination-log"))
+				beforeRaw, err := json.Marshal(primary.Object["spec"])
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+				mid.Annotations = map[string]string{v1.AnnotationSuspendReconcile: "true"}
+				Expect(k8sClient.Update(ctx, mid)).To(Succeed())
+				_, err = reconcileMiddleware(name, "default")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+				data, err := k8s.NewManagedResourceWriter(k8sClient).LoadReconcilePauseSnapshot(ctx, mid, mid.Status.ReconcilePause)
+				Expect(err).NotTo(HaveOccurred())
+				snapshotRaw, err := json.Marshal(data.ActualSpec)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(snapshotRaw).To(MatchJSON(beforeRaw))
+				pauseSecretKey := client.ObjectKey{Namespace: mid.Namespace, Name: mid.Status.ReconcilePause.SnapshotSecret}
+				statusRaw, err := json.Marshal(mid.Status.ReconcilePause)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(string(statusRaw)).NotTo(ContainSubstring("actualSpec"))
+				Expect(string(statusRaw)).NotTo(ContainSubstring("previousOverrides"))
+				pauseHash := mid.Status.ReconcilePause.Hash
+				wantPatch := "{}"
+				switch scenario {
+				case "replicas", "second change before write":
+					Expect(unstructured.SetNestedField(primary.Object, int64(2), "spec", "replicas")).To(Succeed())
+					wantPatch = `{"replicas":2}`
+				case "env changes":
+					container["env"] = []any{map[string]any{"name": "KEEP", "value": "new"}, map[string]any{"name": "NEW", "value": "added"}}
+					Expect(unstructured.SetNestedSlice(primary.Object, containers, "spec", "template", "spec", "containers")).To(Succeed())
+					wantPatch = `{"template":{"spec":{"containers":[{"name":"main","image":"registry.k8s.io/pause:3.10","ports":[{"containerPort":8080}],"env":[{"name":"KEEP","value":"new"},{"name":"NEW","value":"added"}]}]}}}`
+				}
+				if scenario != "unchanged actual" {
+					Expect(k8sClient.Update(ctx, primary)).To(Succeed())
+				}
+				pausedRaw, err := json.Marshal(primary.Object["spec"])
+				Expect(err).NotTo(HaveOccurred())
+				_, err = reconcileMiddleware(name, "default")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, key, primary)).To(Succeed())
+				stillPausedRaw, err := json.Marshal(primary.Object["spec"])
+				Expect(err).NotTo(HaveOccurred())
+				Expect(stillPausedRaw).To(MatchJSON(pausedRaw))
+				Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+				Expect(mid.Status.ReconcilePause.Hash).To(Equal(pauseHash))
+				mid.Annotations[v1.AnnotationResumePolicy] = "merge"
+				Expect(k8sClient.Update(ctx, mid)).To(Succeed())
+				result, err := reconcileMiddleware(name, "default")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(result.Requeue).To(BeTrue())
+				Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+				if scenario == "unchanged actual" {
+					Expect(mid.Spec.ReconcileOverrides).To(BeNil())
+				} else {
+					Expect(mid.Spec.ReconcileOverrides.SpecPatch.Raw).To(MatchJSON(wantPatch))
+					Expect(string(mid.Spec.ReconcileOverrides.SpecPatch.Raw)).NotTo(ContainSubstring("terminationMessagePath"))
+					Expect(string(mid.Spec.ReconcileOverrides.SpecPatch.Raw)).NotTo(ContainSubstring("terminationMessagePolicy"))
+					Expect(string(mid.Spec.ReconcileOverrides.SpecPatch.Raw)).NotTo(ContainSubstring("protocol"))
+				}
+				if scenario == "second change before write" {
+					Expect(k8sClient.Get(ctx, key, primary)).To(Succeed())
+					Expect(unstructured.SetNestedField(primary.Object, int64(3), "spec", "replicas")).To(Succeed())
+					Expect(k8sClient.Update(ctx, primary)).To(Succeed())
+					result, err = reconcileMiddleware(name, "default")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(result.Requeue).To(BeTrue())
+					Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+					Expect(mid.Spec.ReconcileOverrides.SpecPatch.Raw).To(MatchJSON(`{"replicas":3}`))
+				}
+				_, err = reconcileMiddleware(name, "default")
+				Expect(err).NotTo(HaveOccurred(), fmt.Sprintf("resume %s", scenario))
+				Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+				Expect(mid.Status.ReconcilePause).To(BeNil())
+				Expect(apierrors.IsNotFound(k8sClient.Get(ctx, pauseSecretKey, &corev1.Secret{}))).To(BeTrue())
+				Expect(mid.Annotations).NotTo(HaveKey(v1.AnnotationResumePolicy))
+				Expect(mid.Status.ObservedGeneration).To(Equal(mid.Generation))
+				Expect(k8sClient.Get(ctx, key, primary)).To(Succeed())
+				afterResume, err := json.Marshal(primary.Object["spec"])
+				Expect(err).NotTo(HaveOccurred())
+				if scenario != "second change before write" {
+					Expect(afterResume).To(MatchJSON(pausedRaw))
+				} else {
+					value, _, err := unstructured.NestedInt64(primary.Object, "spec", "replicas")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(value).To(Equal(int64(3)))
+				}
+				// Future reconciles do not revert adopted external changes.
+				rv := primary.GetResourceVersion()
+				_, err = reconcileMiddleware(name, "default")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(primary), primary)).To(Succeed())
+				Expect(primary.GetResourceVersion()).To(Equal(rv))
+			})
+		}
+	}
 	It("pauses Middleware writes and blocks an unsafe direct resume", func() {
 		name := "mid-suspend-" + randomSuffix()
 		mid := &v1.Middleware{
@@ -127,6 +331,8 @@ var _ = Describe("Suspend reconcile", func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, mid)).To(Succeed())
+		Expect(ctrl.SetControllerReference(mid, primary, k8sClient.Scheme())).To(Succeed())
+		Expect(k8sClient.Update(ctx, primary)).To(Succeed())
 
 		first, err := reconcileMiddleware(name, "default")
 		Expect(err).NotTo(HaveOccurred())
@@ -137,7 +343,12 @@ var _ = Describe("Suspend reconcile", func() {
 		got := &v1.Middleware{}
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, got)).To(Succeed())
 		Expect(got.Status.ReconcilePause).NotTo(BeNil())
-		Expect(got.Status.ReconcilePause.DesiredSpec.Raw).To(MatchJSON(`{"replicas":1}`))
+		data, err := k8s.NewManagedResourceWriter(k8sClient).LoadReconcilePauseSnapshot(ctx, got, got.Status.ReconcilePause)
+		Expect(err).NotTo(HaveOccurred())
+		snapshotRaw, err := json.Marshal(data.ActualSpec)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(snapshotRaw)).To(ContainSubstring(`"replicas":1`))
+		Expect(string(snapshotRaw)).To(ContainSubstring(`"terminationMessagePath":"/dev/termination-log"`))
 		Expect(got.Status.ReconcilePause.ResourceUID).NotTo(BeEmpty())
 
 		// The only deliberate DR change is the replica count. merge must not
@@ -155,7 +366,7 @@ var _ = Describe("Suspend reconcile", func() {
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, got)).To(Succeed())
 		Expect(got.Annotations).NotTo(HaveKey(v1.AnnotationSuspendReconcile))
 		Expect(got.Spec.ReconcileOverrides).NotTo(BeNil())
-		Expect(got.Spec.ReconcileOverrides.SpecPatch.Raw).To(ContainSubstring(`"replicas":5`))
+		Expect(got.Spec.ReconcileOverrides.SpecPatch.Raw).To(MatchJSON(`{"replicas":5}`))
 		Expect(got.Spec.ReconcileOverrides.BaseSpec.Raw).To(MatchJSON(`{"replicas":1}`))
 		Expect(got.Status.ReconcilePause.AdoptedLiveSpecHash).NotTo(BeEmpty())
 		Expect(findCondition(got.Status.Conditions, v1.CondTypeReconcileAdoption).Status).To(Equal(metav1.ConditionTrue))

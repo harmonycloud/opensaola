@@ -21,17 +21,25 @@ import (
 	"testing"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/k8s"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/managedfields"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestMiddlewarePauseMergeStateMachine(t *testing.T) {
+	k8s.ConfigureResourceIntents(controllerPauseTestSchemas{})
+	t.Cleanup(func() { k8s.ConfigureResourceIntents(nil) })
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	if err := v1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add OpenSaola scheme: %v", err)
 	}
@@ -72,6 +80,9 @@ func TestMiddlewarePauseMergeStateMachine(t *testing.T) {
 		"spec": map[string]any{"replicas": int64(3), "storage": "10Gi"},
 	}}
 	live.SetGroupVersionKind(gvk)
+	mid.UID = "mid-uid"
+	controller := true
+	live.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: v1.GroupVersion.String(), Kind: "Middleware", Name: mid.Name, UID: mid.UID, Controller: &controller}})
 	cli := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1.Middleware{}).WithObjects(baseline, mid, live).Build()
 	r := &MiddlewareReconciler{Client: cli, Scheme: scheme}
 
@@ -154,4 +165,65 @@ func middlewareReconcileAdoptionCondition(conditions []metav1.Condition, conditi
 		}
 	}
 	return nil
+}
+
+type controllerPauseTestSchemas struct{}
+
+func (controllerPauseTestSchemas) Resolve(context.Context, schema.GroupVersionKind) (managedfields.TypeConverter, string, error) {
+	return managedfields.NewDeducedTypeConverter(), "test-schema", nil
+}
+
+func TestMiddlewareInvalidPauseSnapshotStaysProtectedUntilExplicitApply(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"legacy desired snapshot", ""}, {"corrupt actual snapshot", `{"replicas":3}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			if err := v1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			mid := &v1.Middleware{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", UID: "mid-uid", Namespace: "default", Annotations: map[string]string{v1.AnnotationSuspendReconcile: "true"}},
+				Status: v1.MiddlewareStatus{ReconcilePause: &v1.ReconcilePauseStatus{
+					SnapshotSecret: "missing-pause-secret", Hash: "old-invalid-hash", ResourceUID: "actual-uid", Name: "test", Namespace: "default", GVK: v1.GVK{Group: "test.io", Version: "v1", Kind: "Database"},
+				}},
+			}
+			if tc.raw == "" {
+				mid.Status.ReconcilePause.SnapshotSecret = ""
+			}
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(mid).WithObjects(mid).Build()
+			r := &MiddlewareReconciler{Client: cli, Scheme: scheme}
+			handled, _, err := r.handleMiddlewareReconcilePause(context.Background(), mid)
+			if err != nil || !handled {
+				t.Fatalf("pause result: handled=%v err=%v", handled, err)
+			}
+			if err := cli.Get(context.Background(), types.NamespacedName{Name: mid.Name, Namespace: mid.Namespace}, mid); err != nil {
+				t.Fatal(err)
+			}
+			condition := middlewareReconcileAdoptionCondition(mid.Status.Conditions, v1.CondTypeReconcileAdoption)
+			if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != v1.CondReasonReconcileSnapshotFailed {
+				t.Fatalf("invalid snapshot was accepted: %#v", condition)
+			}
+			if mid.Status.ReconcilePause.Hash != "old-invalid-hash" {
+				t.Fatal("invalid snapshot was silently recaptured")
+			}
+			mid.Annotations[v1.AnnotationResumePolicy] = "apply"
+			if err := cli.Update(context.Background(), mid); err != nil {
+				t.Fatal(err)
+			}
+			handled, result, err := r.handleMiddlewareReconcilePause(context.Background(), mid)
+			if err != nil || !handled || !result.Requeue {
+				t.Fatalf("explicit apply: handled=%v result=%#v err=%v", handled, result, err)
+			}
+			if err := cli.Get(context.Background(), types.NamespacedName{Name: mid.Name, Namespace: mid.Namespace}, mid); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := mid.Annotations[v1.AnnotationSuspendReconcile]; exists {
+				t.Fatal("explicit apply did not release the annotation")
+			}
+		})
+	}
 }

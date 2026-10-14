@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
@@ -30,7 +29,7 @@ import (
 )
 
 const (
-	reconcilePauseSnapshotMessage  = "primary custom resource desired spec snapshot captured for suspend-reconcile"
+	reconcilePauseSnapshotMessage  = "primary custom resource actual spec snapshot captured for suspend-reconcile"
 	reconcileResumeRequiredMessage = "set middleware.cn/resume-policy=merge to adopt actual CR changes or apply to replay desired state"
 )
 
@@ -78,9 +77,8 @@ func (r *MiddlewareReconciler) handleMiddlewareReconcilePause(ctx context.Contex
 	if policy == v1.ReconcileResumePolicyMerge {
 		matches, verifyErr := middleware.PausedPrimaryCustomResourceSpecMatchesAdoption(ctx, r.Client, mid.Status.ReconcilePause)
 		if verifyErr != nil || !matches {
-			// Treat a second actual-spec change as a new L input. Re-running the
-			// same B/L/D merge is safe: unchanged adopted paths remain accepted,
-			// while a conflicting second change remains paused and visible.
+			// A second actual-spec change must be adopted before any write.
+			// Recompare against the same durable pause-start observation.
 			return r.mergePausedMiddleware(ctx, mid)
 		}
 	}
@@ -91,6 +89,9 @@ func (r *MiddlewareReconciler) handleMiddlewareReconcilePause(ctx context.Contex
 
 func (r *MiddlewareReconciler) captureMiddlewarePause(ctx context.Context, mid *v1.Middleware) (bool, ctrl.Result, error) {
 	if mid.Status.ReconcilePause != nil {
+		if err := middleware.ValidateReconcilePauseSnapshot(ctx, r.Client, mid, mid.Status.ReconcilePause); err != nil {
+			return true, ctrl.Result{}, r.recordMiddlewarePauseFailure(ctx, mid, v1.CondReasonReconcileSnapshotFailed, err.Error())
+		}
 		if err := r.patchMiddlewarePauseStatus(ctx, mid, func(status *v1.MiddlewareStatus) {
 			markReconcilePaused(ctx, &status.Conditions, mid.Generation)
 			clearReconcileAdoptionCondition(&status.Conditions)
@@ -104,16 +105,13 @@ func (r *MiddlewareReconciler) captureMiddlewarePause(ctx context.Context, mid *
 	if err != nil {
 		return true, ctrl.Result{}, r.recordMiddlewarePauseFailure(ctx, mid, v1.CondReasonReconcileSnapshotFailed, fmt.Sprintf("capture reconcile pause snapshot: %v", err))
 	}
-	if err := r.patchMiddlewarePauseStatus(ctx, mid, func(status *v1.MiddlewareStatus) {
-		if status.ReconcilePause == nil {
-			status.ReconcilePause = snapshot
-		}
+	if err := k8s.NewManagedResourceWriter(r.Client).PublishReconcilePauseSnapshot(ctx, mid, snapshot, func(status *v1.MiddlewareStatus) {
 		markReconcilePaused(ctx, &status.Conditions, mid.Generation)
 		clearReconcileAdoptionCondition(&status.Conditions)
 	}); err != nil {
 		return true, ctrl.Result{}, err
 	}
-	log.FromContext(ctx).Info("Middleware reconciliation is suspended with a durable desired-state snapshot",
+	log.FromContext(ctx).Info("Middleware reconciliation is suspended with a durable actual-spec snapshot",
 		"name", mid.Name,
 		"namespace", mid.Namespace,
 		"annotation", v1.AnnotationSuspendReconcile,
@@ -126,15 +124,10 @@ func (r *MiddlewareReconciler) mergePausedMiddleware(ctx context.Context, mid *v
 	snapshot := mid.Status.ReconcilePause
 	if snapshot == nil {
 		return true, ctrl.Result{}, r.recordMiddlewarePauseFailure(ctx, mid, v1.CondReasonReconcileSnapshotFailed,
-			"cannot merge a paused Middleware without a desired-spec snapshot; use resume-policy=apply to replay desired state")
+			"cannot merge a paused Middleware without an actual-spec snapshot; use resume-policy=apply to replay desired state")
 	}
 	adoption, err := middleware.AdoptPausedPrimaryCustomResource(ctx, r.Client, mid, snapshot)
 	if err != nil {
-		var conflict *middleware.ReconcilePauseMergeConflictError
-		if errors.As(err, &conflict) {
-			return true, ctrl.Result{}, r.recordMiddlewarePauseFailure(ctx, mid, v1.CondReasonReconcileAdoptionConflict,
-				fmt.Sprintf("actual and desired state both changed: %v", conflict.Paths))
-		}
 		return true, ctrl.Result{}, r.recordMiddlewarePauseFailure(ctx, mid, v1.CondReasonReconcileAdoptionFailed,
 			fmt.Sprintf("adopt actual primary custom resource changes: %v", err))
 	}
@@ -181,7 +174,12 @@ func (r *MiddlewareReconciler) finalizeMiddlewareReconcileResume(ctx context.Con
 	}
 	cleared := false
 	if err := r.patchMiddlewarePauseStatus(ctx, mid, func(status *v1.MiddlewareStatus) {
-		if expectedSnapshotHash != "" && (status.ReconcilePause == nil || status.ReconcilePause.Hash != expectedSnapshotHash) {
+		cleared = false // Each conflict retry must confirm the current session.
+		currentHash := ""
+		if status.ReconcilePause != nil {
+			currentHash = status.ReconcilePause.Hash
+		}
+		if currentHash != expectedSnapshotHash {
 			return
 		}
 		status.ReconcilePause = nil
@@ -195,6 +193,9 @@ func (r *MiddlewareReconciler) finalizeMiddlewareReconcileResume(ctx context.Con
 	}
 	if !cleared {
 		return fmt.Errorf("middleware reconcile pause snapshot changed before status finalization")
+	}
+	if err := k8s.NewManagedResourceWriter(r.Client).CleanupReconcilePauseSnapshot(ctx, mid, mid.Status.ReconcilePause); err != nil {
+		log.FromContext(ctx).Error(err, "pause Secret cleanup deferred to background collection", "name", mid.Name, "namespace", mid.Namespace)
 	}
 	clearReconcilePaused(&mid.Status.Conditions)
 	clearReconcileAdoptionCondition(&mid.Status.Conditions)

@@ -81,7 +81,9 @@ var _ = Describe("Recorded resource intent controller integration", func() {
 			Expect(k8sClient.Patch(ctx, primary, client.RawPatch(types.JSONPatchType, []byte(`[{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"EXTERNAL","value":"preserve"}}]`)), client.FieldOwner("manager"))).To(Succeed())
 			containers, _, err := unstructured.NestedSlice(spec, "template", "spec", "containers")
 			Expect(err).NotTo(HaveOccurred())
-			containers[0].(map[string]any)["env"] = []any{map[string]any{"name": "KEEP", "value": "after"}}
+			container, ok := containers[0].(map[string]any)
+			Expect(ok).To(BeTrue())
+			container["env"] = []any{map[string]any{"name": "KEEP", "value": "after"}}
 			Expect(unstructured.SetNestedSlice(spec, containers, "template", "spec", "containers")).To(Succeed())
 			raw, err = json.Marshal(spec)
 			Expect(err).NotTo(HaveOccurred())
@@ -93,7 +95,10 @@ var _ = Describe("Recorded resource intent controller integration", func() {
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(primary), primary)).To(Succeed())
 			containers, _, err = unstructured.NestedSlice(primary.Object, "spec", "template", "spec", "containers")
 			Expect(err).NotTo(HaveOccurred())
-			env := containers[0].(map[string]any)["env"].([]any)
+			container, ok = containers[0].(map[string]any)
+			Expect(ok).To(BeTrue())
+			env, ok := container["env"].([]any)
+			Expect(ok).To(BeTrue())
 			Expect(env).To(ConsistOf(map[string]any{"name": "KEEP", "value": "after"}, map[string]any{"name": "EXTERNAL", "value": "preserve"}))
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(mid), mid)).To(Succeed())
 			Expect(mid.Status.ObservedGeneration).To(Equal(mid.Generation))

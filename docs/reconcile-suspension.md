@@ -6,11 +6,11 @@ This runbook explains how to temporarily suspend child-resource writes for a Mid
 
 ## Scope and guarantees
 
-- `merge` is available only for a MID and automatically adopts non-conflicting changes made to its **primary live CR `spec`** while reconciliation is paused.
-- **PreAction boundary:** the pause-snapshot and B/L/D merge renderer replays CUE-only PreActions on an in-memory MID copy, so their primary-CR `spec` effects match a normal primary-CR write without executing commands, HTTP actions, or Kubernetes writes. If any PreAction contains a non-CUE step (for example CMD or HTTP), `merge` fails closed. Make the action pure CUE, make its result an explicit MID/Baseline desired value, or use `apply` only when intentionally overwriting changes made during the pause.
+- `merge` is available only for a MID and automatically adopts changes made to its **primary live CR `spec`** while reconciliation is paused.
+- **PreAction boundary:** the resume desired-state renderer replays CUE-only PreActions on an in-memory MID copy, so their primary-CR `spec` effects match a normal primary-CR write without executing commands, HTTP actions, or Kubernetes writes. If any PreAction contains a non-CUE step (for example CMD or HTTP), `merge` fails closed. Make the action pure CUE, make its result an explicit MID/Baseline desired value, or use `apply` only when intentionally overwriting changes made during the pause.
 - It does not adopt changes to CR metadata, Configuration resources, PreActions, or MiddlewareOperator resources. Update their desired configuration separately.
-- The controller persists its pause snapshot in `.status.reconcilePause`; no in-process cache is required.
-- Snapshot and live primary-CR `spec` input are limited to 256 KiB. Arrays are compared as whole values. An explicit JSON `null` observed in the live CR is treated as unchanged from the pause-time desired state during merge, preventing typed-operator round trips from producing no-op deletion overrides.
+- The actual pause-start spec and previous overrides are stored in an immutable Secret in the MID namespace, using the existing fast zstd codec (JSON when compression is not smaller). `.status.reconcilePause` contains only the `snapshotSecret` reference, target identity, hashes and timestamps; it does not duplicate the payload or depend on process memory.
+- No application snapshot size ceiling is imposed; Kubernetes validates the stored Secret and resource sizes. Pause captures the actual spec with GET. Resume compares that observation with the current actual spec. Unchanged defaults, nulls and pre-existing drift are not adopted. Associative lists use API schema keys, sets use membership, and schema-declared atomic values are handled as a whole.
 - If the primary CR is deleted/recreated, or its GVK, name, or namespace changes, recovery fails closed rather than applying a patch to a different object.
 
 ## MID: pause, modify, and merge
@@ -36,10 +36,10 @@ kubectl get mid <mid-name> -n <namespace> -o json | jq '{
 Before changing the live primary CR, confirm all of the following:
 
 1. `ReconcilePaused=True`.
-2. `.status.reconcilePause` exists and has `desiredSpec`.
+2. `.status.reconcilePause.snapshotSecret` refers to a valid Secret in the same namespace.
 3. `ReconcileAdoption` is absent or not `False`.
 
-If snapshot capture failed, do not change the live primary CR. Fix the missing/invalid primary CR, rendering failure, or size limit first, then recheck the MID.
+If snapshot capture failed, do not change the live primary CR. Fix the missing/invalid primary CR, target-resolution failure, or size limit first, then recheck the MID.
 
 ### 3. Make a primary-CR change that should persist
 
@@ -56,7 +56,9 @@ kubectl annotate mid <mid-name> -n <namespace> \
   middleware.cn/resume-policy=merge --overwrite
 ```
 
-The controller compares pause-time desired state (B), the live primary-CR `spec` (L), and current rendered desired state (D). Non-conflicting changes from L are stored in `spec.reconcileOverrides`; immediately before the following primary-CR write, the controller checks that L did not change again. If an external system or a human changes it again, the controller merges again instead of writing an older value.
+The controller compares the actual spec captured at pause start with the actual spec before resume. It applies only the additions, modifications and deletions from that interval to current rendered desired state, then persists `spec.reconcileOverrides`. At observed changed paths the current CR value wins; unrelated MID desired inputs remain. Subsequent explicit MID/Baseline changes still take precedence under the existing override rules.
+
+Before writing, the actual spec is checked again. A further change triggers recomputation. The snapshot Secret retains `previousOverrides` from before the pause so a retry cannot retain a reverted intermediate adoption.
 
 ### 5. Verify completion
 
@@ -70,7 +72,7 @@ kubectl get mid <mid-name> -n <namespace> -o json | jq '{
 }'
 ```
 
-A successful resume removes the pause snapshot and both recovery annotations. `spec.reconcileOverrides` may remain; it preserves adopted changes from the pause until an explicit desired-state change at the same path supersedes them.
+A successful resume clears the status reference and both recovery annotations, then deletes the pause Secret. Failed deletion or interrupted cleanup is retried by the existing collector (a 10-minute scan and 30-minute minimum age by default). Active pause references never expire. Deleting the MID also garbage-collects its Secrets through controller ownerReferences. Missing, foreign or corrupt Secrets keep merge protection active and never trigger a new baseline capture during resume. `spec.reconcileOverrides` may remain; it preserves adopted changes from the pause until an explicit desired-state change at the same path supersedes them.
 
 ## MID: intentionally discard changes from the pause
 
@@ -83,7 +85,7 @@ kubectl annotate mid <mid-name> -n <namespace> \
 
 Do not remove `suspend-reconcile` directly. Without a valid recovery policy, the MID remains write-protected to prevent the old forced-replay behavior.
 
-## Conflict or adoption failure
+## Adoption failure
 
 If `ReconcileAdoption=False`, inspect its `reason` and `message`:
 
@@ -92,14 +94,15 @@ kubectl get mid <mid-name> -n <namespace> -o json | jq \
   '.status.conditions[] | select(.type == "ReconcileAdoption")'
 ```
 
-- `ReconcileAdoptionConflict`: a change from the pause and current desired state changed the same path. Resolve the intended value in the primary CR or in MID/Baseline desired state, then request `resume-policy=merge` again.
-- `ReconcileSnapshotFailed` or another adoption failure: keep the pause in place and fix the reported identity, render, or size issue before retrying.
+- `ReconcileSnapshotFailed` or another adoption failure: keep the pause in place and fix the reported identity, schema, render, or size issue before retrying.
+
+A legacy `desiredSpec` snapshot is not an actual baseline and is never silently recaptured. Finish paused sessions before upgrading. If only a legacy snapshot remains after upgrading, keep the pause, explicitly preserve required actual changes in desired inputs, then select `apply`.
 
 Never bypass a failed merge by directly removing the pause annotation. Use `apply` only after explicitly accepting that changes from the pause will be overwritten.
 
 ## MiddlewareOperator (MO) has ordinary pause/resume semantics
 
-An MO pause protects its Configuration, RBAC, Deployment creation/update, and Deployment drift repair. It does not use B/L/D merging or `resume-policy`.
+An MO pause protects its Configuration, RBAC, Deployment creation/update, and Deployment drift repair. It does not use primary-CR change adoption or `resume-policy`.
 
 ```bash
 kubectl annotate mo <mo-name> -n <namespace> \

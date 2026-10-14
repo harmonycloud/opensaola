@@ -52,10 +52,12 @@ type resourceIntent struct {
 	OwnerUID            types.UID                  `json:"ownerUID"`
 	ResourceUID         types.UID                  `json:"resourceUID"`
 	Configuration       string                     `json:"configuration,omitempty"`
-	SchemaHash          string                     `json:"schemaHash"`
+	SchemaHash          string                     `json:"schemaHash,omitempty"`
 	Desired             *unstructured.Unstructured `json:"desired"`
 	Effective           *unstructured.Unstructured `json:"effective,omitempty"`
 	Preserved           []string                   `json:"preserved,omitempty"`
+	// Pause distinguishes an observed pause baseline from a rendered intent.
+	Pause *reconcilePauseData `json:"pause,omitempty"`
 }
 
 // intentObject defines the writable surface. Lifecycle metadata is handled by
@@ -188,7 +190,7 @@ func (w *ManagedResourceWriter) loadResourceIntent(ctx context.Context, owner cl
 		return nil, nil, managedWriteBlocked("resource intent record owner mismatch")
 	}
 	record, err := decodeResourceIntent(secret.Data)
-	if err != nil || record.Version != 1 || record.Desired == nil {
+	if err != nil || record.Version != 1 || record.Desired == nil || record.Pause != nil {
 		return nil, nil, managedWriteBlocked("invalid resource intent record data")
 	}
 	if record.OwnerUID != owner.GetUID() || record.ResourceUID != live.GetUID() || record.Configuration != configuration || record.Desired.GroupVersionKind() != live.GroupVersionKind() || client.ObjectKeyFromObject(record.Desired) != client.ObjectKeyFromObject(live) {

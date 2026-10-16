@@ -351,7 +351,9 @@ Configuration 模板通过条件渲染为空、或其引用被 Baseline/MID/MO �
 |------|----------|-----------|----------|
 | `configurationDisablePolicy` | 模板不再渲染或引用移除后 owner 的下一次 reconcile | 无显式策略时：PVC/PV 为 `orphan`，CRD 始终 `orphan`，其他所有 Kind 为 `delete` | 仅清理此前写入生命周期清单、且 owner UID、资源 UID、Configuration 标记和 owner 关系仍匹配的资源 |
 | `configurationDeletePolicy` | MID/MO 被删除 | 按既有受管资源识别清理 | `orphan` 保留；`delete` 是强删除语义，不能把它当作 disable 路径的 UID 安全删除 |
-| `configurationOwnershipPolicy=managed` | 同名资源已有其他 controller owner | 默认不抢占 owner、保留 OwnerReference 后继续 patch | `managed` 使 reconcile 失败，明确拒绝抢占；未受当前 owner 管理的资源不会进入生命周期清单 |
+| `configurationOwnershipPolicy=managed` | 同名资源已有其他 controller owner | 归属校验默认即拒绝修改其他 controller 的资源；`managed` 保留兼容 | 只有通过归属校验或历史来源接管并成功写入的资源才进入生命周期清单 |
+
+历史 Configuration 资源缺少 owner UID 或旧 owner 已删除时，可在 app/Configuration 来源标记匹配且无其他 owner 冲突的情况下接管；仅有 Helm 标记不够。同名 MiddlewareConfiguration 重建仍是同一逻辑来源。接管以原子写入建立当前 owner 的记录并保留首次期望未声明的旧字段；CRD 不删除重建。完整边界见[渲染期望记录](resource-intent_zh.md)。
 
 除 PVC/PV 和 CRD 外，未显式标注的资源会在功能停用时默认清理；如需保留 ConfigMap、Secret、StatefulSet、
 未知/自定义 CR 或任意其他 Kind，必须在仍正常渲染时设置在 `MiddlewareConfiguration.metadata.annotations`

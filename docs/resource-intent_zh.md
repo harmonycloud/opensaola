@@ -7,7 +7,7 @@
 适用于公共 `ManagedResourceWriter` 管理的 MID 主资源、MID/MO Configuration 资源。MO 自身 Deployment/RBAC 的其他写入路径、一次性 Action，以及 Configuration 整资源停用/删除不在此改动范围。
 
 1. 新可变资源仍用 SSA 首次创建，然后保存当前渲染期望。Job 保持一次性 Create；batch/v1 CronJob 走可变资源流程。
-2. 没有记录的存量资源，在下一次正常更新时沿用原 SSA 写入并记录本次明确提交的期望。**不会把整个 live 当成历史期望，不会推测已经省略的旧字段。** 此次更新中显式给出的值仍遵循原 Force Apply 行为；不能把它宣传为保护所有未知 atomic 列表子项。
+2. 没有记录、已属于当前 owner 的存量资源，在下一次正常更新时沿用原 SSA 写入并记录本次明确提交的期望。**不会把整个 live 当成历史期望，不会推测已经省略的旧字段。** 此次更新中显式给出的值仍遵循原 Force Apply 行为；不能把它宣传为保护所有未知 atomic 列表子项。符合下文条件的历史 Configuration 接管则使用带 UID/resourceVersion 校验的 JSON Patch：覆盖本次明确声明的值，保留首次期望未声明的字段，不沿用旧 owner 的删除基线。
 3. 有记录后，按 `B=上次渲染期望、L=当前实际资源、D=本次渲染期望` 做三方比较。使用 API Server 的真实 OpenAPI/SMD 模型确定 map、关联列表、set、atomic 边界，不猜测所有列表都以 `name` 为键。
 4. 最终业务变更和新记录指针一起通过带 UID/resourceVersion 检查的 **单次 JSON Patch** 提交。提交前对完整结果做 server dry-run；不会先删 valueFrom、再单独添加 value。
 5. unchanged generation 的启动不批量创建记录、不改业务资源、不重放 PreAction。旧 CLI 方案未正式发布，已经移除其回执、完成标记和启动兼容分支；正常更新不依赖 CLI 迁移。
@@ -35,7 +35,10 @@
 - 常规更新每个资源保留一份当前记录；MID/MO 正常删除时，Secret 通过 ownerReference 随 owner GC。后台清理随 leader 启动，并在启动及每 10 分钟扫描带专用标签的记录；默认未引用记录至少保留 30 分钟，直接读取 API，分页 50 条、顺序处理。当前引用记录永不过期。
 - 新记录携带单资源版本发布协议与 baseResourceVersion。指针写入始终校验该 UID/RV；初始化冲突后重新准备记录，保留原 Create 默认化证据，但不复用旧 Secret。后台发现目标版本已变化即可回收未引用记录；版本未变化时先以带 UID/RV 校验的 metadata-only JSON Patch 写入根 metadata 的专用 `middleware.cn/resource-intent-gc-fence` label，使延迟提交失效，再删除记录。该 label 不进入期望或业务字段合并、不写入 Pod 模板；使用 label 是为了避免 Deployment 根 annotation 变更导致 generation 增长。完整 fence 会先 dry-run；出现 admission 业务变更、冲突或结果不确定时保留记录。
 - 目标已不存在或同名对象 UID 已变化时，后台可以回收绑定旧 UID 的未引用记录；CRD/API 端点不可用不等于目标对象不存在。当前指向记录、身份不符、损坏记录、权限/网络失败、未知发布协议均不会按年龄强删。缺少发布协议信息的记录保留给正常版本替换或 owner GC。清理失败记录脱敏日志，下一轮重试，不阻断正常 reconcile。删除带 Secret UID/RV 条件，避免并发元数据修改后误删。
-- 记录绑定 owner UID、资源 UID/GVK/key、Configuration 名称以及合并模型。跨命名空间/集群级资源要求已存在的 owner UID 来源标记；同命名空间的旧资源可用有效 controller ownerReference 证明身份。同名 MCF 重建仍视为相同逻辑来源。
+- 记录绑定 owner UID、资源 UID/GVK/key、Configuration 名称以及合并模型。已有当前 owner UID 来源标记，或同命名空间有效 controller ownerReference 的资源继续按严格身份校验写入。同名 MCF 重建仍视为相同逻辑来源，正常写入更新 Configuration UID，不因 UID 变化拒绝该来源。
+- 历史 Configuration 缺少 owner UID，或标记中的旧 owner 已不存在时，只有 `middleware.cn/app` 与当前 owner 名称相同、`middleware.cn/configurations` 与当前 Configuration 名称相同，且没有冲突归属，才允许接管。其他 controller、仅有 Helm 标记、其他来源仍拒绝写入。旧 controller 引用仅允许接续同命名空间、同名同类型的已删除 OpenSaola owner。
+- 接管前通过直接 API 读取检查 MID/MO：旧 owner UID 仍存在、其他 owner 的清单指向同一资源，或其他同名 owner（含跨命名空间、不同 MID/MO 类型）直接或经 baseline 引用该来源，都视为冲突；暂停和删除中的 owner 也计入检查。不同名称实例复用同一模板本身不构成冲突。业务 dry-run 和新记录准备完成后再次检查 owner 状态与冲突归属，再以一次 JSON Patch 同时提交字段、归属标记、controller 引用及新记录指针；资源 UID/RV 变化会触发重新读取和校验。
+- 接管成功后才按实际资源建立本次 owner 的停用清理清单；清理继续要求 UID 与归属标记匹配。CRD 始终保留为 `orphan`，不通过删除重建完成接管，已有 CR 不受接管本身影响。
 - Secret 缺失/损坏、资源被同名替换、真实合并拓扑变化、API schema 无法获取时，停止推断删除并返回可重试错误，不退回全量 Update。修复记录或 API 可用性后正常重试。需要放弃某一个记录时，应先备份、确认当前期望，再针对该资源移除记录指针，让下一次正常更新重新建立基线；这会失去此前删除依据，不能当作已清理旧残留。
 - Action 编辑携带记录指针或清理标记的实际资源时，底层 Apply 保留原 UID/RV。遇到并发冲突应重新读取并重新计算操作，不能只给旧 payload 换一个新 RV，否则可能恢复已删除的旧记录指针。
 - schema 的描述、validation-only 变化及无关 Kind 变化不会使记录失效；真正的字段类型/list-key/atomic 变化会。真实集群从 v2 发现切换到 v3 时，暴露的默认值也可能不同并触发保护，不能承诺跨 Kubernetes 版本永不失效。支持 OpenAPI v3；只有旧集群 `/openapi/v3` 根端点也为 404 时才使用真实 OpenAPI v2；新 CRD 的单个 GV 端点尚未发布时返回可重试错误，403/超时不降级猜测。

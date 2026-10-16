@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	jsonpatch "gomodules.xyz/jsonpatch/v2"
@@ -145,18 +146,21 @@ func verifyIntentIdentity(owner client.Object, live, desired *unstructured.Unstr
 		return verifyManagedIdentity(owner, live)
 	}
 	if owner.GetUID() == "" || live.GetUID() == "" || live.GetDeletionTimestamp() != nil {
-		return managedWriteBlocked("invalid Configuration resource identity")
+		return managedIdentityError(owner, live, configuration, "invalid configuration resource identity: owner UID=%q, resource UID=%q, resource deleting=%t",
+			owner.GetUID(), live.GetUID(), live.GetDeletionTimestamp() != nil)
 	}
 	annotations := live.GetAnnotations()
 	if annotations[v1.LabelConfigurations] != configuration {
-		return managedWriteBlocked("Configuration resource lacks matching lifecycle identity")
+		return managedIdentityError(owner, live, configuration, "%s",
+			identityMarkerMismatch("annotation", v1.LabelConfigurations, annotations[v1.LabelConfigurations], configuration))
 	}
 	if ref := metav1.GetControllerOf(live); ref != nil {
 		if err := verifyManagedIdentity(owner, live); err != nil {
-			return err
+			return fmt.Errorf("%w; configuration=%q", err, configuration)
 		}
 		if uid := annotations[v1.AnnotationConfigurationOwnerUID]; uid != "" && uid != string(owner.GetUID()) {
-			return managedWriteBlocked("Configuration owner UID mismatch")
+			return managedIdentityError(owner, live, configuration, "%s",
+				identityMarkerMismatch("annotation", v1.AnnotationConfigurationOwnerUID, uid, string(owner.GetUID())))
 		}
 		return nil
 	}
@@ -164,7 +168,14 @@ func verifyIntentIdentity(owner client.Object, live, desired *unstructured.Unstr
 	// namespaced controller reference. Configuration NAME denotes the logical
 	// source even when that cluster-scoped Configuration has been recreated.
 	if live.GetLabels()[v1.LabelApp] != owner.GetName() || annotations[v1.AnnotationConfigurationOwnerUID] != string(owner.GetUID()) {
-		return managedWriteBlocked("Configuration resource lacks owner UID marker")
+		var mismatches []string
+		if app := live.GetLabels()[v1.LabelApp]; app != owner.GetName() {
+			mismatches = append(mismatches, identityMarkerMismatch("label", v1.LabelApp, app, owner.GetName()))
+		}
+		if uid := annotations[v1.AnnotationConfigurationOwnerUID]; uid != string(owner.GetUID()) {
+			mismatches = append(mismatches, identityMarkerMismatch("annotation", v1.AnnotationConfigurationOwnerUID, uid, string(owner.GetUID())))
+		}
+		return managedIdentityError(owner, live, configuration, "%s", strings.Join(mismatches, "; "))
 	}
 	return nil
 }

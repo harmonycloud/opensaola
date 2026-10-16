@@ -55,13 +55,6 @@ func sameControllerOwner(owner metav1.Object, ref *metav1.OwnerReference) bool {
 	return ref.Name == name
 }
 
-func resourceID(obj metav1.Object) string {
-	if obj.GetNamespace() == "" {
-		return obj.GetName()
-	}
-	return fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName())
-}
-
 func configurationPolicy(m *v1.MiddlewareConfiguration, obj metav1.Object, key string) string {
 	if obj != nil {
 		if value := obj.GetAnnotations()[key]; value != "" {
@@ -175,21 +168,6 @@ func shouldDeleteDisabledRenderedResource(owner metav1.Object, obj metav1.Object
 		return sameControllerOwner(owner, controller)
 	}
 	return controller == nil || sameControllerOwner(owner, controller)
-}
-
-func shouldSetControllerReference(owner metav1.Object, old metav1.Object, m *v1.MiddlewareConfiguration, desired metav1.Object) (bool, error) {
-	if old == nil {
-		return true, nil
-	}
-	controller := metav1.GetControllerOf(old)
-	if controller == nil || sameControllerOwner(owner, controller) {
-		return true, nil
-	}
-	if configurationPolicy(m, desired, v1.AnnotationConfigurationOwnershipPolicy) == v1.ConfigurationOwnershipPolicyManaged {
-		return false, fmt.Errorf("configuration resource %s is already controlled by %s %s/%s; refusing to take controller ownership",
-			resourceID(old), controller.APIVersion, controller.Kind, controller.Name)
-	}
-	return false, nil
 }
 
 func isOpenSaolaManagedConfiguration(owner metav1.Object, obj metav1.Object, configurationName string) bool {

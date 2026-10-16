@@ -885,7 +885,7 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 > 无显式策略时，PVC/PV 为 `orphan`，CRD 无论注解为何都为 `orphan`，其他所有 Kind（包含未知/自定义和集群级资源）为 `delete`。显式 `delete` / `orphan` 可覆盖 PVC/PV 的默认；CRD 在解析和删除时均被硬保护。
 > 控制器只会清理状态清单中记录为 `delete`、且 live 对象的 owner UID、Configuration UID、resource UID 和 controller owner 都仍匹配的对象；外部重建、交接或同名复用的资源会被保留。旧的 `orphan` 清单不会在升级后被追溯删除，必须先在资源仍正常渲染时成功 reconcile，后续停用才采用新默认。
 > 直接修改 `MiddlewareConfiguration.spec.template` 不会单独触发 MID/MO reconcile；需要 MID/MO 引用变更或其他 owner 事件触发。这里的“不再引用”只表示 OpenSaola 不再渲染该 Configuration，不表示控制器已分析集群中的其他消费者。该路径与 MID/MO 删除时按 `configurationDeletePolicy` / OwnerReference 清理资源不同。
-> 若同名资源已有其他 controller owner，默认不抢占 owner、保留其 OwnerReference 后继续 patch，且该资源不进入当前 owner 的生命周期清单；设置 `configurationOwnershipPolicy=managed` 则直接失败并拒绝抢占。MID/MO 删除路径中的 `configurationDeletePolicy=delete` 是独立且更强的删除语义，不应当作上述停用路径的 UID 严格删除。
+> 若同名资源已有其他 controller owner，归属校验默认即拒绝写入；`configurationOwnershipPolicy=managed` 保留兼容。历史 Configuration 缺少 owner UID 或旧 owner 已删除时，仅在 app/Configuration 来源匹配且无冲突归属时允许接管；同名 MCF 重建仍视为同一逻辑来源。接管成功后才建立当前 owner 的清理清单，CRD 始终保留。详见[渲染期望记录](resource-intent_zh.md)。MID/MO 删除路径中的 `configurationDeletePolicy=delete` 是独立且更强的删除语义，不应当作上述停用路径的 UID 严格删除。
 
 ---
 

@@ -110,6 +110,8 @@ func TestHandleOrphanPolicyStripsPriorControllerOwnership(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "shared-sample",
 			Namespace:       "mv1",
+			UID:             "existing-configmap-uid",
+			Annotations:     map[string]string{v1.LabelConfigurations: "redis-sentinel-configmap"},
 			OwnerReferences: []metav1.OwnerReference{middlewareOwnerRef()},
 		},
 	}

@@ -22,6 +22,7 @@ import (
 
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
 
@@ -49,6 +50,10 @@ type renderedConfigurationApplyResult struct {
 // deliberate no-op; stale-object cleanup is performed by the caller from the
 // prior status inventory.
 func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act consts.HandleAction, m *v1.MiddlewareConfiguration) (*renderedConfigurationApplyResult, error) {
+	ownerObj, ok := owner.(client.Object)
+	if !ok {
+		return nil, fmt.Errorf("unsupported owner type %T", owner)
+	}
 	obj := new(unstructured.Unstructured)
 	if err := yaml.Unmarshal([]byte(m.Spec.Template), obj); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal CR: %w", err)
@@ -61,9 +66,10 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		resourceIsNamespaced bool
 		resourceScopeKnown   bool
 	)
-	namespaced, nsErr := k8s.IsNamespaced(obj)
+	mapping, nsErr := cli.RESTMapper().RESTMapping(obj.GroupVersionKind().GroupKind(), obj.GroupVersionKind().Version)
+	namespaced := nsErr == nil && mapping.Scope.Name() == meta.RESTScopeNameNamespace
 	if nsErr != nil {
-		if k8s.IsCRDNotInstalled(nsErr) {
+		if meta.IsNoMatchError(nsErr) || k8s.IsCRDNotInstalled(nsErr) {
 			log.FromContext(ctx).Info("CRD not installed in cluster, skipping namespace/owner-ref setup",
 				"kind", obj.GetKind(),
 				"apiVersion", obj.GetAPIVersion(),
@@ -104,8 +110,10 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		return nil, err
 	}
 	isExists := old != nil
-	lifecycleManaged := isLifecycleManagedForApply(owner, old, m, resourceIsNamespaced, resourceScopeKnown)
-	if lifecycleManaged {
+	// Describe the intended lifecycle; the writer checks the exact live object
+	// before publishing it. A prior cleanup marker is not a prerequisite for
+	// adopting a proven legacy Configuration resource.
+	if resourceScopeKnown {
 		tempAnnotations[v1.AnnotationConfigurationOwnerUID] = string(owner.GetUID())
 		if m.GetUID() != "" {
 			tempAnnotations[v1.AnnotationConfigurationUID] = string(m.GetUID())
@@ -119,46 +127,30 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		if policyErr != nil {
 			return nil, policyErr
 		}
-
-		if isExists {
-			if resourceIsNamespaced {
-				setOwnerRef, ownerErr := shouldSetControllerReference(owner, old, m, obj)
-				if ownerErr != nil {
-					return nil, ownerErr
-				}
-				if setOwnerRef {
-					if err = ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
-						return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
-					}
-				} else {
-					obj.SetOwnerReferences(old.GetOwnerReferences())
-					log.FromContext(ctx).Info("patching configuration resource without taking controller ownership",
-						"configuration", m.Name,
-						"gvk", obj.GroupVersionKind().String(),
-						"namespace", obj.GetNamespace(),
-						"name", obj.GetName(),
-						"controllerOwner", metav1.GetControllerOf(old),
-					)
-				}
+		// The writer preserves live non-controller references when adopting;
+		// template references remain part of the explicit desired object.
+		if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() && disablePolicy != v1.ConfigurationDisablePolicyOrphan {
+			if err = ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
+				return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
 			}
-			if err = k8s.PatchCustomResource(ctx, cli, obj); err != nil {
+		}
+
+		writer := k8s.NewManagedResourceWriter(cli)
+		if isExists {
+			if err = writer.Reconcile(ctx, ownerObj, obj, m.Name); err != nil {
 				return nil, err
+			}
+			if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() && disablePolicy == v1.ConfigurationDisablePolicyOrphan {
+				if err = stripLiveControllerOwnerReference(ctx, cli, obj, owner); err != nil {
+					return nil, err
+				}
 			}
 			log.FromContext(ctx).V(1).Info(fmt.Sprintf("updated %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
 		} else {
-			if resourceIsNamespaced {
-				if err = ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
-					return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
-				}
-			}
-			err = k8s.CreateCustomResource(ctx, cli, obj)
+			err = writer.Reconcile(ctx, ownerObj, obj, m.Name)
 			if err != nil && !errors.IsAlreadyExists(err) {
 				log.FromContext(ctx).V(1).Info(fmt.Sprintf("failed to create %s", obj.GetKind()), "obj", obj)
 				return nil, fmt.Errorf("failed to create CR: %w", err)
-			}
-			if errors.IsAlreadyExists(err) {
-				// A race-created object was not proven to be under this lifecycle.
-				lifecycleManaged = false
 			}
 			log.FromContext(ctx).V(1).Info(fmt.Sprintf("created %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
 		}
@@ -171,12 +163,15 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 			Namespace:         obj.GetNamespace(),
 			Name:              obj.GetName(),
 		}
-		if !lifecycleManaged {
-			return &renderedConfigurationApplyResult{identity: identity}, nil
+		live := &unstructured.Unstructured{}
+		live.SetGroupVersionKind(obj.GroupVersionKind())
+		if err := writer.Reader.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
+			return nil, fmt.Errorf("get applied configuration resource: %w", err)
 		}
-		live, getErr := k8s.GetCustomResource(ctx, cli, obj.GetName(), obj.GetNamespace(), obj.GroupVersionKind())
-		if getErr != nil {
-			return nil, fmt.Errorf("get applied configuration resource: %w", getErr)
+		// Cleanup authority is established only by the successfully published
+		// live identity, never by an adoption decision made before the write.
+		if !hasConfigurationLifecycleMarkers(owner, live, m.Name, m.GetUID()) {
+			return &renderedConfigurationApplyResult{identity: identity}, nil
 		}
 		inventory := &v1.RenderedConfigurationResource{
 			ConfigurationName: m.Name,
@@ -198,13 +193,14 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 			if obj.GroupVersionKind().Kind == "CustomResourceDefinition" {
 				return nil, nil
 			}
-			deletePolicy := configurationPolicy(m, obj, v1.AnnotationConfigurationDeletePolicy)
+			deletePolicy := resolveConfigurationDeletePolicy(m, obj)
 			if !shouldDeleteRenderedResource(owner, old, m.Name, deletePolicy) {
-				log.FromContext(ctx).Info("skipping configuration rendered resource delete because it is not owned by OpenSaola lifecycle",
+				log.FromContext(ctx).Info("skipping configuration rendered resource delete",
 					"configuration", m.Name,
 					"gvk", obj.GroupVersionKind().String(),
 					"namespace", old.GetNamespace(),
 					"name", old.GetName(),
+					"deletePolicy", deletePolicy,
 					"controllerOwner", metav1.GetControllerOf(old),
 				)
 				return nil, nil
@@ -217,20 +213,6 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		}
 	}
 	return nil, nil
-}
-
-func isLifecycleManagedForApply(owner metav1.Object, old *unstructured.Unstructured, configuration *v1.MiddlewareConfiguration, resourceIsNamespaced, resourceScopeKnown bool) bool {
-	if owner == nil || owner.GetUID() == "" || !resourceScopeKnown {
-		return false
-	}
-	if old == nil {
-		return true
-	}
-	if resourceIsNamespaced {
-		controller := metav1.GetControllerOf(old)
-		return controller == nil || sameControllerOwner(owner, controller)
-	}
-	return hasConfigurationLifecycleMarkers(owner, old, configuration.Name, configuration.GetUID())
 }
 
 // handleTemplate processes the template

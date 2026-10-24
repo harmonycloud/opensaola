@@ -17,12 +17,15 @@ limitations under the License.
 package middlewareconfiguration
 
 import (
+	"context"
 	"fmt"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func ownerIdentity(owner metav1.Object) (apiVersion, kind, name string, uid types.UID) {
@@ -50,13 +53,6 @@ func sameControllerOwner(owner metav1.Object, ref *metav1.OwnerReference) bool {
 		return ref.APIVersion == apiVersion && ref.Kind == kind && ref.Name == name
 	}
 	return ref.Name == name
-}
-
-func resourceID(obj metav1.Object) string {
-	if obj.GetNamespace() == "" {
-		return obj.GetName()
-	}
-	return fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName())
 }
 
 func configurationPolicy(m *v1.MiddlewareConfiguration, obj metav1.Object, key string) string {
@@ -165,25 +161,13 @@ func shouldDeleteDisabledRenderedResource(owner metav1.Object, obj metav1.Object
 		return false
 	}
 	controller := metav1.GetControllerOf(obj)
-	if resource.Namespaced {
+	// Only same-namespace resources can carry a namespaced owner's controller
+	// reference. Cross-namespace resources use the UID/marker checks above,
+	// just like cluster-scoped resources, while still rejecting foreign owners.
+	if resource.Namespaced && obj.GetNamespace() == owner.GetNamespace() {
 		return sameControllerOwner(owner, controller)
 	}
 	return controller == nil || sameControllerOwner(owner, controller)
-}
-
-func shouldSetControllerReference(owner metav1.Object, old metav1.Object, m *v1.MiddlewareConfiguration, desired metav1.Object) (bool, error) {
-	if old == nil {
-		return true, nil
-	}
-	controller := metav1.GetControllerOf(old)
-	if controller == nil || sameControllerOwner(owner, controller) {
-		return true, nil
-	}
-	if configurationPolicy(m, desired, v1.AnnotationConfigurationOwnershipPolicy) == v1.ConfigurationOwnershipPolicyManaged {
-		return false, fmt.Errorf("configuration resource %s is already controlled by %s %s/%s; refusing to take controller ownership",
-			resourceID(old), controller.APIVersion, controller.Kind, controller.Name)
-	}
-	return false, nil
 }
 
 func isOpenSaolaManagedConfiguration(owner metav1.Object, obj metav1.Object, configurationName string) bool {
@@ -210,4 +194,57 @@ func shouldDeleteRenderedResource(owner metav1.Object, obj metav1.Object, config
 		return sameControllerOwner(owner, controller)
 	}
 	return isOpenSaolaManagedConfiguration(owner, obj, configurationName)
+}
+
+// removeControllerOwnerReference drops any controller reference pointing at
+// owner while preserving unrelated owners. Resources marked to outlive their
+// owner (configurationDisablePolicy=orphan) must stay outside the owner's
+// garbage-collection domain; on update this also migrates resources that a
+// previous revision had already taken controller ownership of.
+func removeControllerOwnerReference(refs []metav1.OwnerReference, owner metav1.Object) []metav1.OwnerReference {
+	if len(refs) == 0 || owner == nil {
+		return refs
+	}
+	kept := make([]metav1.OwnerReference, 0, len(refs))
+	for _, ref := range refs {
+		if ref.Controller != nil && *ref.Controller && ref.UID == owner.GetUID() {
+			continue
+		}
+		kept = append(kept, ref)
+	}
+	return kept
+}
+
+// stripLiveControllerOwnerReference removes the owner's controller reference
+// from the live object with an explicit merge patch. Server-side apply only
+// drops fields the current field manager owns, and older references may
+// predate it, so migration of orphan-marked resources cannot rely on apply
+// alone.
+func stripLiveControllerOwnerReference(ctx context.Context, cli client.Client, obj *unstructured.Unstructured, owner metav1.Object) error {
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(obj.GroupVersionKind())
+	if err := cli.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
+		return err
+	}
+	controller := metav1.GetControllerOf(live)
+	if controller == nil || controller.UID != owner.GetUID() {
+		return nil
+	}
+	base := client.MergeFrom(live.DeepCopy())
+	live.SetOwnerReferences(removeControllerOwnerReference(live.GetOwnerReferences(), owner))
+	return cli.Patch(ctx, live, base)
+}
+
+// resolveConfigurationDeletePolicy resolves the effective delete policy for a
+// rendered resource. An explicit configurationDeletePolicy wins; otherwise an
+// orphan disable policy also keeps the resource when its owner is deleted,
+// because the resource was created to outlive the owner.
+func resolveConfigurationDeletePolicy(m *v1.MiddlewareConfiguration, obj metav1.Object) string {
+	if policy := configurationPolicy(m, obj, v1.AnnotationConfigurationDeletePolicy); policy != "" {
+		return policy
+	}
+	if disablePolicy, err := configurationDisablePolicy(m, obj); err == nil && disablePolicy == v1.ConfigurationDisablePolicyOrphan {
+		return v1.ConfigurationDeletePolicyOrphan
+	}
+	return ""
 }

@@ -154,8 +154,8 @@ func TestUpdateMiddlewareStatusPreservesPauseSnapshotAndDedicatedPatchCanClearIt
 	live := &v1.Middleware{
 		ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "middleware"},
 		Status: v1.MiddlewareStatus{ReconcilePause: &v1.ReconcilePauseStatus{
-			DesiredSpec: runtime.RawExtension{Raw: []byte(`{"replicas":3}`)},
-			Hash:        "pause-snapshot",
+			SnapshotSecret: "pause-snapshot-secret",
+			Hash:           "pause-snapshot",
 		}},
 	}
 	stale := live.DeepCopy()

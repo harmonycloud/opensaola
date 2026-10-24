@@ -309,9 +309,8 @@ MiddlewareAction (Namespaced) -- 引用 --> MiddlewareActionBaseline
 | `CondReasonTemplateParseWithBaselineFailed` | `"TemplateParseWithBaselineFailed"` | `TemplateParseWithBaseline` | 模板解析与基线合并失败 |
 | `CondReasonReconcilePaused` | `"ReconcilePaused"` | `ReconcilePaused` | 已关闭该 MID/MO 的常规向下层写入；MID 的有效快照还需检查 `status.reconcilePause` |
 | `CondReasonReconcileSnapshotFailed` | `"ReconcileSnapshotFailed"` | `ReconcileAdoption` | 无法安全捕获暂停快照，保持写入保护 |
-| `CondReasonReconcileAdoptionSucceeded` | `"ReconcileAdoptionSucceeded"` | `ReconcileAdoption` | 已将无冲突的实际主 CR `spec` 差异采纳为 override |
+| `CondReasonReconcileAdoptionSucceeded` | `"ReconcileAdoptionSucceeded"` | `ReconcileAdoption` | 已将暂停期间的实际主 CR `spec` 变更采纳为 override |
 | `CondReasonReconcileAdoptionFailed` | `"ReconcileAdoptionFailed"` | `ReconcileAdoption` | 恢复策略无效、快照/目标不匹配或自动采纳失败，保持暂停 |
-| `CondReasonReconcileAdoptionConflict` | `"ReconcileAdoptionConflict"` | `ReconcileAdoption` | 暂停期间实际值与当前期望同时修改同一路径，需人工处理 |
 
 ---
 
@@ -366,13 +365,13 @@ MiddlewareAction (Namespaced) -- 引用 --> MiddlewareActionBaseline
 
 | 字段名 | 类型 | 说明 |
 |--------|------|------|
-| desiredSpec | runtime.RawExtension | 暂停时的有效主 CR `spec`，即 B/L/D 三方合并中的 B |
+| snapshotSecret | string | 同命名空间不可变 Secret 的名称；实际主 CR spec 和暂停前 overrides 仅保存在 Secret 中，复用快速 zstd 压缩 |
 | gvk / namespace / name | GVK / string / string | 暂停会话绑定的主 CR 身份；不匹配时恢复失败关闭写入 |
 | resourceUID | string | 防止暂停期间主 CR 被删除并以同名对象重建后被误采纳 |
 | generation | int64 | 捕获快照时的 MID Generation |
-| hash | string | `desiredSpec` 的 SHA-256，会话身份和并发校验依据 |
+| hash | string | 完整 Secret 记录的 SHA-256，会话身份和并发校验依据 |
 | capturedAt | metav1.Time | 快照捕获时间 |
-| adoptedLiveSpecHash | string | 最近一次三方合并所用 L 的 hash；主 CR 写入前再次核对以防覆盖新的暂停期间实际修改 |
+| adoptedLiveSpecHash | string | 最近一次采纳所用实际 spec 的 hash；主 CR 写入前再次核对以防覆盖新的暂停期间实际修改 |
 
 #### RenderedConfigurationResource 子结构
 
@@ -874,19 +873,19 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 
 > `middleware.cn/suspend-reconcile: "true"` 仅暂停该 MID/MO 向下层资源写入：MID 的实际 CR、Configuration 和 CR 删除自愈，以及 MO 的 Configuration、RBAC、Deployment 和 Deployment 漂移修复。finalizer 删除清理与运行状态同步继续执行。修改 MID 的实际 CR 前，除确认 `.status.conditions[type=ReconcilePaused]=True` 外，还必须确认 `.status.reconcilePause` 已存在，且 `ReconcileAdoption` 不是 `False`；快照失败时不要开始修改主实际 CR。MO 没有主 CR 快照，只需确认 `ReconcilePaused=True`。灾备只是这一通用能力的典型使用场景之一。
 >
-> MID 的恢复必须显式选择策略，不能直接删除暂停注解。推荐在仍保留暂停注解时执行：`kubectl annotate mid <name> -n <namespace> middleware.cn/resume-policy=merge --overwrite`。控制器以暂停时渲染的期望 CR `spec`（B）、解除前的实际 CR `spec`（L）和当前渲染期望（D）做三方合并；无冲突的暂停期间实际改动会写入 MID 的 `.spec.reconcileOverrides`（包含 patch、其渲染基线和目标 GVK），随后控制器自行移除暂停注解。下一次实际 CR 成功同步后，快照和恢复注解会被清理；同步前还会再次核对实际 `spec`，若外部写入方继续修改则重新合并，不会用旧 L 覆盖新值。`apply` 则明确放弃暂停期间的实际 CR 改动并重新应用当前期望态。若同一路径同时被暂停期间实际变更和当前期望修改，控制器维持暂停并写入 `ReconcileAdoption=False`，不会覆盖实际 CR；处理冲突后重新设置 `resume-policy=merge` 触发重试。直接删除 `suspend-reconcile` 而未给策略同样保持暂停，避免旧版本的强制覆盖行为。
+> MID 恢复必须显式选择 `merge` 或 `apply`，不能直接删除暂停注解。`merge` 比较 `.status.reconcilePause.snapshotSecret` 引用的实际 CR 快照与恢复前实际 CR，仅将期间的增删改应用到当前渲染期望，并保存为 `.spec.reconcileOverrides`。未变化的默认字段、null 和已有漂移不被采纳；变更路径采纳当前 CR 值，其余路径保留 MID 期望。关联列表按 API schema 的键比较，atomic 值整体处理。写入前再次校验实际 spec；再次变化则重新计算，重试使用 `previousOverrides` 保留暂停前补丁并排除已撤回的中间采纳。成功写入后清理 status 引用、恢复注解并删除暂停 Secret；失败删除由后台回收器重试，MID 删除由 ownerReference 回收。status 不存完整 spec 或旧 overrides，不另设应用层大小上限。`apply` 明确放弃暂停期间改动。身份、schema 或快照异常时保持暂停；旧 `desiredSpec` 快照不会被当成实际基线，升级前应结束旧暂停会话。
 >
 > 已采纳的实际状态差异会持续保护相同字段，但后续 MID/Baseline 对同一路径的显式期望变更优先，其他暂停期间差异仍保留。若升级后主 CR 的 GVK、名称或命名空间发生变化，旧 override 会被拒绝而不是套用到新对象；此时应确认后移除 `.spec.reconcileOverrides`，再让新期望态生效。
 >
 > 该自动采纳目前只覆盖 MID 的主实际 CR 的 `spec`；CUE-only PreAction 会仅作为渲染输入在内存中重放，但不会采纳对 PreAction 定义、Configuration、CR metadata 或 MiddlewareOperator 资源的直接修改，这些仍需分别确认并回写期望配置。`resume-policy` 仅适用于 MID；MO 恢复时移除 `suspend-reconcile`，随后按普通期望态 reconcile。关联 MID 必须单独暂停和恢复。
 >
-> **PreAction 边界**：暂停快照/B/L/D 合并会在内存中的 MID 副本上重放仅含 CUE 的 PreAction，因此其对主 CR `spec` 的影响与常规主 CR 写入一致，且不会执行命令、HTTP 操作或 Kubernetes 写入。若任一 PreAction 含非 CUE 步骤（例如 CMD 或 HTTP），该 MID 的 `resume-policy=merge` 会失败关闭；应改为纯 CUE 预动作、把结果固化为 MID/Baseline 的显式期望态，或只在明确接受覆盖暂停期间改动时选择 `apply`。
+> **PreAction 边界**：恢复时的期望态渲染会在内存中的 MID 副本上重放仅含 CUE 的 PreAction，因此其对主 CR `spec` 的影响与常规主 CR 写入一致，且不会执行命令、HTTP 操作或 Kubernetes 写入。若任一 PreAction 含非 CUE 步骤（例如 CMD 或 HTTP），该 MID 的 `resume-policy=merge` 会失败关闭；应改为纯 CUE 预动作、把结果固化为 MID/Baseline 的显式期望态，或只在明确接受覆盖暂停期间改动时选择 `apply`。
 >
 > **Configuration 停用生命周期**：当 owner 的下一次 reconcile 发现 Configuration 模板为空或其引用被移除时，会依据成功渲染时写入状态清单的最终策略清理资源。`spec.template` 内资源清单的 `metadata.annotations` 优先于 `MiddlewareConfiguration.metadata.annotations`；不要给已存在的 live 资源手工打该策略注解，控制器不会读取它。
 > 无显式策略时，PVC/PV 为 `orphan`，CRD 无论注解为何都为 `orphan`，其他所有 Kind（包含未知/自定义和集群级资源）为 `delete`。显式 `delete` / `orphan` 可覆盖 PVC/PV 的默认；CRD 在解析和删除时均被硬保护。
 > 控制器只会清理状态清单中记录为 `delete`、且 live 对象的 owner UID、Configuration UID、resource UID 和 controller owner 都仍匹配的对象；外部重建、交接或同名复用的资源会被保留。旧的 `orphan` 清单不会在升级后被追溯删除，必须先在资源仍正常渲染时成功 reconcile，后续停用才采用新默认。
 > 直接修改 `MiddlewareConfiguration.spec.template` 不会单独触发 MID/MO reconcile；需要 MID/MO 引用变更或其他 owner 事件触发。这里的“不再引用”只表示 OpenSaola 不再渲染该 Configuration，不表示控制器已分析集群中的其他消费者。该路径与 MID/MO 删除时按 `configurationDeletePolicy` / OwnerReference 清理资源不同。
-> 若同名资源已有其他 controller owner，默认不抢占 owner、保留其 OwnerReference 后继续 patch，且该资源不进入当前 owner 的生命周期清单；设置 `configurationOwnershipPolicy=managed` 则直接失败并拒绝抢占。MID/MO 删除路径中的 `configurationDeletePolicy=delete` 是独立且更强的删除语义，不应当作上述停用路径的 UID 严格删除。
+> 若同名资源已有其他 controller owner，归属校验默认即拒绝写入；`configurationOwnershipPolicy=managed` 保留兼容。历史 Configuration 缺少 owner UID 或旧 owner 已删除时，仅在 app/Configuration 来源匹配且无冲突归属时允许接管；同名 MCF 重建仍视为同一逻辑来源。接管成功后才建立当前 owner 的清理清单，CRD 始终保留。详见[渲染期望记录](resource-intent_zh.md)。MID/MO 删除路径中的 `configurationDeletePolicy=delete` 是独立且更强的删除语义，不应当作上述停用路径的 UID 严格删除。
 
 ---
 

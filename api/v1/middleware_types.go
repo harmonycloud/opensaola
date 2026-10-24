@@ -77,10 +77,9 @@ type ReconcileOverrides struct {
 // retained only until the session resumes successfully or the resource is
 // deleted.
 type ReconcilePauseStatus struct {
-	// DesiredSpec is the effective primary custom-resource spec rendered when
-	// the pause first became active. It is the B input of the B/L/D merge.
-	// +kubebuilder:pruning:PreserveUnknownFields
-	DesiredSpec runtime.RawExtension `json:"desiredSpec,omitempty"`
+	// SnapshotSecret references an immutable Secret in the Middleware namespace.
+	// The actual pause-start spec and previous overrides are stored only there.
+	SnapshotSecret string `json:"snapshotSecret,omitempty"`
 	// GVK identifies the primary resource rendered for this session.
 	GVK GVK `json:"gvk,omitempty"`
 	// Namespace and Name identify the target primary custom resource.
@@ -91,14 +90,14 @@ type ReconcilePauseStatus struct {
 	ResourceUID string `json:"resourceUID,omitempty"`
 	// Generation is the Middleware generation at snapshot capture time.
 	Generation int64 `json:"generation,omitempty"`
-	// Hash is the SHA-256 of DesiredSpec and makes the snapshot identity
+	// Hash is the SHA-256 of the complete Secret record and makes its identity
 	// visible to operators and conflict-safe updates.
 	Hash       string      `json:"hash,omitempty"`
 	CapturedAt metav1.Time `json:"capturedAt,omitempty"`
 	// AdoptedLiveSpecHash is the hash of the live primary CR spec used to
 	// calculate the most recent merge. It is checked again immediately before
-	// the resumed SSA write so a second live change during the pause is never overwritten using an
-	// older L input.
+	// the resumed write so a second live change is not overwritten using an
+	// outdated observation.
 	AdoptedLiveSpecHash string `json:"adoptedLiveSpecHash,omitempty"`
 }
 

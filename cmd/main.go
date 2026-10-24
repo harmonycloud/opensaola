@@ -267,6 +267,13 @@ func main() {
 	// Set APIReader for status update retries to bypass the informer cache,
 	// preventing stale-cache 409 loops under high concurrency.
 	k8s.SetStatusAPIReader(mgr.GetAPIReader())
+	k8s.ConfigureManagedResources(mgr.GetAPIReader())
+	intentSchemas, err := k8s.NewIntentSchemaResolver(cfg)
+	if err != nil {
+		setupLog.Error(err, "unable to configure resource intent schemas")
+		os.Exit(1)
+	}
+	k8s.ConfigureResourceIntents(intentSchemas)
 
 	if err = (&controller.MiddlewareOperatorBaselineReconciler{
 		Client:   mgr.GetClient(),
@@ -360,6 +367,10 @@ func main() {
 
 	setupLog.Info("starting manager")
 	ctx := ctrl.SetupSignalHandler()
+	if err := mgr.Add(k8s.NewResourceIntentCollector(mgr.GetClient(), mgr.GetAPIReader())); err != nil {
+		setupLog.Error(err, "unable to add resource intent collector")
+		os.Exit(1)
+	}
 	if err := mgr.Add(&leaderBackgroundTasks{cli: mgr.GetClient(), scheme: mgr.GetScheme(), cfg: cfg}); err != nil {
 		setupLog.Error(err, "unable to add leader background tasks")
 		os.Exit(1)

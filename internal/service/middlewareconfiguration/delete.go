@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -30,12 +31,11 @@ import (
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/pkg/tools"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-func deleteTemplateLineValues(template string) (apiVersion string, kind string, nameExpr string) {
+func deleteTemplateLineValues(template string) (apiVersion string, kind string, nameExpr string, namespaceExpr string) {
 	lines := strings.Split(template, "\n")
 	metadataIndent := -1
 	for _, line := range lines {
@@ -67,9 +67,13 @@ func deleteTemplateLineValues(template string) (apiVersion string, kind string, 
 				nameExpr = strings.TrimSpace(strings.TrimPrefix(trimmed, "name:"))
 				continue
 			}
+			if namespaceExpr == "" && strings.HasPrefix(trimmed, "namespace:") {
+				namespaceExpr = strings.TrimSpace(strings.TrimPrefix(trimmed, "namespace:"))
+				continue
+			}
 		}
 	}
-	return apiVersion, kind, nameExpr
+	return apiVersion, kind, nameExpr, namespaceExpr
 }
 
 func normalizeRenderedName(s string) string {
@@ -101,7 +105,7 @@ const (
 	deleteByNameSkipped  deleteByNameResult = "skipped"
 )
 
-func deleteByGVKAndName(ctx context.Context, cli client.Client, owner metav1.Object, gvk schema.GroupVersionKind, namespace string, name string, configurationName string, deletePolicy string) (deleteByNameResult, error) {
+func deleteByGVKAndName(ctx context.Context, cli client.Client, owner metav1.Object, gvk schema.GroupVersionKind, namespace string, name string, configuration *v1.MiddlewareConfiguration) (deleteByNameResult, error) {
 	log.FromContext(ctx).Info("deleting configuration rendered resource by name", "gvk", gvk.String(), "namespace", namespace, "name", name)
 	obj, err := k8s.GetCustomResource(ctx, cli, name, namespace, gvk)
 	if errors.IsNotFound(err) {
@@ -112,12 +116,13 @@ func deleteByGVKAndName(ctx context.Context, cli client.Client, owner metav1.Obj
 		log.FromContext(ctx).Error(err, "failed to get configuration rendered resource by name", "gvk", gvk.String(), "namespace", namespace, "name", name)
 		return "", err
 	}
-	if !shouldDeleteRenderedResource(owner, obj, configurationName, deletePolicy) {
+	deletePolicy := resolveConfigurationDeletePolicy(configuration, obj)
+	if !shouldDeleteRenderedResource(owner, obj, configuration.Name, deletePolicy) {
 		log.FromContext(ctx).Info("skipping configuration rendered resource delete because it is not owned by OpenSaola lifecycle",
 			"gvk", gvk.String(),
 			"namespace", namespace,
 			"name", name,
-			"configuration", configurationName,
+			"configuration", configuration.Name,
 			"controllerOwner", metav1.GetControllerOf(obj),
 		)
 		return deleteByNameSkipped, nil
@@ -162,8 +167,8 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 			continue
 		}
 
-		apiVersion, kind, nameExpr := deleteTemplateLineValues(mc.Spec.Template)
-		log.FromContext(ctx).Info("extracted delete info from configuration template", "cfgName", cfg.Name, "apiVersion", apiVersion, "kind", kind, "nameExpr", nameExpr)
+		apiVersion, kind, nameExpr, namespaceExpr := deleteTemplateLineValues(mc.Spec.Template)
+		log.FromContext(ctx).Info("extracted delete info from configuration template", "cfgName", cfg.Name, "apiVersion", apiVersion, "kind", kind, "nameExpr", nameExpr, "namespaceExpr", namespaceExpr)
 		if apiVersion == "" || kind == "" {
 			errList = append(errList, fmt.Sprintf("configuration %s missing apiVersion/kind", cfg.Name))
 			continue
@@ -174,7 +179,6 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 		if gvk.Kind == "CustomResourceDefinition" {
 			continue
 		}
-		deletePolicy := configurationPolicy(&mc, nil, v1.AnnotationConfigurationDeletePolicy)
 
 		templateValues := *templateValuesBase
 		// Avoid nil pointer from missing values in template .Values.xxx: ensure map exists (missing keys may still be nil)
@@ -194,13 +198,23 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 			}
 		}
 
-		// Determine if the resource is namespaced: if so, use namespace=owner.Namespace; otherwise leave empty
+		// Mirror the apply-time namespace semantics: an explicit template namespace
+		// wins; otherwise the resource lives in the owner's namespace.
+		renderedNS := ""
+		if namespaceExpr != "" {
+			if n, renderErr := tools.TemplateParse(ctx, namespaceExpr, &templateValues); renderErr == nil {
+				renderedNS = normalizeRenderedName(n)
+			} else {
+				log.FromContext(ctx).Info("failed to render configuration delete namespace, falling back to owner namespace", "warning", true, "cfgName", cfg.Name, "namespaceExpr", namespaceExpr, "err", renderErr)
+			}
+		}
+
+		// Determine if the resource is namespaced: a template-specified namespace
+		// wins (same rule as apply); otherwise default to the owner's namespace.
 		ns := ""
-		tmp := new(unstructured.Unstructured)
-		tmp.SetGroupVersionKind(gvk)
-		namespaced, isNSErr := k8s.IsNamespaced(tmp)
+		mapping, isNSErr := cli.RESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
 		if isNSErr != nil {
-			if k8s.IsCRDNotInstalled(isNSErr) {
+			if meta.IsNoMatchError(isNSErr) || k8s.IsCRDNotInstalled(isNSErr) {
 				log.FromContext(ctx).Info("CRD not installed in cluster, skipping cleanup (resource cannot exist)",
 					"configuration", cfg.Name,
 				)
@@ -209,14 +223,19 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 			errList = append(errList, fmt.Sprintf("configuration %s isNamespaced error: %v", cfg.Name, isNSErr))
 			continue
 		}
+		namespaced := mapping.Scope.Name() == meta.RESTScopeNameNamespace
 		if namespaced {
-			ns = owner.GetNamespace()
+			if renderedNS != "" {
+				ns = renderedNS
+			} else {
+				ns = owner.GetNamespace()
+			}
 		}
 		log.FromContext(ctx).Info("configuration delete target resolved", "cfgName", cfg.Name, "gvk", gvk.String(), "renderedName", renderedName, "namespaced", namespaced, "namespace", ns)
 
 		// Prefer deletion by rendered name
 		if renderedName != "" {
-			if delResult, delErr := deleteByGVKAndName(ctx, cli, owner, gvk, ns, renderedName, cfg.Name, deletePolicy); delErr == nil && delResult == deleteByNameDeleted {
+			if delResult, delErr := deleteByGVKAndName(ctx, cli, owner, gvk, ns, renderedName, &mc); delErr == nil && delResult == deleteByNameDeleted {
 				log.FromContext(ctx).Info("configuration deleted by name, skipping fallback", "cfgName", cfg.Name, "gvk", gvk.String(), "renderedName", renderedName, "namespace", ns)
 				continue
 			} else if delErr == nil {
@@ -236,6 +255,7 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 		}
 		log.FromContext(ctx).Info("configuration fallback list query completed", "cfgName", cfg.Name, "gvk", gvk.String(), "namespace", ns, "items", len(items))
 		for _, item := range items {
+			deletePolicy := resolveConfigurationDeletePolicy(&mc, &item)
 			if !shouldDeleteRenderedResource(owner, &item, cfg.Name, deletePolicy) {
 				log.FromContext(ctx).Info("configuration fallback skipped object because it is not owned by OpenSaola lifecycle",
 					"cfgName", cfg.Name,

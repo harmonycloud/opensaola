@@ -345,13 +345,15 @@ MiddlewareConfiguration.spec.template （只能访问 .Values 和 .Globe）
 
 Configuration 模板通过条件渲染为空、或其引用被 Baseline/MID/MO 移除时，属于“功能停用”，并不等同于
 删除 MID/MO。`spec.template` 内资源清单的 `metadata.annotations` 优先于
-`MiddlewareConfiguration.metadata.annotations`；不要给已经存在的 live 资源手工设置策略注解，控制器不会读取它：
+`MiddlewareConfiguration.metadata.annotations`。停用清理使用成功渲染时记录的策略，手工修改 live 资源注解不会更新这份记录：
 
 | 策略 | 触发时机 | 默认/行为 | 删除保护 |
 |------|----------|-----------|----------|
 | `configurationDisablePolicy` | 模板不再渲染或引用移除后 owner 的下一次 reconcile | 无显式策略时：PVC/PV 为 `orphan`，CRD 始终 `orphan`，其他所有 Kind 为 `delete` | 仅清理此前写入生命周期清单、且 owner UID、资源 UID、Configuration 标记和 owner 关系仍匹配的资源 |
 | `configurationDeletePolicy` | MID/MO 被删除 | 按既有受管资源识别清理 | `orphan` 保留；`delete` 是强删除语义，不能把它当作 disable 路径的 UID 安全删除 |
-| `configurationOwnershipPolicy=managed` | 同名资源已有其他 controller owner | 默认不抢占 owner、保留 OwnerReference 后继续 patch | `managed` 使 reconcile 失败，明确拒绝抢占；未受当前 owner 管理的资源不会进入生命周期清单 |
+| `configurationOwnershipPolicy=managed` | 同名资源已有其他 controller owner | 归属校验默认即拒绝修改其他 controller 的资源；`managed` 保留兼容 | 只有通过归属校验或历史来源接管并成功写入的资源才进入生命周期清单 |
+
+历史 Configuration 资源缺少 owner UID 或旧 owner 已删除时，可在 app/Configuration 来源标记匹配且无其他 owner 冲突的情况下接管；仅有 Helm 标记不够。同名 MiddlewareConfiguration 重建仍是同一逻辑来源。接管以原子写入建立当前 owner 的记录并保留首次期望未声明的旧字段；CRD 不删除重建。完整边界见[渲染期望记录](resource-intent_zh.md)。
 
 除 PVC/PV 和 CRD 外，未显式标注的资源会在功能停用时默认清理；如需保留 ConfigMap、Secret、StatefulSet、
 未知/自定义 CR 或任意其他 Kind，必须在仍正常渲染时设置在 `MiddlewareConfiguration.metadata.annotations`
@@ -369,6 +371,15 @@ metadata:
 reconcile 一次才能采用新默认。直接修改 `MiddlewareConfiguration.spec.template` 不会单独触发 owner reconcile；
 需要由 MID/MO 引用变更或其他 owner 事件触发。这里的“不再引用”只表示 OpenSaola 不再渲染该 Configuration，
 不代表控制器会扫描集群确认没有其他消费者。
+
+同命名空间资源还需匹配 controller ownerReference；跨命名空间和集群级资源使用清单中的 UID 及来源标记
+校验，不要求跨命名空间 ownerReference，但仍拒绝清理带外部 controller 的资源。MID/MO 删除时则读取实际
+资源上的策略，并以 MCF 顶层策略作为回退；显式 `configurationDeletePolicy` 优先，否则
+`configurationDisablePolicy=orphan` 也会保留资源。
+
+旧版本已经停用、且状态清单已丢失的跨命名空间残留，不会仅因升级或重试自动删除。需要核实其身份和当前
+用途后，在允许重新应用配置的前提下恢复原配置引用/渲染，等待成功 reconcile 并确认清单中的资源 UID
+与现存资源一致，再停用配置。无法安全重新应用的资源应单独审查处理，不按名称标签批量删除。
 
 ---
 

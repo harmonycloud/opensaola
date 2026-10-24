@@ -23,161 +23,18 @@ import (
 	"reflect"
 	"testing"
 
-	jsonpatch "github.com/evanphx/json-patch/v5"
 	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/k8s"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/managedfields"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
-
-func TestMergePausedSpec(t *testing.T) {
-	t.Parallel()
-
-	for name, test := range map[string]struct {
-		base      map[string]any
-		actual    map[string]any
-		desired   map[string]any
-		want      map[string]any
-		conflicts []string
-	}{
-		"adopts DR change while retaining independent desired change": {
-			base:    map[string]any{"replicas": float64(3), "storage": "10Gi", "nested": map[string]any{"a": float64(1)}},
-			actual:  map[string]any{"replicas": float64(5), "storage": "10Gi", "nested": map[string]any{"a": float64(1)}},
-			desired: map[string]any{"replicas": float64(3), "storage": "20Gi", "nested": map[string]any{"a": float64(1)}},
-			want:    map[string]any{"replicas": float64(5), "storage": "20Gi", "nested": map[string]any{"a": float64(1)}},
-		},
-		"adopts removed Baseline field": {
-			base:    map[string]any{"replicas": float64(3), "legacy": true},
-			actual:  map[string]any{"replicas": float64(3)},
-			desired: map[string]any{"replicas": float64(3), "legacy": true},
-			want:    map[string]any{"replicas": float64(3)},
-		},
-		"reports same-path conflict": {
-			base:      map[string]any{"replicas": float64(3)},
-			actual:    map[string]any{"replicas": float64(5)},
-			desired:   map[string]any{"replicas": float64(4)},
-			want:      map[string]any{"replicas": float64(4)},
-			conflicts: []string{"/replicas"},
-		},
-		"treats arrays as atomic": {
-			base:      map[string]any{"zones": []any{"a", "b"}},
-			actual:    map[string]any{"zones": []any{"a", "c"}},
-			desired:   map[string]any{"zones": []any{"a", "d"}},
-			want:      map[string]any{"zones": []any{"a", "d"}},
-			conflicts: []string{"/zones"},
-		},
-		"accepts identical independent change": {
-			base:    map[string]any{"replicas": float64(3)},
-			actual:  map[string]any{"replicas": float64(5)},
-			desired: map[string]any{"replicas": float64(5)},
-			want:    map[string]any{"replicas": float64(5)},
-		},
-	} {
-		name, test := name, test
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			got, conflicts, err := mergePausedSpec(test.base, test.actual, test.desired)
-			if err != nil {
-				t.Fatalf("mergePausedSpec() error = %v", err)
-			}
-			if !reflect.DeepEqual(conflicts, test.conflicts) {
-				t.Fatalf("conflicts = %#v, want %#v", conflicts, test.conflicts)
-			}
-			if !reflect.DeepEqual(got, test.want) {
-				t.Fatalf("merged spec = %#v, want %#v", got, test.want)
-			}
-		})
-	}
-}
-
-func TestMergePausedSpecTreatsObservedNullAsUnchanged(t *testing.T) {
-	t.Parallel()
-
-	base := map[string]any{"value": "before"}
-	actual := map[string]any{"value": nil}
-	desired := map[string]any{"value": "before"}
-
-	got, conflicts, err := mergePausedSpec(base, actual, desired)
-	if err != nil {
-		t.Fatalf("mergePausedSpec() error = %v", err)
-	}
-	if len(conflicts) != 0 {
-		t.Fatalf("conflicts = %#v, want none", conflicts)
-	}
-	if !reflect.DeepEqual(got, desired) {
-		t.Fatalf("merged spec = %#v, want %#v", got, desired)
-	}
-
-	baseRaw, err := json.Marshal(desired)
-	if err != nil {
-		t.Fatalf("marshal desired spec: %v", err)
-	}
-	mergedRaw, err := json.Marshal(got)
-	if err != nil {
-		t.Fatalf("marshal merged spec: %v", err)
-	}
-	patch, err := jsonpatch.CreateMergePatch(baseRaw, mergedRaw)
-	if err != nil {
-		t.Fatalf("create merge patch: %v", err)
-	}
-	if got, want := string(patch), "{}"; got != want {
-		t.Fatalf("merge patch = %s, want %s", got, want)
-	}
-}
-
-func TestMergePausedSpecTreatsNestedObservedNullAsAbsent(t *testing.T) {
-	t.Parallel()
-
-	base := map[string]any{
-		"_statefulset": map[string]any{
-			"spec": map[string]any{
-				"template": map[string]any{"metadata": map[string]any{"labels": map[string]any{"app": "mysql"}}},
-			},
-		},
-	}
-	actual, ok := cloneJSONValue(base).(map[string]any)
-	if !ok {
-		t.Fatalf("cloneJSONValue(base) type = %T, want map[string]any", cloneJSONValue(base))
-	}
-	statefulSet, ok := actual["_statefulset"].(map[string]any)
-	if !ok {
-		t.Fatalf("actual._statefulset type = %T, want map[string]any", actual["_statefulset"])
-	}
-	statefulSetSpec, ok := statefulSet["spec"].(map[string]any)
-	if !ok {
-		t.Fatalf("actual._statefulset.spec type = %T, want map[string]any", statefulSet["spec"])
-	}
-	statefulSetSpec["selector"] = nil
-	desired, ok := cloneJSONValue(base).(map[string]any)
-	if !ok {
-		t.Fatalf("cloneJSONValue(base) type = %T, want map[string]any", cloneJSONValue(base))
-	}
-
-	got, conflicts, err := mergePausedSpec(base, actual, desired)
-	if err != nil {
-		t.Fatalf("mergePausedSpec() error = %v", err)
-	}
-	if len(conflicts) != 0 {
-		t.Fatalf("conflicts = %#v, want none", conflicts)
-	}
-	if !reflect.DeepEqual(got, desired) {
-		t.Fatalf("merged spec = %#v, want %#v", got, desired)
-	}
-	gotStatefulSet, ok := got["_statefulset"].(map[string]any)
-	if !ok {
-		t.Fatalf("merged _statefulset type = %T, want map[string]any", got["_statefulset"])
-	}
-	gotStatefulSetSpec, ok := gotStatefulSet["spec"].(map[string]any)
-	if !ok {
-		t.Fatalf("merged _statefulset.spec type = %T, want map[string]any", gotStatefulSet["spec"])
-	}
-	if _, exists := gotStatefulSetSpec["selector"]; exists {
-		t.Fatalf("merged spec retained selector null: %#v", got)
-	}
-}
 
 func TestApplyReconcileOverridesPreservesDeletionAcrossFutureRenders(t *testing.T) {
 	t.Parallel()
@@ -280,6 +137,9 @@ func TestVerifyPausedPrimaryCustomResourceForApply(t *testing.T) {
 
 	gvk := schema.GroupVersionKind{Group: "dr.test.io", Version: "v1", Kind: "Database"}
 	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
 	scheme.AddKnownTypeWithName(gvk.GroupVersion().WithKind("DatabaseList"), &unstructured.UnstructuredList{})
 	live := &unstructured.Unstructured{Object: map[string]any{
@@ -339,8 +199,12 @@ func TestPrimarySpecNormalizesRawExtension(t *testing.T) {
 }
 
 func TestPauseSnapshotAndAdoptionBuildsPersistentOverride(t *testing.T) {
+	configurePauseTestSchemas(t)
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	if err := v1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add OpenSaola scheme: %v", err)
 	}
@@ -376,7 +240,11 @@ func TestPauseSnapshotAndAdoptionBuildsPersistentOverride(t *testing.T) {
 		"spec": map[string]any{"legacy": true, "replicas": int64(3), "storage": "10Gi"},
 	}}
 	live.SetGroupVersionKind(gvk)
-	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseline, live).Build()
+	mid.UID = "mid-uid"
+	mid.ResourceVersion = "999"
+	controller := true
+	live.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: v1.GroupVersion.String(), Kind: "Middleware", Name: mid.Name, UID: mid.UID, Controller: &controller}})
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseline, mid, live).Build()
 
 	snapshot, err := BuildReconcilePauseSnapshot(ctx, cli, mid)
 	if err != nil {
@@ -428,6 +296,9 @@ func TestPauseSnapshotAndAdoptionBuildsPersistentOverride(t *testing.T) {
 func TestPauseSnapshotAndAdoptionIgnoresObservedNull(t *testing.T) {
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	if err := v1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add OpenSaola scheme: %v", err)
 	}
@@ -473,7 +344,11 @@ func TestPauseSnapshotAndAdoptionIgnoresObservedNull(t *testing.T) {
 		},
 	}}
 	live.SetGroupVersionKind(gvk)
-	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseline, live).Build()
+	mid.UID = "mid-uid"
+	mid.ResourceVersion = "999"
+	controller := true
+	live.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: v1.GroupVersion.String(), Kind: "Middleware", Name: mid.Name, UID: mid.UID, Controller: &controller}})
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseline, mid, live).Build()
 
 	snapshot, err := BuildReconcilePauseSnapshot(ctx, cli, mid)
 	if err != nil {
@@ -492,8 +367,12 @@ func TestPauseSnapshotAndAdoptionIgnoresObservedNull(t *testing.T) {
 }
 
 func TestPauseSnapshotAndAdoptionIncludesPureCUEPreAction(t *testing.T) {
+	configurePauseTestSchemas(t)
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
 	if err := v1.AddToScheme(scheme); err != nil {
 		t.Fatalf("add OpenSaola scheme: %v", err)
 	}
@@ -560,18 +439,19 @@ parameters: {
 		"spec": map[string]any{"replicas": int64(1), "fromPreAction": true},
 	}}
 	live.SetGroupVersionKind(gvk)
-	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseline, action, live).Build()
+	mid.UID = "mid-uid"
+	mid.ResourceVersion = "999"
+	controller := true
+	live.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: v1.GroupVersion.String(), Kind: "Middleware", Name: mid.Name, UID: mid.UID, Controller: &controller}})
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseline, action, mid, live).Build()
 
 	snapshot, err := BuildReconcilePauseSnapshot(ctx, cli, mid)
 	if err != nil {
 		t.Fatalf("BuildReconcilePauseSnapshot() error = %v", err)
 	}
-	base, err := decodeSpec(snapshot.DesiredSpec.Raw)
-	if err != nil {
-		t.Fatalf("decode snapshot desired spec: %v", err)
-	}
+	base := loadPauseActualSpec(t, cli, mid, snapshot)
 	if want := map[string]any{"replicas": float64(1), "fromPreAction": true}; !reflect.DeepEqual(base, want) {
-		t.Fatalf("snapshot desired spec = %#v, want %#v", base, want)
+		t.Fatalf("snapshot actual spec = %#v, want %#v", base, want)
 	}
 
 	actual := &unstructured.Unstructured{}
@@ -601,4 +481,197 @@ parameters: {
 	if want := map[string]any{"replicas": float64(1), "fromPreAction": true}; !reflect.DeepEqual(base, want) {
 		t.Fatalf("override base spec = %#v, want %#v", base, want)
 	}
+}
+
+// The fake custom-resource API has granular maps and atomic lists. Real native
+// list topology is tested separately against the API server.
+type pauseTestSchemas struct{}
+
+func (pauseTestSchemas) Resolve(context.Context, schema.GroupVersionKind) (managedfields.TypeConverter, string, error) {
+	return managedfields.NewDeducedTypeConverter(), "test-schema", nil
+}
+func configurePauseTestSchemas(t *testing.T) {
+	t.Helper()
+	k8s.ConfigureResourceIntents(pauseTestSchemas{})
+	t.Cleanup(func() { k8s.ConfigureResourceIntents(nil) })
+}
+
+func pauseAdoptionFixture(t *testing.T, desired, actual string) (client.Client, *v1.Middleware, *unstructured.Unstructured) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	gvk := schema.GroupVersionKind{Group: "pause.test.io", Version: "v1", Kind: "Database"}
+	scheme.AddKnownTypeWithName(gvk, &unstructured.Unstructured{})
+	baseline := &v1.MiddlewareBaseline{
+		ObjectMeta: metav1.ObjectMeta{Name: t.Name(), Labels: map[string]string{v1.LabelPackageName: t.Name()}},
+		Spec:       v1.MiddlewareBaselineSpec{GVK: v1.GVK{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind}},
+	}
+	mid := &v1.Middleware{
+		ObjectMeta: metav1.ObjectMeta{Name: "database", Namespace: "test", Labels: baseline.Labels},
+		Spec:       v1.MiddlewareSpec{Baseline: baseline.Name, Parameters: runtime.RawExtension{Raw: []byte(desired)}},
+	}
+	spec, err := decodeSpec([]byte(actual))
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := &unstructured.Unstructured{Object: map[string]any{"spec": spec}}
+	live.SetGroupVersionKind(gvk)
+	live.SetName(mid.Name)
+	live.SetNamespace(mid.Namespace)
+	live.SetUID("original-uid")
+	mid.UID = "mid-uid"
+	mid.ResourceVersion = "999"
+	controller := true
+	live.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: v1.GroupVersion.String(), Kind: "Middleware", Name: mid.Name, UID: mid.UID, Controller: &controller}})
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseline, mid, live).Build(), mid, live
+}
+
+func TestPauseAdoptionUsesActualBeforeAndAfter(t *testing.T) {
+	configurePauseTestSchemas(t)
+	for _, tc := range []struct{ name, desired, before, after, want string }{
+		{"unchanged defaults and drift", `{"replicas":3}`, `{"replicas":2,"default":"yes","nested":{"selector":null}}`, `{"replicas":2,"default":"yes","nested":{"selector":null}}`, `{}`},
+		{"only changed replica", `{"replicas":3}`, `{"replicas":2,"default":"yes"}`, `{"replicas":5,"default":"yes"}`, `{"replicas":5}`},
+		{"changed observed default", `{"replicas":3}`, `{"replicas":3,"default":"before"}`, `{"replicas":3,"default":"after"}`, `{"default":"after"}`},
+		{"removed desired field", `{"replicas":3,"legacy":true}`, `{"replicas":3,"legacy":true,"default":"yes"}`, `{"replicas":3,"default":"yes"}`, `{"legacy":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cli, mid, live := pauseAdoptionFixture(t, tc.desired, tc.before)
+			snapshot, err := BuildReconcilePauseSnapshot(context.Background(), cli, mid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := loadPauseActualSpec(t, cli, mid, snapshot)
+			wantBefore, _ := decodeSpec([]byte(tc.before))
+			if !reflect.DeepEqual(before, wantBefore) {
+				t.Fatalf("snapshot is not actual before: %#v", before)
+			}
+			live.Object["spec"], err = decodeSpec([]byte(tc.after))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cli.Update(context.Background(), live); err != nil {
+				t.Fatal(err)
+			}
+			adoption, err := AdoptPausedPrimaryCustomResource(context.Background(), cli, mid, snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := "{}"
+			if adoption.Overrides != nil {
+				got = string(adoption.Overrides.SpecPatch.Raw)
+			}
+			want, _ := decodeSpec([]byte(tc.want))
+			actual, _ := decodeSpec([]byte(got))
+			if !reflect.DeepEqual(actual, want) {
+				t.Fatalf("patch = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPauseAdoptionRetryDropsRevertedIntermediateChanges(t *testing.T) {
+	configurePauseTestSchemas(t)
+	cli, mid, live := pauseAdoptionFixture(t, `{"replicas":3,"storage":"10Gi"}`, `{"replicas":3,"storage":"20Gi","default":"yes"}`)
+	gvk := live.GroupVersionKind()
+	mid.Spec.ReconcileOverrides = &v1.ReconcileOverrides{
+		GVK: v1.GVK{Group: gvk.Group, Version: gvk.Version, Kind: gvk.Kind}, Namespace: mid.Namespace, Name: mid.Name,
+		BaseSpec:  runtime.RawExtension{Raw: []byte(`{"replicas":3,"storage":"10Gi"}`)},
+		SpecPatch: runtime.RawExtension{Raw: []byte(`{"storage":"20Gi"}`)},
+	}
+	snapshot, err := BuildReconcilePauseSnapshot(context.Background(), cli, mid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unstructured.SetNestedField(live.Object, float64(5), "spec", "replicas"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	first, err := AdoptPausedPrimaryCustomResource(context.Background(), cli, mid, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mid.Spec.ReconcileOverrides = first.Overrides
+	if err := unstructured.SetNestedField(live.Object, float64(3), "spec", "replicas"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.Update(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	second, err := AdoptPausedPrimaryCustomResource(context.Background(), cli, mid, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Overrides == nil || string(second.Overrides.SpecPatch.Raw) != `{"storage":"20Gi"}` {
+		t.Fatalf("retry retained a reverted change or lost prior override: %#v", second.Overrides)
+	}
+	mid.Spec.ReconcileOverrides = second.Overrides
+	// A second pause has no actual changes; the already adopted override stays.
+	next, err := BuildReconcilePauseSnapshot(context.Background(), cli, mid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := AdoptPausedPrimaryCustomResource(context.Background(), cli, mid, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Overrides == nil || string(third.Overrides.SpecPatch.Raw) != `{"storage":"20Gi"}` {
+		t.Fatal("next pause lost the previous override")
+	}
+}
+
+func TestPauseAdoptionRejectsLegacyCorruptAndReplacedSnapshots(t *testing.T) {
+	for _, scenario := range []string{"legacy desired snapshot", "corrupt actual snapshot", "recreated target", "missing target"} {
+		t.Run(scenario, func(t *testing.T) {
+			cli, mid, live := pauseAdoptionFixture(t, `{"replicas":3}`, `{"replicas":3,"default":"yes"}`)
+			snapshot, err := BuildReconcilePauseSnapshot(context.Background(), cli, mid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := ErrReconcilePauseSnapshotInvalid
+			switch scenario {
+			case "legacy desired snapshot":
+				snapshot.SnapshotSecret = ""
+			case "corrupt actual snapshot":
+				snapshot.Hash = "corrupt"
+			case "recreated target":
+				live.SetUID("replacement-uid")
+				if err := cli.Update(context.Background(), live); err != nil {
+					t.Fatal(err)
+				}
+				want = ErrReconcilePauseResourceChanged
+			case "missing target":
+				if err := cli.Delete(context.Background(), live); err != nil {
+					t.Fatal(err)
+				}
+				want = ErrReconcilePauseResourceMissing
+			}
+			if _, err := AdoptPausedPrimaryCustomResource(context.Background(), cli, mid, snapshot); !errors.Is(err, want) {
+				t.Fatalf("error = %v, want %v", err, want)
+			}
+		})
+	}
+}
+
+func loadPauseActualSpec(t *testing.T, cli client.Client, mid *v1.Middleware, snapshot *v1.ReconcilePauseStatus) map[string]any {
+	t.Helper()
+	data, err := k8s.NewManagedResourceWriter(cli).LoadReconcilePauseSnapshot(context.Background(), mid, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(data.ActualSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := decodeSpec(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return spec
 }

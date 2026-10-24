@@ -30,6 +30,7 @@ import (
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
 	"github.com/harmonycloud/opensaola/internal/service/middleware"
+	"github.com/harmonycloud/opensaola/internal/service/watcher"
 	"github.com/harmonycloud/opensaola/pkg/tools/ctxkeys"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
@@ -39,8 +40,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 // MiddlewareReconciler reconciles a Middleware object
@@ -293,6 +296,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, fmt.Errorf("upgrade failed: %w", err)
 	}
 
+	ctx = k8s.WithResourceIntentEvents(ctx, r.Recorder)
 	// Compare generation with observedGeneration
 	// observedGeneration == 0 means initial publish
 	// generation > observedGeneration or State == Updating means update is needed
@@ -319,6 +323,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 		r.Recorder.Event(mid, "Normal", "Updated", "Middleware updated successfully")
 	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -349,6 +354,7 @@ func (r *MiddlewareReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1.Middleware{}).
+		WatchesRawSource(source.Channel(watcher.MiddlewareReconcileEvents(), &handler.EnqueueRequestForObject{})).
 		Named("middleware").
 		WithEventFilter(pred).
 		WithOptions(concurrency.ControllerOptions("MIDDLEWARE", 1)).

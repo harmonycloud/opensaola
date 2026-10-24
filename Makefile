@@ -225,7 +225,7 @@ test-race: manifests generate fmt vet ## Run tests with race detector.
 
 .PHONY: test-envtest
 test-envtest: manifests generate setup-envtest ## Run envtest integration tests only.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -tags envtest ./internal/controller/... -v -count=1
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -tags envtest ./internal/controller/... ./internal/k8s/... ./internal/service/middlewareconfiguration/... -v -count=1
 
 .PHONY: bench
 bench: ## Run Go benchmarks (fast, no external deps).

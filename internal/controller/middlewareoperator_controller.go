@@ -314,6 +314,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 	if middlewareoperator.IsNoOperatorResource(mo) {
 		return consts.NoOperator
 	}
+	ctx = k8s.WithResourceIntentEvents(ctx, r.Recorder)
 	// Compare generation
 	// observedGeneration == 0 means initial publish
 	// generation > observedGeneration or State == Updating means update is needed
@@ -343,6 +344,16 @@ func (r *MiddlewareOperatorReconciler) handleDeployment(ctx context.Context, req
 	mo, err := k8s.GetMiddlewareOperator(ctx, r.Client, req.Name, req.Namespace)
 	if err != nil {
 		return err
+	}
+	// Finalization removes the native Deployment before the owner object is gone.
+	// A Deployment event can therefore race with finalization; never treat that
+	// expected absence as drift and recreate Configuration resources.
+	if !mo.DeletionTimestamp.IsZero() {
+		log.FromContext(ctx).Info("skipping MiddlewareOperator deployment reconciliation because it is deleting",
+			"name", mo.Name,
+			"namespace", mo.Namespace,
+		)
+		return nil
 	}
 	if v1.IsReconcileSuspended(mo.GetAnnotations()) {
 		log.FromContext(ctx).Info("skipping MiddlewareOperator deployment reconciliation because it is suspended",

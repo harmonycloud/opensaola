@@ -183,7 +183,7 @@ func HandleResource(ctx context.Context, cli client.Client, action consts.Handle
 
 // RenderPrimaryCustomResource renders the effective primary custom resource
 // without writing it. It is used by the pause/recovery state machine to take a
-// durable desired-state snapshot and to calculate B/L/D merges safely.
+// target identity and desired state onto which observed changes are applied.
 func RenderPrimaryCustomResource(ctx context.Context, cli client.Client, m *v1.Middleware) (*unstructured.Unstructured, error) {
 	return renderPrimaryCustomResource(ctx, cli, m, true)
 }
@@ -364,7 +364,7 @@ func buildCustomResource(ctx context.Context, cli client.Client, action consts.H
 			log.FromContext(ctx).Error(err, "CustomResource set controller reference error", status.DiagnosticLogValues(err)...)
 			return err
 		}
-		err = k8s.CreateOrPatchCustomResource(ctx, cli, cr)
+		err = k8s.NewManagedResourceWriter(cli).Reconcile(ctx, m, cr, "")
 		if err != nil && !apiErrors.IsAlreadyExists(err) {
 			// Stop watching
 			err = status.WrapDiagnostic(err, status.Diagnostic{

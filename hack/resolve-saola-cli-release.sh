@@ -238,13 +238,19 @@ verify_rebuild() {
   local source_date_epoch="$4"
   local expected_amd64="$5"
   local expected_arm64="$6"
-  local build_dir actual_amd64 actual_arm64
+  local build_dir actual_amd64 actual_arm64 toolchain
 
   ensure_tmp_root
   build_dir="${tmp_root}/source-build.$RANDOM"
   mkdir -p "${build_dir}"
   git -C "${source_dir}" archive "${commit}^{commit}" | tar -x -C "${build_dir}" || die 'failed to export exact source commit'
+  # Match the CLI release workflow's exact go.mod version, not the hosted
+  # runner's moving default compiler. Different Go releases change binary hashes.
+  [[ -f "${build_dir}/go.mod" ]] || die 'CLI source is missing go.mod'
+  toolchain="$(awk '$1 == "go" { print "go" $2; exit }' "${build_dir}/go.mod")"
+  [[ "${toolchain}" =~ ^go[0-9]+\.[0-9]+\.[0-9]+$ ]] || die 'CLI source must pin a full Go release in go.mod'
   env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+    GOTOOLCHAIN="${toolchain}" \
     make -C "${build_dir}" \
       VERSION="${version}" \
       GIT_COMMIT="${commit}" \

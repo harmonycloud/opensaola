@@ -31,10 +31,12 @@ import (
 	"github.com/harmonycloud/opensaola/internal/service/synchronizer"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -49,6 +51,11 @@ type CustomResourceWatcher struct {
 	members   map[string]struct{}
 	stopped   bool
 }
+
+// Owner events route self-healing through pure desired-state rendering.
+var middlewareReconcileEvents = make(chan event.GenericEvent, 128)
+
+func MiddlewareReconcileEvents() <-chan event.GenericEvent { return middlewareReconcileEvents }
 
 var CustomResourceWatcherMap sync.Map
 
@@ -461,34 +468,41 @@ func newResourceEventHandlerFuncs(ctx context.Context, cli client.Client, notify
 			// obj is the deleted custom resource object
 			log.FromContext(ctx).V(1).Info("CR DELETE event", customResourceLogFields("cr", cr)...)
 
-			// If OwnerReferences no longer exist, stop watching
-			for _, reference := range cr.GetOwnerReferences() {
-				mid, err := k8s.GetMiddleware(ctx, cli, reference.Name, cr.GetNamespace())
-				if err != nil {
-					if apiErrors.IsNotFound(err) {
-						// Stop watching
-						ReleaseCRWatcher(ctx, cr)
-						synchronizer.StopSyncCustomResource(fmt.Sprintf(synchronizer.SyncCustomResourceStopChanMapKey, cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName()))
-					}
-					return
-				}
-				if v1.IsMiddlewareReconcileWriteSuspended(mid.GetAnnotations(), mid.Status.Conditions) {
-					log.FromContext(ctx).Info("skipping custom resource rebuild because owning Middleware reconciliation is suspended",
-						"middleware", mid.Name,
-						"namespace", mid.Namespace,
-						"gvk", cr.GroupVersionKind().String(),
-						"customResource", cr.GetName(),
-						"annotation", v1.AnnotationSuspendReconcile,
-					)
-					return
-				}
-			}
-
-			cr.SetResourceVersion("")
-			err := k8s.CreateCustomResource(ctx, cli, cr)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "create custom resource error")
+			ref := metav1.GetControllerOf(cr)
+			if ref == nil || ref.Kind != "Middleware" || ref.UID == "" {
 				return
+			}
+			gv, err := schema.ParseGroupVersion(ref.APIVersion)
+			if err != nil || gv.Group != v1.GroupVersion.Group {
+				return
+			}
+			mid := &v1.Middleware{}
+			err = k8s.NewManagedResourceWriter(cli).Reader.Get(ctx, client.ObjectKey{Namespace: cr.GetNamespace(), Name: ref.Name}, mid)
+			if apiErrors.IsNotFound(err) {
+				ReleaseCRWatcher(ctx, cr)
+				synchronizer.StopSyncCustomResource(fmt.Sprintf(synchronizer.SyncCustomResourceStopChanMapKey, cr.GroupVersionKind().String(), cr.GetNamespace(), cr.GetName()))
+				return
+			}
+			if err != nil {
+				log.FromContext(ctx).Error(err, "read owner for resource rebuild")
+				return
+			}
+			if mid.UID != ref.UID || mid.DeletionTimestamp != nil || v1.IsMiddlewareReconcileWriteSuspended(mid.Annotations, mid.Status.Conditions) {
+				return
+			}
+			select {
+			case middlewareReconcileEvents <- event.GenericEvent{Object: mid}:
+			case <-ctx.Done():
+			default:
+				// A full queue must never stall informer delivery. The deleted CR is
+				// rebuilt by the next steady-state SSA compatibility reconcile instead.
+				log.FromContext(ctx).Info("middleware reconcile queue full, dropping CR rebuild request",
+					"warning", true,
+					"middleware", mid.Name,
+					"namespace", mid.Namespace,
+					"gvk", cr.GroupVersionKind().String(),
+					"customResource", cr.GetName(),
+				)
 			}
 
 		},
@@ -519,6 +533,15 @@ func notifyCustomResourceSync(namespace, middlewareName string) {
 }
 
 func customResourceEventObject(obj interface{}) (*unstructured.Unstructured, bool) {
+	switch tombstone := obj.(type) {
+	case cache.DeletedFinalStateUnknown:
+		obj = tombstone.Obj
+	case *cache.DeletedFinalStateUnknown:
+		if tombstone == nil {
+			return nil, false
+		}
+		obj = tombstone.Obj
+	}
 	cr, ok := obj.(*unstructured.Unstructured)
 	return cr, ok
 }

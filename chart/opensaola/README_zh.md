@@ -95,6 +95,8 @@ kubectl:
 
 这些值会生成 `ghcr.io/operators/opensaola` 和 `ghcr.io/platform-tools/kubectl`。仓库值必须保持为前缀，不要包含固定组件名。
 
+空前缀会被直接省略：`global.registry: ""` 时渲染出 `harmonycloud/opensaola`（由容器运行时的默认仓库或节点本地镜像解析）；两个前缀都为空时渲染裸镜像名 `opensaola` / `kubectl`。
+
 ## 安装已发布的 OCI 格式 Helm 包
 
 带标签的发行版本会将 Helm 包发布到 GHCR：

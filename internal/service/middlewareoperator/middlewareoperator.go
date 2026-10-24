@@ -519,6 +519,16 @@ func hydrateDeleteContext(ctx context.Context, cli client.Client, m *v1.Middlewa
 }
 
 func TemplateParseWithBaseline(ctx context.Context, cli client.Client, m *v1.MiddlewareOperator) error {
+	if err := renderOperatorWithBaseline(ctx, cli, m); err != nil {
+		return err
+	}
+	if err := middlewareaction.HandlePreActions(ctx, cli, m); err != nil {
+		return fmt.Errorf("handle preActions error: %w", err)
+	}
+	return nil
+}
+
+func renderOperatorWithBaseline(ctx context.Context, cli client.Client, m *v1.MiddlewareOperator) error {
 	// Get the associated baseline template
 	baseline, err := middlewareoperatorbaseline.Get(ctx, cli, m.Spec.Baseline, m.Labels[v1.LabelPackageName])
 	if err != nil {
@@ -573,12 +583,6 @@ func TemplateParseWithBaseline(ctx context.Context, cli client.Client, m *v1.Mid
 	err = yaml.Unmarshal([]byte(parse), &m.Spec)
 	if err != nil {
 		return fmt.Errorf("unmarshal spec error: %w", err)
-	}
-
-	// Handle preActions
-	err = middlewareaction.HandlePreActions(ctx, cli, m)
-	if err != nil {
-		return fmt.Errorf("handle preActions error: %w", err)
 	}
 
 	return nil

@@ -24,125 +24,90 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"sort"
-	"strings"
 
 	jsonpatch "github.com/evanphx/json-patch/v5"
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/k8s"
+	"github.com/harmonycloud/opensaola/internal/service/customresource"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ReconcilePauseSnapshotMaxBytes bounds the durable status payload. A pause
-// snapshot is deliberately short lived, but it still shares the Kubernetes
-// object size limit with the rest of Middleware status.
-const ReconcilePauseSnapshotMaxBytes = 256 * 1024
-
 var (
-	ErrReconcilePauseSnapshotInvalid  = errors.New("reconcile pause snapshot is invalid")
+	ErrReconcilePauseSnapshotInvalid  = k8s.ErrReconcilePauseSnapshotInvalid
 	ErrReconcilePauseResourceMissing  = errors.New("paused primary custom resource is missing")
 	ErrReconcilePauseResourceChanged  = errors.New("paused primary custom resource identity changed")
 	ErrReconcileOverrideTargetChanged = errors.New("reconcile override target changed")
-	ErrReconcilePauseLiveSpecChanged  = errors.New("paused primary custom resource spec changed after merge")
+	ErrReconcilePauseLiveSpecChanged  = k8s.ErrObservedSpecChanged
 )
 
-// ReconcilePauseMergeConflictError reports JSON Pointer paths changed both by
-// an external writer during the pause and by current desired state since the
-// pause began.
-type ReconcilePauseMergeConflictError struct {
-	Paths []string
-}
-
-func (e *ReconcilePauseMergeConflictError) Error() string {
-	return fmt.Sprintf("reconcile pause merge conflict at %s", strings.Join(e.Paths, ", "))
-}
-
-// PausedPrimaryCustomResourceAdoption is the output of one B/L/D merge. The
-// live spec hash is kept with the pause session until the resumed SSA write
-// succeeds, closing the gap between calculating L and applying the result.
+// PausedPrimaryCustomResourceAdoption holds changes observed during a pause.
+// The live spec hash closes the gap between calculating changes and writing.
 type PausedPrimaryCustomResourceAdoption struct {
 	Overrides    *v1.ReconcileOverrides
 	LiveSpecHash string
 }
 
-// BuildReconcilePauseSnapshot renders the effective primary CR desired state
-// and records enough immutable identity to fail closed if the actual resource
-// is deleted and recreated while reconciliation is paused.
+// BuildReconcilePauseSnapshot records the actual primary CR spec and immutable
+// identity at pause start. It resolves only the target, without rendering or
+// executing PreActions: the live API object is the sole observed baseline.
 func BuildReconcilePauseSnapshot(ctx context.Context, cli client.Client, m *v1.Middleware) (*v1.ReconcilePauseStatus, error) {
-	cr, err := RenderPrimaryCustomResource(ctx, cli, m)
-	if err != nil {
-		return nil, fmt.Errorf("render primary custom resource: %w", err)
+	if m == nil {
+		return nil, fmt.Errorf("middleware is nil")
 	}
-	live, err := k8s.GetCustomResource(ctx, cli, cr.GetName(), cr.GetNamespace(), cr.GroupVersionKind())
+	gvk, err := customresource.HandleGvk(ctx, cli, m)
+	if err != nil {
+		return nil, fmt.Errorf("resolve primary custom resource: %w", err)
+	}
+	live, err := readPausePrimary(ctx, cli, m.Name, m.Namespace, *gvk)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, ErrReconcilePauseResourceMissing
 		}
 		return nil, fmt.Errorf("get primary custom resource: %w", err)
 	}
-	spec, raw, err := primarySpec(cr)
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > ReconcilePauseSnapshotMaxBytes {
-		return nil, fmt.Errorf("reconcile pause snapshot is %d bytes, limit is %d", len(raw), ReconcilePauseSnapshotMaxBytes)
-	}
-	if spec == nil {
-		return nil, fmt.Errorf("%w: rendered primary custom resource spec is empty", ErrReconcilePauseSnapshotInvalid)
-	}
-	gvk := cr.GroupVersionKind()
-	return &v1.ReconcilePauseStatus{
-		DesiredSpec: runtime.RawExtension{Raw: raw},
-		GVK: v1.GVK{
-			Group:   gvk.Group,
-			Version: gvk.Version,
-			Kind:    gvk.Kind,
-		},
-		Namespace:   cr.GetNamespace(),
-		Name:        cr.GetName(),
-		ResourceUID: string(live.GetUID()),
-		Generation:  m.Generation,
-		Hash:        specHash(raw),
-		CapturedAt:  metav1.Now(),
-	}, nil
+	return k8s.NewManagedResourceWriter(cli).PrepareReconcilePauseSnapshot(ctx, m, live)
 }
 
-// AdoptPausedPrimaryCustomResource compares the pause-time desired spec (B),
-// the actual CR immediately before resume (L), and the current desired spec
-// (D). It returns a complete merge patch relative to the current base render,
-// so previous overrides remain effective instead of being accidentally lost.
+// AdoptPausedPrimaryCustomResource compares actual specs before and after the
+// pause, then applies only that delta to current desired state. The complete
+// patch relative to the base render retains previous effective overrides.
 func AdoptPausedPrimaryCustomResource(ctx context.Context, cli client.Client, m *v1.Middleware, snapshot *v1.ReconcilePauseStatus) (*PausedPrimaryCustomResourceAdoption, error) {
-	if snapshot == nil {
-		return nil, fmt.Errorf("%w: no snapshot", ErrReconcilePauseSnapshotInvalid)
-	}
-	base, err := decodeSpec(snapshot.DesiredSpec.Raw)
+	data, err := k8s.NewManagedResourceWriter(cli).LoadReconcilePauseSnapshot(ctx, m, snapshot)
 	if err != nil {
-		return nil, fmt.Errorf("%w: decode desired spec: %v", ErrReconcilePauseSnapshotInvalid, err)
-	}
-	if err := verifySnapshotHash(snapshot, base); err != nil {
 		return nil, err
 	}
-
-	current, err := RenderPrimaryCustomResource(ctx, cli, m)
+	baseRaw, err := json.Marshal(data.ActualSpec)
+	if err != nil {
+		return nil, ErrReconcilePauseSnapshotInvalid
+	}
+	base, err := decodeSpec(baseRaw)
+	if err != nil {
+		return nil, ErrReconcilePauseSnapshotInvalid
+	}
+	// A retry may follow an intermediate adoption already persisted in MID.
+	// Start from the pre-pause overrides so a reverted external change does
+	// not leave that intermediate value in the final adopted patch.
+	renderInput := m.DeepCopy()
+	renderInput.Spec.ReconcileOverrides = data.PreviousOverrides.DeepCopy()
+	current, err := RenderPrimaryCustomResource(ctx, cli, renderInput)
 	if err != nil {
 		return nil, fmt.Errorf("render current primary custom resource: %w", err)
 	}
 	if err := matchesSnapshotTarget(snapshot, current); err != nil {
 		return nil, err
 	}
-	live, err := k8s.GetCustomResource(ctx, cli, current.GetName(), current.GetNamespace(), current.GroupVersionKind())
+	live, err := readPausePrimary(ctx, cli, current.GetName(), current.GetNamespace(), current.GroupVersionKind())
 	if err != nil {
 		if isNotFound(err) {
 			return nil, ErrReconcilePauseResourceMissing
 		}
 		return nil, fmt.Errorf("get current primary custom resource: %w", err)
 	}
-	if snapshot.ResourceUID == "" || snapshot.ResourceUID != string(live.GetUID()) {
+	if snapshot.ResourceUID != string(live.GetUID()) || live.GetDeletionTimestamp() != nil {
 		return nil, ErrReconcilePauseResourceChanged
 	}
 	_, currentRaw, err := primarySpec(current)
@@ -157,16 +122,23 @@ func AdoptPausedPrimaryCustomResource(ctx context.Context, cli client.Client, m 
 	if err != nil {
 		return nil, fmt.Errorf("read actual primary custom resource spec: %w", err)
 	}
-	if len(actualRaw) > ReconcilePauseSnapshotMaxBytes {
-		return nil, fmt.Errorf("actual primary custom resource spec is %d bytes, limit is %d", len(actualRaw), ReconcilePauseSnapshotMaxBytes)
-	}
 
-	merged, conflicts, err := mergePausedSpec(base, actual, desired)
-	if err != nil {
-		return nil, err
-	}
-	if len(conflicts) > 0 {
-		return nil, &ReconcilePauseMergeConflictError{Paths: conflicts}
+	// No observed change means no adoption, even if render and live differ.
+	// This also avoids requiring schema discovery for an unchanged pause.
+	merged := desired
+	if !reflect.DeepEqual(base, actual) {
+		before := current.DeepCopy()
+		before.Object["spec"] = base
+		after := current.DeepCopy()
+		after.Object["spec"] = actual
+		adopted, err := k8s.NewManagedResourceWriter(cli).AdoptObservedSpecChanges(ctx, before, after, current)
+		if err != nil {
+			return nil, err
+		}
+		merged, _, err = primarySpec(adopted)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	withoutOverrides, err := RenderPrimaryCustomResourceWithoutOverrides(ctx, cli, m)
@@ -195,9 +167,7 @@ func AdoptPausedPrimaryCustomResource(ctx context.Context, cli client.Client, m 
 	if err != nil {
 		return nil, fmt.Errorf("decode reconcile override patch: %w", err)
 	}
-	if len(renderRaw) > ReconcilePauseSnapshotMaxBytes {
-		return nil, fmt.Errorf("reconcile override base spec is %d bytes, limit is %d", len(renderRaw), ReconcilePauseSnapshotMaxBytes)
-	}
+
 	// Keep only a canonical object patch. This also verifies that the merge
 	// patch cannot turn the CR spec root into a scalar/array.
 	patch, err = json.Marshal(patchObject)
@@ -379,15 +349,11 @@ func decodeSpec(raw []byte) (map[string]any, error) {
 	return spec, nil
 }
 
-func verifySnapshotHash(snapshot *v1.ReconcilePauseStatus, spec map[string]any) error {
-	raw, err := json.Marshal(spec)
-	if err != nil {
-		return err
-	}
-	if snapshot.Hash == "" || snapshot.Hash != specHash(raw) {
-		return fmt.Errorf("%w: desired spec hash mismatch", ErrReconcilePauseSnapshotInvalid)
-	}
-	return nil
+// ValidateReconcilePauseSnapshot checks the immutable Secret through the direct
+// reader. Missing or legacy inline baselines never cause a new capture at resume.
+func ValidateReconcilePauseSnapshot(ctx context.Context, cli client.Client, m *v1.Middleware, snapshot *v1.ReconcilePauseStatus) error {
+	_, err := k8s.NewManagedResourceWriter(cli).LoadReconcilePauseSnapshot(ctx, m, snapshot)
+	return err
 }
 
 func specHash(raw []byte) string {
@@ -405,7 +371,7 @@ func matchesSnapshotTarget(snapshot *v1.ReconcilePauseStatus, cr *unstructured.U
 }
 
 // VerifyPausedPrimaryCustomResourceForApply closes the recovery race between
-// B/L/D calculation and the following SSA request. It is called immediately
+// observed-change calculation and the following write. It is called immediately
 // before the primary CR write; a changed live spec sends the controller back
 // through merge instead of overwriting the new value.
 func VerifyPausedPrimaryCustomResourceForApply(ctx context.Context, cli client.Client, snapshot *v1.ReconcilePauseStatus, rendered *unstructured.Unstructured) error {
@@ -425,7 +391,7 @@ func VerifyPausedPrimaryCustomResourceForApply(ctx context.Context, cli client.C
 	return nil
 }
 
-// PausedPrimaryCustomResourceSpecMatchesAdoption checks whether L is still
+// PausedPrimaryCustomResourceSpecMatchesAdoption checks whether live is still
 // the same spec that was used for the successful merge. Status-only updates do
 // not affect this check, so a target controller's normal status heartbeat does
 // not block recovery.
@@ -438,7 +404,7 @@ func PausedPrimaryCustomResourceSpecMatchesAdoption(ctx context.Context, cli cli
 		Version: snapshot.GVK.Version,
 		Kind:    snapshot.GVK.Kind,
 	}
-	live, err := k8s.GetCustomResource(ctx, cli, snapshot.Name, snapshot.Namespace, gvk)
+	live, err := readPausePrimary(ctx, cli, snapshot.Name, snapshot.Namespace, gvk)
 	if err != nil {
 		if isNotFound(err) {
 			return false, ErrReconcilePauseResourceMissing
@@ -455,110 +421,20 @@ func PausedPrimaryCustomResourceSpecMatchesAdoption(ctx context.Context, cli cli
 	return specHash(raw) == snapshot.AdoptedLiveSpecHash, nil
 }
 
+func readPausePrimary(ctx context.Context, cli client.Client, name, namespace string, gvk schema.GroupVersionKind) (*unstructured.Unstructured, error) {
+	live := &unstructured.Unstructured{}
+	live.SetGroupVersionKind(gvk)
+	err := k8s.NewManagedResourceWriter(cli).Reader.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, live)
+	return live, err
+}
+
 type mergeValue struct {
 	exists bool
 	value  any
 }
 
-// mergePausedSpec implements the B/L/D merge rule: keep D when L did not
-// change from B; adopt L when D did not change from B; accept identical L/D
-// changes; recurse through maps; and treat arrays as atomic values.
-func mergePausedSpec(base, actual, desired map[string]any) (map[string]any, []string, error) {
-	merged, conflicts, err := mergePausedValue(
-		mergeValue{exists: true, value: base},
-		mergeValue{exists: true, value: actual},
-		mergeValue{exists: true, value: desired},
-		"",
-	)
-	if err != nil {
-		return nil, nil, err
-	}
-	if !merged.exists {
-		return nil, nil, fmt.Errorf("merged primary custom resource spec unexpectedly absent")
-	}
-	result, ok := merged.value.(map[string]any)
-	if !ok {
-		return nil, nil, fmt.Errorf("merged primary custom resource spec is %T, want object", merged.value)
-	}
-	return result, conflicts, nil
-}
-
-func mergePausedValue(base, actual, desired mergeValue, path string) (mergeValue, []string, error) {
-	// Operators that round-trip typed CR specs can serialize an omitted pointer
-	// field as JSON null. Treat that observed live value as unchanged from B so
-	// it does not become an RFC 7396 deletion override. Only L is normalized;
-	// B and D keep their declarative JSON merge-patch semantics.
-	if actual.exists && actual.value == nil {
-		actual = cloneMergeValue(base)
-	}
-	baseMap, baseIsMap := valueAsMap(base)
-	actualMap, actualIsMap := valueAsMap(actual)
-	desiredMap, desiredIsMap := valueAsMap(desired)
-	// Recurse through maps before shortcutting equal parent objects. This lets
-	// the merge preserve independent nested edits while normalizing observed
-	// live null values at their individual paths.
-	if baseIsMap && actualIsMap && desiredIsMap {
-		keys := make(map[string]struct{}, len(baseMap)+len(actualMap)+len(desiredMap))
-		for key := range baseMap {
-			keys[key] = struct{}{}
-		}
-		for key := range actualMap {
-			keys[key] = struct{}{}
-		}
-		for key := range desiredMap {
-			keys[key] = struct{}{}
-		}
-		ordered := make([]string, 0, len(keys))
-		for key := range keys {
-			ordered = append(ordered, key)
-		}
-		sort.Strings(ordered)
-
-		result := make(map[string]any, len(keys))
-		var conflicts []string
-		for _, key := range ordered {
-			baseValue, baseOK := baseMap[key]
-			actualValue, actualOK := actualMap[key]
-			desiredValue, desiredOK := desiredMap[key]
-			merged, childConflicts, err := mergePausedValue(
-				mergeValue{exists: baseOK, value: baseValue},
-				mergeValue{exists: actualOK, value: actualValue},
-				mergeValue{exists: desiredOK, value: desiredValue},
-				joinJSONPointer(path, key),
-			)
-			if err != nil {
-				return mergeValue{}, nil, err
-			}
-			conflicts = append(conflicts, childConflicts...)
-			if merged.exists {
-				result[key] = merged.value
-			}
-		}
-		return mergeValue{exists: true, value: result}, conflicts, nil
-	}
-
-	if mergeValueEqual(actual, base) {
-		return cloneMergeValue(desired), nil, nil
-	}
-	if mergeValueEqual(desired, base) {
-		return cloneMergeValue(actual), nil, nil
-	}
-	if mergeValueEqual(desired, actual) {
-		return cloneMergeValue(desired), nil, nil
-	}
-
-	return cloneMergeValue(desired), []string{displayJSONPointer(path)}, nil
-}
-
 func mergeValueEqual(left, right mergeValue) bool {
 	return left.exists == right.exists && (!left.exists || reflect.DeepEqual(left.value, right.value))
-}
-
-func cloneMergeValue(value mergeValue) mergeValue {
-	if !value.exists {
-		return mergeValue{}
-	}
-	return mergeValue{exists: true, value: cloneJSONValue(value.value)}
 }
 
 func valueAsMap(value mergeValue) (map[string]any, bool) {
@@ -586,18 +462,6 @@ func cloneJSONValue(value any) any {
 	default:
 		return typed
 	}
-}
-
-func joinJSONPointer(parent, key string) string {
-	escaped := strings.NewReplacer("~", "~0", "/", "~1").Replace(key)
-	return parent + "/" + escaped
-}
-
-func displayJSONPointer(path string) string {
-	if path == "" {
-		return "/"
-	}
-	return path
 }
 
 func isNotFound(err error) bool {

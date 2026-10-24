@@ -95,6 +95,8 @@ kubectl:
 
 These values resolve to `ghcr.io/operators/opensaola` and `ghcr.io/platform-tools/kubectl`. Repository values must remain prefixes; do not include the fixed component name.
 
+Empty segments are simply omitted: `global.registry: ""` renders `harmonycloud/opensaola` (resolved by the container runtime's default registry or node-local images), and setting both prefixes empty renders bare `opensaola` / `kubectl` image names.
+
 ## Install A Released OCI Chart
 
 Tagged releases publish this chart to GHCR:

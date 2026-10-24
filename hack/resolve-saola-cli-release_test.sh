@@ -36,6 +36,7 @@ cat >"${source_repo}/Makefile" <<'EOF'
 .PHONY: release-build release-checksums
 
 release-build:
+	@test "$${GOTOOLCHAIN}" = go1.26.4
 	@test -z "$${GITHUB_OUTPUT+x}"
 	@test -z "$${GITHUB_ENV+x}"
 	@test -z "$${GITHUB_PATH+x}"
@@ -51,8 +52,9 @@ release-build:
 release-checksums: release-build
 	@cd dist && shasum -a 256 saola-linux-amd64 saola-linux-arm64 >SHA256SUMS
 EOF
+printf 'module example.invalid/saola-cli\n\ngo 1.26.4\n' >"${source_repo}/go.mod"
 printf 'release-1.0.0\n' >"${source_repo}/release-payload.txt"
-git -C "${source_repo}" add Makefile release-payload.txt
+git -C "${source_repo}" add Makefile go.mod release-payload.txt
 GIT_AUTHOR_DATE='2025-01-01T00:00:00Z' GIT_COMMITTER_DATE='2025-01-01T00:00:00Z' \
   git -C "${source_repo}" commit -q -m 'release 1.0.0'
 GIT_COMMITTER_DATE='2025-01-01T00:00:00Z' git -C "${source_repo}" tag -a v1.0.0 -m v1.0.0
@@ -82,6 +84,7 @@ cat >"${releases_json}" <<'EOF'
 EOF
 
 env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+  GOTOOLCHAIN=go1.26.4 \
   make -s -C "${source_repo}" VERSION=v1.10.0 GIT_COMMIT="${release_commit}" \
   SOURCE_DATE_EPOCH="${release_epoch}" release-build release-checksums
 cp "${source_repo}/dist/SHA256SUMS" \
@@ -94,6 +97,7 @@ resolver_env=(
   "SAOLA_CLI_TAG_REFS_FILE=${tag_refs}"
   "SAOLA_CLI_RELEASE_DIR=${release_dir}"
   "SAOLA_CLI_SOURCE_DIR=${source_repo}"
+  "GOTOOLCHAIN=go9.99.9"
   "GITHUB_OUTPUT=${tmp_dir}/must-not-write-output"
   "GITHUB_ENV=${tmp_dir}/must-not-write-env"
   "GITHUB_PATH=${tmp_dir}/must-not-write-path"
@@ -131,6 +135,7 @@ cat >"${large_releases_json}" <<EOF
 ]
 EOF
 env -u GITHUB_OUTPUT -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+  GOTOOLCHAIN=go1.26.4 \
   make -s -C "${source_repo}" VERSION="${large_version}" GIT_COMMIT="${release_commit}" \
   SOURCE_DATE_EPOCH="${release_epoch}" release-build release-checksums
 cp "${source_repo}/dist/SHA256SUMS" \

@@ -18,8 +18,9 @@ package customresource
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+
+	kjson "sigs.k8s.io/json"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/service/middlewarebaseline"
@@ -120,7 +121,8 @@ func RestoreIfIllegalUpdate(ctx context.Context, cli client.Client, oldObj, newO
 
 // GetNeedPublishCustomResource builds the CustomResource that should be published
 func GetNeedPublishCustomResource(ctx context.Context, cli client.Client, m *v1.Middleware) (*unstructured.Unstructured, error) {
-	err := json.Unmarshal(m.Spec.Parameters.Raw, new(make(map[string]interface{})))
+	var parameters map[string]interface{}
+	err := kjson.UnmarshalCaseSensitivePreserveInts(m.Spec.Parameters.Raw, &parameters)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshal parameters error: %w", err)
 	}
@@ -134,7 +136,7 @@ func GetNeedPublishCustomResource(ctx context.Context, cli client.Client, m *v1.
 
 	customResource := &unstructured.Unstructured{
 		Object: map[string]interface{}{
-			"spec": m.Spec.Parameters,
+			"spec": parameters,
 		},
 	}
 

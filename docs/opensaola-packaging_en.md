@@ -346,13 +346,15 @@ Final Kubernetes Resource YAML
 When a Configuration template conditionally renders empty, or its reference is removed by a Baseline/MID/MO, that is a
 feature-disable event rather than deletion of the MID/MO. A resource manifest's `metadata.annotations` inside
 `spec.template` takes precedence over `MiddlewareConfiguration.metadata.annotations`; do not manually add a policy annotation
-to an existing live resource because the controller does not read it:
+to an existing live resource to change disable behavior: disable cleanup uses the policy recorded during successful rendering.
 
 | Policy | Trigger | Default/Behavior | Deletion protection |
 |--------|---------|------------------|---------------------|
 | `configurationDisablePolicy` | The owner's next reconcile after a template no longer renders or a reference is removed | Without an explicit policy: PVC/PV use `orphan`, CRDs always use `orphan`, and every other Kind uses `delete` | Removes only a resource previously written to lifecycle inventory whose owner UID, resource UID, Configuration markers, and owner relation still match |
 | `configurationDeletePolicy` | MID/MO deletion | Cleans resources identified as previously managed | `orphan` retains; `delete` is a force-delete semantic and must not be described as the UID-safe disable path |
-| `configurationOwnershipPolicy=managed` | Same-name resource already has another controller owner | By default the controller does not take ownership, retains the OwnerReference, and continues to patch | `managed` fails reconciliation and explicitly refuses takeover; a resource unmanaged by the current owner does not enter lifecycle inventory |
+| `configurationOwnershipPolicy=managed` | Same-name resource already has another controller owner | Identity validation rejects changes to another controller's resource by default; `managed` remains compatible | Only resources successfully written after identity validation or legacy-source adoption enter lifecycle inventory |
+
+A legacy Configuration resource with a missing owner UID, or whose previous owner has been deleted, can be adopted only when its app/Configuration source markers match and no other owner claims it. Helm markers alone are insufficient. Recreating a MiddlewareConfiguration with the same name preserves its logical source identity. Adoption atomically establishes the current owner's record and retains old fields absent from the initial desired object; CRDs are updated in place. See the [resource intent rules](resource-intent_zh.md) for the full boundaries.
 
 Except for PVC/PV and CRDs, an unannotated resource is deleted by default when the feature is disabled. To retain a ConfigMap,
 Secret, StatefulSet, unknown/custom CR, or any other Kind, set this while it is still rendering in
@@ -371,6 +373,17 @@ retroactively deleted after upgrade; it must first reconcile successfully to use
 `MiddlewareConfiguration.spec.template` alone does not trigger owner reconciliation; a MID/MO reference change or another
 owner event must do so. “No longer referenced” means only that OpenSaola no longer renders the Configuration, not that the
 controller has proven no other cluster consumer exists.
+
+Same-namespace resources must also match the controller ownerReference. Cross-namespace and cluster-scoped resources use
+the inventory UIDs and source markers without requiring a cross-namespace ownerReference; an external controller still
+prevents disable cleanup. On MID/MO deletion, policy is read from the live resource with the MCF metadata as fallback.
+An explicit `configurationDeletePolicy` takes precedence; otherwise `configurationDisablePolicy=orphan` also retains it.
+
+An already-disabled cross-namespace resource whose inventory was lost in an older version is not automatically deleted
+by upgrading or retrying. After checking its identity and current use, and only if reapplying the configuration is acceptable,
+restore the original reference/rendering, wait for successful reconciliation, verify the recorded resource UID matches
+the live resource, and disable it again. Review resources that cannot safely be reapplied individually; do not bulk-delete
+them by name labels.
 
 ---
 

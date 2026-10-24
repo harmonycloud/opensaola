@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-24
+
+### Added
+- Ordered CEL `statusRules` on OperatorBaseline GVKs project a managed custom resource's phase, reason, and replica count into Middleware status.
+- Immutable, compressed Secret records of rendered resource intent support three-way updates of MID primary resources and MID/MO Configuration resources, including schema-aware field removal and protection of externally changed fields.
+- Guarded adoption of legacy Configuration resources verifies their logical source and live ownership before atomically publishing changes and establishing lifecycle inventory.
+
+### Changed
+- Existing owned resources establish intent records on their next normal update. Startup does not bulk-rewrite unchanged resources, replay PreActions, or require the unreleased CLI SSA migration tooling.
+- Reconciliation pause snapshots store the actual primary-resource spec and previous overrides in an immutable Secret. Recovery adopts only changes made during the pause and retries from the original snapshot.
+- Configuration disable/delete handling honors resource-level policies, keeps orphan resources outside owner garbage collection, and respects explicit cross-namespace template targets.
+- Official images embed Saola CLI v1.1.0, pinned to its released commit through the stable lock.
+
+### Fixed
+- Accept empty registry and repository image prefixes in the Helm chart (issue [#3](https://github.com/harmonycloud/opensaola/issues/3)).
+- Skip MiddlewareOperator Deployment reconciliation while the owner is being deleted.
+- Resolve Configuration deletion scope through the supplied client's RESTMapper, matching the apply path and avoiding implicit kubeconfig access in isolated tests.
+
+### Upgrade notes and limitations
+- Finish existing reconciliation pause sessions before upgrading. Legacy `desiredSpec` snapshots are not automatically converted into actual-state snapshots.
+- `resume-policy=merge` still requires CUE-only PreActions; use `apply` only when intentionally discarding changes made during a pause.
+- Fields omitted before the first intent record are not inferred as safe to delete. Unknown or conflicting live fields remain protected and are reported.
+- Rolling back the controller cannot restore fields already deleted by an explicit configuration change. Restore required values through the desired configuration and verify each affected instance.
+
 ## [1.3.0] - 2026-08-12
 
 ### Added
@@ -28,7 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Known limitations
 - `resume-policy=merge` fails closed when any PreAction contains a non-CUE step (for example CMD or HTTP), because pause rendering must not execute external side effects. Make the action pure CUE, make its result explicit desired state, or use `apply` only when intentionally overwriting a change made during the pause.
 
-## [1.5.0] - 2025-01-01
+## Historical development notes
 
 ### Added
 - Apache License 2.0 and license headers on all source files

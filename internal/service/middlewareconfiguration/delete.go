@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -30,7 +31,6 @@ import (
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/pkg/tools"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -212,11 +212,9 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 		// Determine if the resource is namespaced: a template-specified namespace
 		// wins (same rule as apply); otherwise default to the owner's namespace.
 		ns := ""
-		tmp := new(unstructured.Unstructured)
-		tmp.SetGroupVersionKind(gvk)
-		namespaced, isNSErr := k8s.IsNamespaced(tmp)
+		mapping, isNSErr := cli.RESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
 		if isNSErr != nil {
-			if k8s.IsCRDNotInstalled(isNSErr) {
+			if meta.IsNoMatchError(isNSErr) || k8s.IsCRDNotInstalled(isNSErr) {
 				log.FromContext(ctx).Info("CRD not installed in cluster, skipping cleanup (resource cannot exist)",
 					"configuration", cfg.Name,
 				)
@@ -225,6 +223,7 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 			errList = append(errList, fmt.Sprintf("configuration %s isNamespaced error: %v", cfg.Name, isNSErr))
 			continue
 		}
+		namespaced := mapping.Scope.Name() == meta.RESTScopeNameNamespace
 		if namespaced {
 			if renderedNS != "" {
 				ns = renderedNS

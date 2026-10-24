@@ -59,6 +59,8 @@ Saola CLI publishes independently. OpenSaola does not require a downstream dispa
 
 `build/saola-cli-stable.lock` is the only committed Saola CLI lock. It records `repository`, `version`, `commit`, `channel`, and `source_date_epoch`. Docker builds use a BuildKit named context pinned to that full commit and record the CLI version and revision in OCI labels. Official images remain exactly `linux/amd64` and `linux/arm64` and include BuildKit provenance and SBOM attestations.
 
+Artifact rebuilds select the exact Go version declared in the released CLI source's `go.mod` through `GOTOOLCHAIN`, rather than inheriting the hosted runner's changing default compiler. The source must declare a Go version including its patch number; missing or invalid versions fail verification.
+
 Branch and tag behavior is intentionally different:
 
 | Git ref | Behavior |

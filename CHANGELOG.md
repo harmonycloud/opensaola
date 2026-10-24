@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Accept empty registry and repository image prefixes in the Helm chart (issue [#3](https://github.com/harmonycloud/opensaola/issues/3)).
 - Skip MiddlewareOperator Deployment reconciliation while the owner is being deleted.
 - Resolve Configuration deletion scope through the supplied client's RESTMapper, matching the apply path and avoiding implicit kubeconfig access in isolated tests.
+- Pin CLI artifact rebuilds to the exact Go version declared in the released CLI source, preventing hosted-runner compiler changes from breaking checksum verification.
 
 ### Upgrade notes and limitations
 - Finish existing reconciliation pause sessions before upgrading. Legacy `desiredSpec` snapshots are not automatically converted into actual-state snapshots.

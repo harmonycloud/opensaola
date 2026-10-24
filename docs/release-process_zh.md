@@ -59,6 +59,8 @@ Saola CLI 独立发布。OpenSaola 不需要下游 dispatch token、自动化 PA
 
 `build/saola-cli-stable.lock` 是唯一提交到仓库的 Saola CLI lock，字段为 `repository`、`version`、`commit`、`channel` 和 `source_date_epoch`。Docker 构建使用固定到完整 commit 的 BuildKit named context，并把 CLI 版本和 revision 写入 OCI labels。官方镜像平台仍严格限定为 `linux/amd64` 和 `linux/arm64`，同时生成 BuildKit provenance 与 SBOM attestations。
 
+资产复建固定使用已发布 CLI 源码 `go.mod` 中声明的完整 Go 版本，通过 `GOTOOLCHAIN` 选择对应工具链，避免 hosted runner 默认编译器变化导致校验和漂移。源码必须声明包含补丁号的 Go 版本；缺失或无效时验证失败。
+
 不同 ref 的行为刻意区分：
 
 | Git ref | 行为 |

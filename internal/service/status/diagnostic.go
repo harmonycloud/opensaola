@@ -204,6 +204,13 @@ func CauseCategory(err error) string {
 	}
 	msg := strings.ToLower(err.Error())
 	switch {
+	// Stable resource intent errors take precedence over incidental words in
+	// field paths (for example template, tls, or registry). Match the complete
+	// prefix so wrapped and joined errors retain the same classification.
+	case strings.Contains(msg, "resource intent deletion blocked:"):
+		return "Conflict"
+	case strings.Contains(msg, "resource did not fulfill intended deletions at ") || strings.Contains(msg, "resource did not converge to its declared fields"):
+		return "Validation"
 	case strings.Contains(msg, "x509") || strings.Contains(msg, "certificate signed by unknown authority") || strings.Contains(msg, "tls"):
 		return "RegistryTLS"
 	case strings.Contains(msg, "unauthorized") || strings.Contains(msg, "authentication required") || strings.Contains(msg, "pull access denied"):

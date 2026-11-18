@@ -121,12 +121,15 @@ func (c *ResourceIntentCollector) collect(ctx context.Context, secret *corev1.Se
 	if secret.DeletionTimestamp != nil || secret.CreationTimestamp.IsZero() || now.Sub(secret.CreationTimestamp.Time) < c.MinAge {
 		return false, nil
 	}
-	if secret.UID == "" || secret.ResourceVersion == "" || secret.Immutable == nil || !*secret.Immutable || secret.Type != corev1.SecretTypeOpaque {
+	if secret.UID == "" || secret.ResourceVersion == "" || (!isIntentLedger(secret) && (secret.Immutable == nil || !*secret.Immutable)) || secret.Type != corev1.SecretTypeOpaque {
 		return false, managedWriteBlocked("invalid intent collection identity")
 	}
 	record, err := decodeResourceIntent(secret.Data)
-	if err != nil || record.Version != 1 || record.Desired == nil || record.OwnerUID == "" || record.ResourceUID == "" || record.Pause == nil && record.SchemaHash == "" {
+	if err != nil || !supportedResourceIntentVersion(record.Version) || record.Pause != nil && record.Version != 1 || record.Desired == nil || record.OwnerUID == "" || record.ResourceUID == "" || record.Pause == nil && record.SchemaHash == "" {
 		return false, managedWriteBlocked("invalid intent collection record")
+	}
+	if _, err := effectiveResourceIntent(record, secret); err != nil {
+		return false, err
 	}
 	ref := metav1.GetControllerOf(secret)
 	if ref == nil || ref.UID != record.OwnerUID || secret.Labels[intentRecordLabel] != string(record.OwnerUID) || ref.APIVersion != v1.GroupVersion.String() || ref.Name == "" {
@@ -149,6 +152,13 @@ func (c *ResourceIntentCollector) collect(ctx context.Context, secret *corev1.Se
 	}
 	if owner.GetUID() != ref.UID || owner.GetDeletionTimestamp() != nil {
 		return false, nil
+	}
+	if isIntentLedger(secret) {
+		identity := record.Desired.DeepCopy()
+		identity.SetUID(record.ResourceUID)
+		if _, err := readIntentLedger(secret, owner, identity, record.Configuration); err != nil {
+			return false, err
+		}
 	}
 	// Records created before the single-RV publication protocol may be reused
 	// by an old writer. Never infer their safety from age or the current pointer.
@@ -182,7 +192,7 @@ func (c *ResourceIntentCollector) collect(ctx context.Context, secret *corev1.Se
 		}
 		return false, fmt.Errorf("read intent target: %w", err)
 	}
-	if target.GetAnnotations()[AnnotationResourceIntent] == secret.Name {
+	if !isIntentLedger(secret) && target.GetAnnotations()[AnnotationResourceIntent] == secret.Name {
 		return false, nil
 	}
 	if target.GetUID() == "" || target.GetResourceVersion() == "" {
@@ -190,6 +200,11 @@ func (c *ResourceIntentCollector) collect(ctx context.Context, secret *corev1.Se
 	}
 	if target.GetUID() != record.ResourceUID {
 		return c.deleteRecord(ctx, secret)
+	}
+	// A ledger follows the target UID for its entire lifetime. Its recovery
+	// data remains authoritative even if admission removes the target pointer.
+	if isIntentLedger(secret) {
+		return false, nil
 	}
 	if err := verifyIntentIdentity(owner, target, record.Desired, record.Configuration); err != nil {
 		return false, err

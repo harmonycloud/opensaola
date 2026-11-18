@@ -18,7 +18,6 @@ package middlewareconfiguration
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -33,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	kjson "sigs.k8s.io/json"
 )
 
 func deleteTemplateLineValues(template string) (apiVersion string, kind string, nameExpr string, namespaceExpr string) {
@@ -94,7 +94,7 @@ func applyConfigurationValues(ctx context.Context, cfg v1.Configuration, templat
 	if err != nil {
 		return err
 	}
-	return json.Unmarshal([]byte(parse), &templateValues.Values)
+	return kjson.UnmarshalCaseSensitivePreserveInts([]byte(parse), &templateValues.Values)
 }
 
 type deleteByNameResult string

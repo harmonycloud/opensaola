@@ -86,6 +86,12 @@ func localGCPrepared(t *testing.T, ctx context.Context, cli client.Client, owner
 	}
 	prepared := current.DeepCopy()
 	prepared.ObjectMeta = metav1.ObjectMeta{GenerateName: "gc-prepared-", Namespace: owner.Namespace, Labels: current.Labels, OwnerReferences: current.OwnerReferences}
+	// Exercise cleanup of a legacy immutable record while the current
+	// target uses the deterministic mutable ledger.
+	prepared.Labels = maps.Clone(current.Labels)
+	delete(prepared.Labels, "middleware.cn/field-history")
+	immutable := true
+	prepared.Immutable = &immutable
 	prepared.Data = map[string][]byte{"intent.json": raw}
 	if err := cli.Create(ctx, prepared, client.FieldOwner(v1.FieldOwner)); err != nil {
 		t.Fatal(err)
@@ -129,46 +135,44 @@ func localGCCheckBusiness(t *testing.T, before, after *unstructured.Unstructured
 
 func runLocalIntentGCTests(t *testing.T, cli client.Client, w *k8s.ManagedResourceWriter) {
 	t.Helper()
-	for _, tc := range []struct {
-		name  string
-		apply func(context.Context, client.Client, *unstructured.Unstructured) error
-	}{
-		{name: "update", apply: k8s.UpdateCustomResource}, {name: "patch", apply: k8s.PatchCustomResource},
-	} {
-		t.Run("stale_action_"+tc.name+"_cannot_restore_deleted_record", func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-			defer cancel()
-			owner := localIntentOwner(t, ctx, cli)
-			desired := localIntentObject(owner, "v1", "ConfigMap", "action-target")
-			desired.Object["data"] = map[string]any{"KEEP": "before"}
-			if err := w.Reconcile(ctx, owner, desired, ""); err != nil {
-				t.Fatal(err)
-			}
-			stale := localIntentGet(t, ctx, cli, desired)
-			oldRecord := stale.GetAnnotations()[k8s.AnnotationResourceIntent]
-			desired.Object["data"] = map[string]any{"KEEP": "after"}
-			if err := w.Reconcile(ctx, owner, desired, ""); err != nil {
-				t.Fatal(err)
-			}
-			if err := cli.Get(ctx, client.ObjectKey{Namespace: owner.Namespace, Name: oldRecord}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
-				t.Fatalf("old record remained: %v", err)
-			}
-			if err := tc.apply(ctx, cli, stale); !apierrors.IsConflict(err) {
-				t.Fatalf("stale action was not rejected: %v", err)
-			}
-			latest := localIntentGet(t, ctx, cli, desired)
-			if latest.GetAnnotations()[k8s.AnnotationResourceIntent] == oldRecord {
-				t.Fatal("stale action restored deleted record")
-			}
-			data, _, _ := unstructured.NestedStringMap(latest.Object, "data")
-			if data["KEEP"] != "after" {
-				t.Fatal("stale action reverted business data")
-			}
-			if err := tc.apply(ctx, cli, latest); err != nil {
-				t.Fatal("fresh Action Apply failed", err)
-			}
-		})
-	}
+	t.Run("stale_action_cannot_restore_deleted_record", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		owner := localIntentOwner(t, ctx, cli)
+		desired := localIntentObject(owner, "v1", "ConfigMap", "action-target")
+		desired.Object["data"] = map[string]any{"KEEP": "before"}
+		if err := w.Reconcile(ctx, owner, desired, ""); err != nil {
+			t.Fatal(err)
+		}
+		stale := localIntentGet(t, ctx, cli, desired)
+		recordName := stale.GetAnnotations()[k8s.AnnotationResourceIntent]
+		oldOperation := stale.GetAnnotations()[k8s.AnnotationResourceIntentOperation]
+		desired.Object["data"] = map[string]any{"KEEP": "after"}
+		if err := w.Reconcile(ctx, owner, desired, ""); err != nil {
+			t.Fatal(err)
+		}
+		if recordName == "" || oldOperation == "" {
+			t.Fatal("initial field history identity missing")
+		}
+		edit := stale.DeepCopy()
+		edit.Object["data"] = map[string]any{"KEEP": "action"}
+		if err := k8s.PatchActionResource(ctx, cli, stale, edit); !apierrors.IsConflict(err) && !apierrors.IsInvalid(err) {
+			t.Fatalf("stale action was not rejected: %v", err)
+		}
+		latest := localIntentGet(t, ctx, cli, desired)
+		if latest.GetAnnotations()[k8s.AnnotationResourceIntent] != recordName || latest.GetAnnotations()[k8s.AnnotationResourceIntentOperation] == oldOperation {
+			t.Fatal("stale action changed committed field history")
+		}
+		data, _, _ := unstructured.NestedStringMap(latest.Object, "data")
+		if data["KEEP"] != "after" {
+			t.Fatal("stale action reverted business data")
+		}
+		edit = latest.DeepCopy()
+		edit.Object["data"] = map[string]any{"KEEP": "action"}
+		if err := k8s.PatchActionResource(ctx, cli, latest, edit); err != nil {
+			t.Fatal("fresh Action edit failed", err)
+		}
+	})
 	for _, mode := range []string{"fence_delayed_json_patch", "fence_delayed_ssa", "changed_rv_no_fence", "target_absent", "target_replaced", "owner_gc", "repeat_updates_keep_one_record"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -292,7 +296,7 @@ func runLocalIntentGCTests(t *testing.T, cli client.Client, w *k8s.ManagedResour
 		})
 	}
 
-	t.Run("initialization_retries_with_fresh_record_after_gc", func(t *testing.T) {
+	t.Run("initialization_keeps_pending_record_across_gc", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 		owner := localIntentOwner(t, ctx, cli)
@@ -303,15 +307,16 @@ func runLocalIntentGCTests(t *testing.T, cli client.Client, w *k8s.ManagedResour
 		if err := writer.Reconcile(ctx, owner, desired, ""); err != nil {
 			t.Fatal(err)
 		}
-		if len(wrapped.prepared) != 2 || wrapped.prepared[0] == wrapped.prepared[1] {
-			t.Fatalf("expected fresh publication after fence: %v", wrapped.prepared)
+		if len(wrapped.prepared) != 1 {
+			t.Fatalf("expected one durable history registration: %v", wrapped.prepared)
 		}
 		live := localIntentGet(t, ctx, cli, desired)
-		if live.GetAnnotations()[k8s.AnnotationResourceIntent] != wrapped.prepared[1] {
-			t.Fatal("writer referenced deleted first record")
+		if live.GetAnnotations()[k8s.AnnotationResourceIntent] != wrapped.prepared[0] || live.GetAnnotations()[k8s.AnnotationResourceIntentOperation] == "" {
+			t.Fatal("history initialization did not publish the durable record and operation")
 		}
-		if err := cli.Get(ctx, client.ObjectKey{Namespace: owner.Namespace, Name: wrapped.prepared[0]}, &corev1.Secret{}); !apierrors.IsNotFound(err) {
-			t.Fatalf("first record not collected: %v", err)
+		record := &corev1.Secret{}
+		if err := cli.Get(ctx, client.ObjectKey{Namespace: owner.Namespace, Name: wrapped.prepared[0]}, record); err != nil || record.Annotations[k8s.AnnotationResourceIntentOperation] != "" {
+			t.Fatalf("initialization did not verify and confirm its surviving record: %v", err)
 		}
 	})
 	for _, clusterScoped := range []bool{false, true} {
@@ -382,7 +387,7 @@ func runLocalIntentGCTests(t *testing.T, cli client.Client, w *k8s.ManagedResour
 		if localIntentGet(t, ctx, cli, desired).GetAnnotations()[k8s.AnnotationResourceIntent] != prepared.Name {
 			t.Fatal("winning pointer lost")
 		}
-		if result, err := collector.Sweep(ctx); err != nil || result.Deleted+first.Deleted != 1 || result.Kept != 1 {
+		if result, err := collector.Sweep(ctx); err != nil || result.Deleted+first.Deleted != 0 || result.Kept != 2 {
 			t.Fatalf("retry scan: %+v %v", result, err)
 		}
 	})
@@ -477,8 +482,8 @@ func (c *localGCInitClient) Create(ctx context.Context, obj client.Object, opts 
 			if err != nil {
 				return err
 			}
-			if result.Deleted != 1 {
-				return fmt.Errorf("expected collector to fence first preparation: %+v", result)
+			if result.Deleted != 0 || result.Kept != 1 {
+				return fmt.Errorf("expected collector to retain pending transaction: %+v", result)
 			}
 		}
 	}

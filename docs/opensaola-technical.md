@@ -307,7 +307,7 @@ MiddlewareAction (Namespaced) -- 引用 --> MiddlewareActionBaseline
 | `CondReasonUpdatingFailed` | `"UpdatingFailed"` | `Updating` | 升级失败 |
 | `CondReasonTemplateParseWithBaselineSuccess` | `"TemplateParseWithBaselineSuccess"` | `TemplateParseWithBaseline` | 模板解析与基线合并成功 |
 | `CondReasonTemplateParseWithBaselineFailed` | `"TemplateParseWithBaselineFailed"` | `TemplateParseWithBaseline` | 模板解析与基线合并失败 |
-| `CondReasonReconcilePaused` | `"ReconcilePaused"` | `ReconcilePaused` | 已关闭该 MID/MO 的常规向下层写入；MID 的有效快照还需检查 `status.reconcilePause` |
+| `CondReasonReconcilePaused` | `"ReconcilePaused"` | `ReconcilePaused` | 已关闭该 MID/MO 的常规向下层写入；MID 的有效快照还需确认 `status.reconcilePause.snapshotSecret` 指向有效 Secret |
 | `CondReasonReconcileSnapshotFailed` | `"ReconcileSnapshotFailed"` | `ReconcileAdoption` | 无法安全捕获暂停快照，保持写入保护 |
 | `CondReasonReconcileAdoptionSucceeded` | `"ReconcileAdoptionSucceeded"` | `ReconcileAdoption` | 已将暂停期间的实际主 CR `spec` 变更采纳为 override |
 | `CondReasonReconcileAdoptionFailed` | `"ReconcileAdoptionFailed"` | `ReconcileAdoption` | 恢复策略无效、快照/目标不匹配或自动采纳失败，保持暂停 |
@@ -871,7 +871,7 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 | `middleware.cn/dataSyncer` | 数据同步器 GVK/Name | 用户配置 | `group/version/kind/name` |
 | `middleware.cn/oppositeClusterId` | 对端集群 ID | 用户配置 | - |
 
-> `middleware.cn/suspend-reconcile: "true"` 仅暂停该 MID/MO 向下层资源写入：MID 的实际 CR、Configuration 和 CR 删除自愈，以及 MO 的 Configuration、RBAC、Deployment 和 Deployment 漂移修复。finalizer 删除清理与运行状态同步继续执行。修改 MID 的实际 CR 前，除确认 `.status.conditions[type=ReconcilePaused]=True` 外，还必须确认 `.status.reconcilePause` 已存在，且 `ReconcileAdoption` 不是 `False`；快照失败时不要开始修改主实际 CR。MO 没有主 CR 快照，只需确认 `ReconcilePaused=True`。灾备只是这一通用能力的典型使用场景之一。
+> `middleware.cn/suspend-reconcile: "true"` 仅暂停该 MID/MO 向下层资源写入：MID 的实际 CR、Configuration 和 CR 删除自愈，以及 MO 的 Configuration、RBAC、Deployment 和 Deployment 漂移修复。finalizer 删除清理与运行状态同步继续执行。修改 MID 的实际 CR 前，除确认 `.status.conditions[type=ReconcilePaused]=True` 外，还必须确认 `.status.reconcilePause.snapshotSecret` 指向同命名空间的有效 Secret，且 `ReconcileAdoption` 不存在或不是 `False`；快照失败时不要开始修改主实际 CR。MO 没有主 CR 快照，只需确认 `ReconcilePaused=True`。灾备只是这一通用能力的典型使用场景之一。
 >
 > MID 恢复必须显式选择 `merge` 或 `apply`，不能直接删除暂停注解。`merge` 比较 `.status.reconcilePause.snapshotSecret` 引用的实际 CR 快照与恢复前实际 CR，仅将期间的增删改应用到当前渲染期望，并保存为 `.spec.reconcileOverrides`。未变化的默认字段、null 和已有漂移不被采纳；变更路径采纳当前 CR 值，其余路径保留 MID 期望。关联列表按 API schema 的键比较，atomic 值整体处理。写入前再次校验实际 spec；再次变化则重新计算，重试使用 `previousOverrides` 保留暂停前补丁并排除已撤回的中间采纳。成功写入后清理 status 引用、恢复注解并删除暂停 Secret；失败删除由后台回收器重试，MID 删除由 ownerReference 回收。status 不存完整 spec 或旧 overrides，不另设应用层大小上限。`apply` 明确放弃暂停期间改动。身份、schema 或快照异常时保持暂停；旧 `desiredSpec` 快照不会被当成实际基线，升级前应结束旧暂停会话。
 >
@@ -879,7 +879,7 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 >
 > 该自动采纳目前只覆盖 MID 的主实际 CR 的 `spec`；CUE-only PreAction 会仅作为渲染输入在内存中重放，但不会采纳对 PreAction 定义、Configuration、CR metadata 或 MiddlewareOperator 资源的直接修改，这些仍需分别确认并回写期望配置。`resume-policy` 仅适用于 MID；MO 恢复时移除 `suspend-reconcile`，随后按普通期望态 reconcile。关联 MID 必须单独暂停和恢复。
 >
-> **PreAction 边界**：恢复时的期望态渲染会在内存中的 MID 副本上重放仅含 CUE 的 PreAction，因此其对主 CR `spec` 的影响与常规主 CR 写入一致，且不会执行命令、HTTP 操作或 Kubernetes 写入。若任一 PreAction 含非 CUE 步骤（例如 CMD 或 HTTP），该 MID 的 `resume-policy=merge` 会失败关闭；应改为纯 CUE 预动作、把结果固化为 MID/Baseline 的显式期望态，或只在明确接受覆盖暂停期间改动时选择 `apply`。
+> **PreAction 边界**：暂停捕获只读取实际 CR，不渲染或执行 PreAction。恢复时的期望态渲染会在内存中的 MID 副本上重放仅含 CUE 的 PreAction，因此其对主 CR `spec` 的影响与常规主 CR 写入一致，且不会执行命令、HTTP 操作或 Kubernetes 写入。每个 PreAction 步骤都必须有非空 CUE；没有 CUE、需要执行 CMD、HTTP 等非 CUE 操作的步骤会使该 MID 的 `resume-policy=merge` 失败关闭；应改为纯 CUE 预动作、把结果固化为 MID/Baseline 的显式期望态，或只在明确接受覆盖暂停期间改动时选择 `apply`。
 >
 > **Configuration 停用生命周期**：当 owner 的下一次 reconcile 发现 Configuration 模板为空或其引用被移除时，会依据成功渲染时写入状态清单的最终策略清理资源。`spec.template` 内资源清单的 `metadata.annotations` 优先于 `MiddlewareConfiguration.metadata.annotations`；不要给已存在的 live 资源手工打该策略注解，控制器不会读取它。
 > 无显式策略时，PVC/PV 为 `orphan`，CRD 无论注解为何都为 `orphan`，其他所有 Kind（包含未知/自定义和集群级资源）为 `delete`。显式 `delete` / `orphan` 可覆盖 PVC/PV 的默认；CRD 在解析和删除时均被硬保护。
@@ -897,8 +897,10 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 **Predicate 过滤器**：忽略仅 Status 字段变更的 Update 事件  
 
 **暂停与恢复门控**：finalizer 删除分支仍正常执行。`middleware.cn/suspend-reconcile: "true"` 时，
-MID 先捕获主 CR 期望 `spec` 快照、写入 `ReconcilePaused=True`，随后跳过前置操作、Configuration、
-主 CR 写入和 Watcher 自愈。恢复必须保留暂停注解并设置 `resume-policy=merge` 或 `apply`；直接删除暂停
+MID 读取主 CR 的实际 `spec`，将其与暂停前 overrides 保存在同命名空间的不可变 Secret，
+并把引用写入 `.status.reconcilePause.snapshotSecret`。暂停期间跳过前置操作、Configuration、
+主 CR 写入和 Watcher 自愈；即使快照捕获失败也会保持 `ReconcilePaused=True`，同时记录
+`ReconcileAdoption=False`，因此不能仅凭暂停条件判断快照已准备好。恢复必须保留暂停注解并设置 `resume-policy=merge` 或 `apply`；直接删除暂停
 注解但未给有效策略仍保持写入保护。
 
 **Reconcile 主逻辑**：

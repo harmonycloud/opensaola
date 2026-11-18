@@ -33,18 +33,28 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
+	"sigs.k8s.io/structured-merge-diff/v6/value"
 )
 
-// Only a Secret name is stored in public resource metadata. Rendered credentials
+// Only record identifiers are stored in public resource metadata. Rendered credentials
 // must never be copied into annotations, Events, or logs.
 const AnnotationResourceIntent = "middleware.cn/resource-intent"
 const LabelResourceIntentGCFence = "middleware.cn/resource-intent-gc-fence"
 const intentRecordLabel = "middleware.cn/resource-intent-record"
 const intentPublicationProtocol = 1
+
+// Version 2 separates declared writes from historical deletion evidence and
+// adds named-list composition inside schema-free resource subtrees.
+const currentResourceIntentVersion = 2
+
+func supportedResourceIntentVersion(version int) bool {
+	return version == 1 || version == currentResourceIntentVersion
+}
 
 type resourceIntent struct {
 	Version             int                        `json:"version"`
@@ -57,8 +67,21 @@ type resourceIntent struct {
 	Desired             *unstructured.Unstructured `json:"desired"`
 	Effective           *unstructured.Unstructured `json:"effective,omitempty"`
 	Preserved           []string                   `json:"preserved,omitempty"`
+	// DeletionBase keeps the previous successful declaration until the candidate
+	// is verified. Legacy immutable records used an annotation for confirmation.
+	DeletionBase *resourceIntent `json:"deletionBase,omitempty"`
+	// Set only while reading an unconfirmed record; never serialized.
+	pendingDeletion bool
+	Attempt         *intentAttempt `json:"attempt,omitempty"`
 	// Pause distinguishes an observed pause baseline from a rendered intent.
 	Pause *reconcilePauseData `json:"pause,omitempty"`
+}
+
+func (r *resourceIntent) matchesSchema(hash string) bool {
+	if r.Version == 1 {
+		return r.SchemaHash == hash
+	}
+	return r.Version == currentResourceIntentVersion && r.SchemaHash == DeclaredResourceIntentSchemaHash(hash)
 }
 
 // intentObject defines the writable surface. Lifecycle metadata is handled by
@@ -117,19 +140,24 @@ func (w *ManagedResourceWriter) preflightResourceIntent(ctx context.Context, own
 	// Defaults may require Desired and Effective; the record has no application
 	// size ceiling, and Kubernetes validates the actual stored Secret payload.
 	preview := cleanApplyObject(desired)
-	if err := w.Client.Patch(ctx, preview, client.Apply, client.FieldOwner(v1.FieldOwner), client.ForceOwnership, client.DryRunAll); err != nil {
+	if err := w.Client.Create(ctx, preview, client.FieldOwner(v1.FieldOwner), client.DryRunAll); err != nil {
 		return err
 	}
 	input := intentObject(desired)
+	if err := ValidateDeclaredResourceIntent(converter, input, intentObject(preview)); err != nil {
+		return err
+	}
 	effective, err := CaptureResourceIntentDefaults(converter, input, input, input, intentObject(preview))
 	if err != nil {
 		return err
 	}
-	record := resourceIntent{Version: 1, PublicationProtocol: intentPublicationProtocol, BaseResourceVersion: "18446744073709551615", OwnerUID: owner.GetUID(), ResourceUID: "00000000-0000-0000-0000-000000000000", Configuration: configuration, SchemaHash: hash, Desired: input}
+	record := resourceIntent{Version: currentResourceIntentVersion, PublicationProtocol: intentPublicationProtocol, BaseResourceVersion: "18446744073709551615", OwnerUID: owner.GetUID(), ResourceUID: "00000000-0000-0000-0000-000000000000", Configuration: configuration, SchemaHash: DeclaredResourceIntentSchemaHash(hash), Desired: input}
 	if !reflect.DeepEqual(input.Object, effective.Object) {
 		record.Effective = effective
 	}
-	secret, err := buildResourceIntentSecret(owner, record)
+	preview.SetUID(record.ResourceUID)
+	record.Attempt = &intentAttempt{ID: string(uuid.NewUUID())}
+	secret, err := buildIntentLedger(owner, preview, &record)
 	if err != nil {
 		return err
 	}
@@ -181,13 +209,39 @@ func verifyIntentIdentity(owner client.Object, live, desired *unstructured.Unstr
 }
 
 func (w *ManagedResourceWriter) loadResourceIntent(ctx context.Context, owner client.Object, live *unstructured.Unstructured, configuration string) (*resourceIntent, *corev1.Secret, error) {
+	return w.loadResourceHistory(ctx, owner, live, configuration, false)
+}
+
+// Adoption can encounter an old owner's pointer. Only history for this exact
+// owner and target lifetime is eligible for use as deletion evidence.
+func (w *ManagedResourceWriter) loadResourceHistory(ctx context.Context, owner client.Object, live *unstructured.Unstructured, configuration string, adopting bool) (*resourceIntent, *corev1.Secret, error) {
+	stable := &corev1.Secret{}
+	key := client.ObjectKey{Namespace: owner.GetNamespace(), Name: intentLedgerName(owner, live, configuration)}
+	if err := w.Reader.Get(ctx, key, stable); err == nil {
+		rec, err := readIntentLedger(stable, owner, live, configuration)
+		if err != nil {
+			return nil, nil, err
+		}
+		if rec.Attempt != nil {
+			return rec.DeletionBase, stable, nil
+		}
+		return rec, stable, nil
+	} else if !apierrors.IsNotFound(err) {
+		return nil, nil, err
+	}
 	name := live.GetAnnotations()[AnnotationResourceIntent]
 	if name == "" {
 		return nil, nil, nil
 	}
 	secret := &corev1.Secret{}
 	if err := w.Reader.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: name}, secret); err != nil {
+		if adopting && name != key.Name && apierrors.IsNotFound(err) {
+			return nil, nil, nil
+		}
 		return nil, nil, fmt.Errorf("read resource intent record %s: %w", name, err)
+	}
+	if adopting && !metav1.IsControlledBy(secret, owner) {
+		return nil, nil, nil
 	}
 	if secret.Immutable == nil || !*secret.Immutable || secret.Labels[intentRecordLabel] != string(owner.GetUID()) || secret.DeletionTimestamp != nil {
 		return nil, nil, managedWriteBlocked("invalid resource intent record")
@@ -201,13 +255,17 @@ func (w *ManagedResourceWriter) loadResourceIntent(ctx context.Context, owner cl
 		return nil, nil, managedWriteBlocked("resource intent record owner mismatch")
 	}
 	record, err := decodeResourceIntent(secret.Data)
-	if err != nil || record.Version != 1 || record.Desired == nil || record.Pause != nil {
+	if err != nil || !supportedResourceIntentVersion(record.Version) || record.Desired == nil || record.Pause != nil {
 		return nil, nil, managedWriteBlocked("invalid resource intent record data")
 	}
 	if record.OwnerUID != owner.GetUID() || record.ResourceUID != live.GetUID() || record.Configuration != configuration || record.Desired.GroupVersionKind() != live.GroupVersionKind() || client.ObjectKeyFromObject(record.Desired) != client.ObjectKeyFromObject(live) {
 		return nil, nil, managedWriteBlocked("resource intent record identity mismatch")
 	}
-	return record, secret, nil
+	effective, err := effectiveResourceIntent(record, secret)
+	if err != nil {
+		return nil, nil, err
+	}
+	return effective, secret, nil
 }
 
 func intentOwnerReference(owner client.Object) (metav1.OwnerReference, error) {
@@ -224,25 +282,12 @@ func intentOwnerReference(owner client.Object) (metav1.OwnerReference, error) {
 	return metav1.OwnerReference{APIVersion: v1.GroupVersion.String(), Kind: kind, Name: owner.GetName(), UID: owner.GetUID(), Controller: &controller}, nil
 }
 
-// Immutable, uniquely named records are prepared BEFORE the resource write. The
-// record pointer commits atomically with the business patch. A lost response or
-// process restart cannot leave a successful write pointing at an older baseline.
-func (w *ManagedResourceWriter) prepareResourceIntent(ctx context.Context, owner client.Object, live, desired *unstructured.Unstructured, configuration, schemaHash string, preserved []string, effective ...*unstructured.Unstructured) (*corev1.Secret, error) {
-	if live.GetUID() == "" || live.GetResourceVersion() == "" {
-		return nil, managedWriteBlocked("intent publication requires resource UID and resourceVersion")
-	}
-	record := resourceIntent{Version: 1, PublicationProtocol: intentPublicationProtocol, BaseResourceVersion: live.GetResourceVersion(), OwnerUID: owner.GetUID(), ResourceUID: live.GetUID(), Configuration: configuration, SchemaHash: schemaHash, Desired: intentObject(desired), Preserved: preserved}
-	if len(effective) > 0 && effective[0] != nil && !reflect.DeepEqual(record.Desired.Object, effective[0].Object) {
-		record.Effective = intentObject(effective[0])
-	}
-	secret, err := buildResourceIntentSecret(owner, record)
+func (w *ManagedResourceWriter) checkIntentWriteOwner(ctx context.Context, owner client.Object, live *unstructured.Unstructured, configuration string) error {
+	fresh, err := w.freshWriteOwner(ctx, owner)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if err := w.Client.Create(ctx, secret, client.FieldOwner(v1.FieldOwner)); err != nil {
-		return nil, fmt.Errorf("create resource intent Secret: %w", err)
-	}
-	return secret, nil
+	return verifyObservedSpecForWrite(fresh, live, configuration)
 }
 
 func buildResourceIntentSecret(owner client.Object, record resourceIntent) (*corev1.Secret, error) {
@@ -259,15 +304,6 @@ func buildResourceIntentSecret(owner client.Object, record resourceIntent) (*cor
 	return secret, nil
 }
 
-func setIntentPointer(obj *unstructured.Unstructured, name string) {
-	annotations := obj.GetAnnotations()
-	if annotations == nil {
-		annotations = map[string]string{}
-	}
-	annotations[AnnotationResourceIntent] = name
-	obj.SetAnnotations(annotations)
-}
-
 func (w *ManagedResourceWriter) discardIntentRecord(ctx context.Context, secret *corev1.Secret) {
 	if secret == nil {
 		return
@@ -278,22 +314,9 @@ func (w *ManagedResourceWriter) discardIntentRecord(ctx context.Context, secret 
 	}
 }
 
-func (w *ManagedResourceWriter) cleanupUncommittedIntent(ctx context.Context, live *unstructured.Unstructured, prepared *corev1.Secret, writeErr error) {
-	// A timeout/lost connection may leave the PATCH still committing on the
-	// server. Even a GET showing the old pointer is not evidence of rejection.
-	if !apierrors.IsConflict(writeErr) && !apierrors.IsInvalid(writeErr) && !apierrors.IsForbidden(writeErr) && !apierrors.IsUnauthorized(writeErr) && !apierrors.IsNotFound(writeErr) {
-		return
-	}
-	current := &unstructured.Unstructured{}
-	current.SetGroupVersionKind(live.GroupVersionKind())
-	err := w.Reader.Get(ctx, client.ObjectKeyFromObject(live), current)
-	// An uncertain transport error is not evidence that the write failed.
-	if apierrors.IsNotFound(err) || err == nil && current.GetAnnotations()[AnnotationResourceIntent] != prepared.Name {
-		w.discardIntentRecord(ctx, prepared)
-	}
-}
-
-func (w *ManagedResourceWriter) initializeResourceIntent(ctx context.Context, owner client.Object, live, desired *unstructured.Unstructured, configuration string) error {
+// During recovery, an existing GET result may include independent fields. Only
+// the response to this writer's own creation provides evidence of API defaults.
+func (w *ManagedResourceWriter) initializeResourceIntent(ctx context.Context, owner client.Object, live, desired *unstructured.Unstructured, configuration string, createdResponse bool) error {
 	if err := verifyIntentIdentity(owner, live, desired, configuration); err != nil {
 		return err
 	}
@@ -302,49 +325,48 @@ func (w *ManagedResourceWriter) initializeResourceIntent(ctx context.Context, ow
 		return err
 	}
 	input := intentObject(desired)
-	effective, err := CaptureResourceIntentDefaults(converter, input, input, input, intentObject(live))
+	plan, err := PlanDeclaredResourceIntent(converter, nil, intentObject(live), input, input, nil)
 	if err != nil {
 		return err
 	}
-	// Workload controllers can update status immediately after Create. Keep
-	// the original successful create result as defaulting evidence across these
-	// metadata-only retries; do not fall back to legacy bootstrap and lose it.
+	effective := input
+	if createdResponse {
+		effective, err = CaptureResourceIntentDefaults(converter, input, input, input, intentObject(live))
+		if err != nil {
+			return err
+		}
+	}
 	current := live.DeepCopy()
 	for attempt := 0; attempt < 5; attempt++ {
-		// Each record is published against exactly one RV. A collector may fence
-		// that RV; reusing the same record after refreshing it would be unsafe.
-		prepared, prepareErr := w.prepareResourceIntent(ctx, owner, current, desired, configuration, hash, nil, effective)
-		if prepareErr != nil {
-			return prepareErr
+		if err = verifyIntentIdentity(owner, current, desired, configuration); err != nil {
+			return err
 		}
-		after := current.DeepCopy()
-		setIntentPointer(after, prepared.Name)
-		err = w.commitIntentPatch(ctx, current, after)
+		if err = plan.Validate(converter, intentObject(current)); err != nil {
+			return err
+		}
+		base, previous, err := w.loadResourceIntent(ctx, owner, current, configuration)
 		if err != nil {
-			w.cleanupUncommittedIntent(ctx, current, prepared, err)
+			return err
+		}
+		base, previous, err = w.resolvePendingIntent(ctx, owner, current, desired, configuration, converter, hash, base, previous)
+		if err == nil && base != nil {
+			return nil
+		}
+		if err == nil {
+			candidate := newIntentCandidate(owner, current, input, effective, configuration, hash, nil)
+			err = w.publishIntent(ctx, owner, current, current.DeepCopy(), candidate, base, previous, plan, converter, nil)
 		}
 		if !apierrors.IsConflict(err) {
 			return err
 		}
 		if err = w.Reader.Get(ctx, client.ObjectKeyFromObject(live), current); err != nil {
-			break
+			return err
 		}
 		if current.GetUID() != live.GetUID() {
-			err = managedWriteBlocked("new resource replaced before recording its intent")
-			break
+			return managedWriteBlocked("resource replaced before history initialization")
 		}
-		if err = verifyIntentIdentity(owner, current, desired, configuration); err != nil {
-			break
-		}
-		if current.GetAnnotations()[AnnotationResourceIntent] != "" {
-			// Another successful writer already committed its record. Never
-			// replace that newer baseline with this older creation response.
-			w.discardIntentRecord(ctx, prepared)
-			return nil
-		}
-		err = apierrors.NewConflict(schema.GroupResource{Group: live.GroupVersionKind().Group, Resource: live.GetKind()}, live.GetName(), fmt.Errorf("resource changed while initializing intent"))
 	}
-	return err
+	return managedWriteBlocked("resource changed during history initialization")
 }
 
 func foreignApplyFields(live *unstructured.Unstructured) (*fieldpath.Set, error) {
@@ -365,93 +387,79 @@ func foreignApplyFields(live *unstructured.Unstructured) (*fieldpath.Set, error)
 	return protected, nil
 }
 
-func (w *ManagedResourceWriter) reconcileResourceIntent(ctx context.Context, owner client.Object, live, desired *unstructured.Unstructured, configuration string) error {
-	if err := verifyIntentIdentity(owner, live, desired, configuration); err != nil {
-		return err
+func (w *ManagedResourceWriter) reconcileResourceIntent(ctx context.Context, owner client.Object, live, desired *unstructured.Unstructured, configuration string, adopting bool) error {
+	if !adopting {
+		if err := verifyIntentIdentity(owner, live, desired, configuration); err != nil {
+			return err
+		}
 	}
 	converter, schemaHash, err := w.IntentSchemas.Resolve(ctx, desired.GroupVersionKind())
 	if err != nil {
 		return err
 	}
-	record, previous, err := w.loadResourceIntent(ctx, owner, live, configuration)
+	record, previous, err := w.loadResourceHistory(ctx, owner, live, configuration, adopting)
 	if err != nil {
 		return err
 	}
-	if record != nil && record.SchemaHash != schemaHash {
+	record, previous, err = w.resolvePendingIntent(ctx, owner, live, desired, configuration, converter, schemaHash, record, previous)
+	if err != nil {
+		return err
+	}
+	if record != nil && !record.matchesSchema(schemaHash) {
 		return managedWriteBlocked("resource schema changed since recorded intent; refusing to infer deletions")
 	}
 	input := intentObject(desired)
 	if _, err := converter.ObjectToTyped(input); err != nil {
 		return fmt.Errorf("rendered intent does not match the resource schema")
 	}
-	if record == nil {
-		// Bootstrap does NOT turn live leftovers into our desired intent. Existing
-		// omission semantics remain conservative until a real baseline is available.
-		submitted, _, err := MergeResourceIntent(converter, nil, intentObject(live), input, nil)
+	var before *unstructured.Unstructured
+	effectiveInput := input
+	protected := fieldpath.NewSet()
+	if record != nil {
+		protected, err = foreignApplyFields(live)
 		if err != nil {
 			return err
 		}
-		preview := cleanApplyObject(desired)
-		preview.SetResourceVersion(live.GetResourceVersion())
-		preview.SetUID(live.GetUID())
-		if err := w.Client.Patch(ctx, preview, client.Apply, client.FieldOwner(v1.FieldOwner), client.ForceOwnership, client.DryRunAll); err != nil {
-			return err
+		before = record.Desired
+		if record.Effective != nil {
+			before = record.Effective
 		}
-		effective, err := CaptureResourceIntentDefaults(converter, input, input, submitted, intentObject(preview))
+		effectiveInput, err = CarryResourceIntentDefaults(converter, record.Desired, before, input)
 		if err != nil {
 			return err
 		}
-		prepared, err := w.prepareResourceIntent(ctx, owner, live, desired, configuration, schemaHash, nil, effective)
-		if err != nil {
-			return err
-		}
-		apply := cleanApplyObject(desired)
-		setIntentPointer(apply, prepared.Name)
-		apply.SetResourceVersion(live.GetResourceVersion())
-		apply.SetUID(live.GetUID())
-		err = w.Client.Patch(ctx, apply, client.Apply, client.FieldOwner(v1.FieldOwner), client.ForceOwnership)
-		if err != nil {
-			w.cleanupUncommittedIntent(ctx, live, prepared, err)
-			return err
-		}
-		reportIntentPreserved(ctx, owner, live, "baseline established; fields omitted before this baseline are preserved, not inferred from legacy manager names")
-		return nil
 	}
-	protected, err := foreignApplyFields(live)
+	mergeLive := intentObject(live)
+	var preserved []string
+	var legacyChecks []DeclaredDeletionCheck
+	if record != nil && record.Version == 1 {
+		// Old opaque lists were atomic. A policy upgrade must not retrospectively
+		// invent ownership of their individual members or fields. First apply
+		// only deletions justified by the old policy, then overlay declarations.
+		legacy, planErr := PlanLegacyResourceIntentDeletions(converter, before, mergeLive, effectiveInput, protected)
+		if planErr != nil {
+			return planErr
+		}
+		if err := legacy.DeletionConflictError(); err != nil {
+			return err
+		}
+		mergeLive = legacy.Object
+		preserved = append(preserved, legacy.PreservedExternal...)
+		legacyChecks = legacy.DeletionChecks
+		before = nil
+	}
+	plan, err := PlanDeclaredResourceIntent(converter, before, mergeLive, effectiveInput, input, protected)
 	if err != nil {
 		return err
 	}
-	before := record.Desired
-	if record.Effective != nil {
-		before = record.Effective
-	}
-	effectiveInput, err := CarryResourceIntentDefaults(converter, record.Desired, before, input)
-	if err != nil {
+	if err := plan.DeletionConflictError(); err != nil {
 		return err
 	}
-	merged, preserved, err := MergeResourceIntent(converter, before, intentObject(live), effectiveInput, protected)
-	if err != nil {
+	merged := plan.Object
+	preserved = append(preserved, plan.PreservedExternal...)
+	plan.DeletionChecks = append(plan.DeletionChecks, legacyChecks...)
+	if err := plan.Validate(converter, merged); err != nil {
 		return err
-	}
-	// Explicit resume-policy=apply retains its existing meaning: replay the
-	// complete current desired values, including unchanged rendered values that
-	// were modified during suspension. Ordinary updates still preserve drift.
-	if mid, ok := owner.(*v1.Middleware); ok {
-		policy, valid := v1.ReconcileResumePolicyFor(mid.Annotations)
-		if valid && policy == v1.ReconcileResumePolicyApply {
-			for _, condition := range mid.Status.Conditions {
-				if condition.Type == v1.CondTypeReconcilePaused && condition.Status == metav1.ConditionTrue {
-					merged, _, err = MergeResourceIntent(converter, nil, merged, input, nil)
-					if err != nil {
-						return err
-					}
-					break
-				}
-			}
-		}
-	}
-	for _, path := range record.Preserved {
-		reportIntentPreserved(ctx, owner, live, "previous update retained a field at "+path+"; this notice is an audit record, not proof of current convergence")
 	}
 	for _, path := range preserved {
 		reportIntentPreserved(ctx, owner, live, "external or ambiguous field retained: "+path)
@@ -488,7 +496,20 @@ func (w *ManagedResourceWriter) reconcileResourceIntent(ctx context.Context, own
 		labels[LabelResourceIntentGCFence] = fence
 	}
 	after.SetLabels(labels)
-	if reflect.DeepEqual(record.Desired.Object, input.Object) && reflect.DeepEqual(live.Object, after.Object) {
+	var check func() error
+	if adopting {
+		adoptConfigurationReferences(after, live, desired)
+		if err := verifyIntentIdentity(owner, after, desired, configuration); err != nil {
+			return err
+		}
+		check = func() error {
+			_, err := w.configurationNeedsAdoption(ctx, owner, live, desired, configuration)
+			return err
+		}
+	}
+	if !adopting && isIntentLedger(previous) && !ledgerPending(previous) && live.GetAnnotations()[AnnotationResourceIntent] == previous.Name && record != nil && record.Version == currentResourceIntentVersion &&
+		value.Equals(value.NewValueInterface(record.Desired.Object), value.NewValueInterface(input.Object)) &&
+		(value.Equals(value.NewValueInterface(live.Object), value.NewValueInterface(after.Object)) || declaredNativeObjectEquivalent(live, after)) {
 		return nil
 	}
 	// Validate the COMPLETE business change before preparing any record. This
@@ -497,20 +518,20 @@ func (w *ManagedResourceWriter) reconcileResourceIntent(ctx context.Context, own
 	if err != nil {
 		return err
 	}
+	if err := plan.Validate(converter, intentObject(accepted)); err != nil {
+		return err
+	}
 	effective, err := CaptureResourceIntentDefaults(converter, input, effectiveInput, intentObject(after), intentObject(accepted))
 	if err != nil {
 		return err
 	}
-	prepared, err := w.prepareResourceIntent(ctx, owner, live, desired, configuration, schemaHash, preserved, effective)
-	if err != nil {
+	candidate := newIntentCandidate(owner, live, input, effective, configuration, schemaHash, preserved)
+	if err := w.publishIntent(ctx, owner, live, after, candidate, record, previous, plan, converter, check); err != nil {
 		return err
 	}
-	setIntentPointer(after, prepared.Name)
-	if err = w.commitIntentPatch(ctx, live, after); err != nil {
-		w.cleanupUncommittedIntent(ctx, live, prepared, err)
-		return err
+	if record == nil {
+		reportIntentPreserved(ctx, owner, live, "baseline established; omitted legacy fields remain unclaimed")
 	}
-	w.discardIntentRecord(ctx, previous)
 	return nil
 }
 

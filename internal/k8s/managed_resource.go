@@ -18,6 +18,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
@@ -25,6 +26,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -37,7 +40,7 @@ type ManagedResourceWriter struct {
 	IntentSchemas IntentSchemaResolver
 }
 
-// ConfigureResourceIntents enables persisted, schema-aware three-way updates.
+// ConfigureResourceIntents installs the required schema resolver for mutable resources.
 // It must be called before controllers start, like ConfigureManagedResources.
 func ConfigureResourceIntents(schemas IntentSchemaResolver) { resourceIntentSchemas = schemas }
 
@@ -166,7 +169,7 @@ func cleanApplyObject(desired *unstructured.Unstructured) *unstructured.Unstruct
 		unstructured.RemoveNestedField(result.Object, "metadata", key)
 	}
 	annotations := result.GetAnnotations()
-	for _, key := range []string{AnnotationResourceIntent} {
+	for _, key := range []string{AnnotationResourceIntent, AnnotationResourceIntentOperation} {
 		delete(annotations, key)
 	}
 	result.SetAnnotations(annotations)
@@ -176,17 +179,56 @@ func cleanApplyObject(desired *unstructured.Unstructured) *unstructured.Unstruct
 	return result
 }
 
+// createMutableResource identifies this particular POST even when its response
+// is lost. A direct GET can recover explicit declarations, never POST defaults.
+// If a timeout preceded the commit, fail and let normal reconciliation retry.
+func (w *ManagedResourceWriter) createMutableResource(ctx context.Context, target *unstructured.Unstructured) (postResponse bool, err error) {
+	receipt := "create-" + string(uuid.NewUUID())
+	annotations := target.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[AnnotationResourceIntentOperation] = receipt
+	target.SetAnnotations(annotations)
+	if err = w.Client.Create(ctx, target, client.FieldOwner(v1.FieldOwner)); err == nil {
+		return true, nil
+	}
+	var status apierrors.APIStatus
+	if errors.As(err, &status) && status.Status().Code < 500 && !apierrors.IsTimeout(err) {
+		return false, err
+	}
+	actual := &unstructured.Unstructured{}
+	actual.SetGroupVersionKind(target.GroupVersionKind())
+	if readErr := w.Reader.Get(ctx, client.ObjectKeyFromObject(target), actual); readErr != nil || actual.GetUID() == "" || actual.GetAnnotations()[AnnotationResourceIntentOperation] != receipt {
+		return false, fmt.Errorf("cannot verify initial resource creation or establish its field history: %w", err)
+	}
+	*target = *actual
+	return false, nil
+}
+
 // Reconcile never rewrites managedFields. Normal updates establish and use a
 // rendered-intent baseline; missing history is not inferred from manager names.
 // Existing resources are updated only through the normal owner lifecycle.
 func (w *ManagedResourceWriter) Reconcile(ctx context.Context, owner client.Object, desired *unstructured.Unstructured, configuration string) error {
+	_, err := w.ReconcileWithUID(ctx, owner, desired, configuration)
+	return err
+}
+
+// ReconcileWithUID returns the UID verified by this write for binding cleanup
+// inventory. A later GET by name may already refer to a replacement object.
+func (w *ManagedResourceWriter) ReconcileWithUID(ctx context.Context, owner client.Object, desired *unstructured.Unstructured, configuration string) (types.UID, error) {
 	if desired == nil {
-		return nil
+		return "", nil
 	}
+	mutable := !isImmutableResource(desired)
+	if mutable && w.IntentSchemas == nil {
+		return "", managedWriteBlocked("mutable resource requires a configured intent schema resolver")
+	}
+
 	for attempt := 0; attempt < 5; attempt++ {
 		fresh, err := w.freshWriteOwner(ctx, owner)
 		if err != nil {
-			return err
+			return "", err
 		}
 		live := &unstructured.Unstructured{}
 		live.SetGroupVersionKind(desired.GroupVersionKind())
@@ -200,56 +242,58 @@ func (w *ManagedResourceWriter) Reconcile(ctx context.Context, owner client.Obje
 			// including on conflict retries. An earlier service-layer GET alone
 			// cannot fence changes arriving between that GET and this read.
 			if verifyErr := verifyObservedSpecForWrite(fresh, observed, configuration); verifyErr != nil {
-				return verifyErr
+				return "", verifyErr
 			}
 		}
 		if apierrors.IsNotFound(err) {
 			intent := cleanApplyObject(desired)
-			if w.IntentSchemas != nil && !isImmutableResource(intent) {
+			if mutable {
 				if err := w.preflightResourceIntent(ctx, fresh, intent, configuration); err != nil {
-					return err
+					if apierrors.IsAlreadyExists(err) {
+						continue
+					}
+					return "", err
 				}
 			}
-			if isImmutableResource(intent) {
-				err = w.Client.Create(ctx, intent)
-			} else {
-				err = w.Client.Patch(ctx, intent, client.Apply, client.FieldOwner(v1.FieldOwner), client.ForceOwnership)
+			if err := w.checkIntentWriteOwner(ctx, fresh, nil, configuration); err != nil {
+				return "", err
 			}
-			if err == nil && w.IntentSchemas != nil && !isImmutableResource(intent) {
-				err = w.initializeResourceIntent(ctx, fresh, intent, desired, configuration)
+			live = intent
+			createdResponse := false
+			if mutable {
+				createdResponse, err = w.createMutableResource(ctx, intent)
+			} else {
+				err = w.Client.Create(ctx, intent, client.FieldOwner(v1.FieldOwner))
+			}
+			if apierrors.IsAlreadyExists(err) {
+				continue
+			}
+			if err == nil && mutable {
+				err = w.initializeResourceIntent(ctx, fresh, intent, desired, configuration, createdResponse)
 			}
 		} else if err == nil {
 			adopt := false
 			if configuration == "" {
 				if err = verifyManagedIdentity(fresh, live); err != nil {
-					return err
+					return "", err
 				}
 			} else {
 				adopt, err = w.configurationNeedsAdoption(ctx, fresh, live, desired, configuration)
 				if err != nil {
-					return err
+					return "", err
 				}
 			}
 			if !isImmutableResource(live) {
-				if adopt {
-					err = w.adoptConfigurationResource(ctx, fresh, live, desired, configuration)
-				} else if w.IntentSchemas != nil {
-					err = w.reconcileResourceIntent(ctx, fresh, live, desired, configuration)
-				} else {
-					intent := cleanApplyObject(desired)
-					intent.SetResourceVersion(live.GetResourceVersion())
-					intent.SetUID(live.GetUID())
-					err = w.Client.Patch(ctx, intent, client.Apply, client.FieldOwner(v1.FieldOwner), client.ForceOwnership)
-				}
+				err = w.reconcileResourceIntent(ctx, fresh, live, desired, configuration, adopt)
 			}
 		}
 		if apierrors.IsConflict(err) {
 			continue
 		}
 		if err != nil {
-			return err
+			return "", err
 		}
-		return nil
+		return live.GetUID(), nil
 	}
-	return fmt.Errorf("resource changed during all managed write retries")
+	return "", fmt.Errorf("resource changed during all managed write retries")
 }

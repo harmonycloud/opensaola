@@ -20,9 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 
-	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/k8s/kubeclient"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -47,30 +47,6 @@ func IsCRDNotInstalled(err error) bool {
 		strings.Contains(errMsg, "no matches for kind")
 }
 
-// CreateOrUpdateCustomResource creates or updates a CustomResource.
-func CreateOrUpdateCustomResource(ctx context.Context, cli client.Client, cr *unstructured.Unstructured) error {
-	old, err := GetCustomResource(ctx, cli, cr.GetName(), cr.GetNamespace(), cr.GroupVersionKind())
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	if old == nil {
-		return CreateCustomResource(ctx, cli, cr)
-	}
-	return UpdateCustomResource(ctx, cli, cr)
-}
-
-// CreateOrPatchCustomResource creates or patches a CustomResource.
-func CreateOrPatchCustomResource(ctx context.Context, cli client.Client, cr *unstructured.Unstructured) error {
-	old, err := GetCustomResource(ctx, cli, cr.GetName(), cr.GetNamespace(), cr.GroupVersionKind())
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	if old == nil {
-		return CreateCustomResource(ctx, cli, cr)
-	}
-	return PatchCustomResource(ctx, cli, cr)
-}
-
 // CreateCustomResource creates a CustomResource.
 func CreateCustomResource(ctx context.Context, cli client.Client, cr *unstructured.Unstructured) error {
 	// First check if it already exists
@@ -87,20 +63,6 @@ func CreateCustomResource(ctx context.Context, cli client.Client, cr *unstructur
 // DeleteCustomResource deletes a CustomResource.
 func DeleteCustomResource(ctx context.Context, cli client.Client, cr *unstructured.Unstructured) error {
 	return cli.Delete(ctx, cr)
-}
-
-// UpdateCustomResource uses Server-Side Apply to update a CustomResource.
-// (see English comment above)
-func UpdateCustomResource(ctx context.Context, cli client.Client, cr *unstructured.Unstructured) error {
-	if isImmutableResource(cr) {
-		return nil
-	}
-
-	if err := prepareCustomResourceApply(cr); err != nil {
-		return err
-	}
-
-	return cli.Patch(ctx, cr, client.Apply, client.FieldOwner(v1.FieldOwner), client.ForceOwnership)
 }
 
 // GetCustomResource retrieves a CustomResource.
@@ -182,32 +144,56 @@ func IsNamespaced(obj *unstructured.Unstructured) (bool, error) {
 	return false, fmt.Errorf("%w: kind %s not found in %s", ErrGroupVersionNotFound, gvk.Kind, gvk.GroupVersion().String())
 }
 
-// PatchCustomResource uses the existing Force Apply behavior for Action edits.
-// Intent-bearing live objects retain their original UID/resourceVersion guard.
-func PatchCustomResource(ctx context.Context, cli client.Client, cr *unstructured.Unstructured) error {
-	if isImmutableResource(cr) {
-		return nil
+// ValidateActionMetadata protects history both on its business target and
+// when a one-off Action explicitly addresses the history Secret as its target.
+func ValidateActionMetadata(live, after *unstructured.Unstructured) error {
+	for _, obj := range []*unstructured.Unstructured{live, after} {
+		if obj != nil && obj.GetAPIVersion() == "v1" && obj.GetKind() == "Secret" {
+			labels := obj.GetLabels()
+			_, record := labels[intentRecordLabel]
+			_, ledger := labels[labelIntentLedger]
+			if record || ledger {
+				return managedWriteBlocked("action cannot edit resource history Secrets")
+			}
+		}
 	}
-
-	if err := prepareCustomResourceApply(cr); err != nil {
-		return err
+	if live == nil {
+		live = &unstructured.Unstructured{}
 	}
-
-	return cli.Patch(ctx, cr, client.Apply, client.FieldOwner(v1.FieldOwner), client.ForceOwnership)
+	for _, key := range []string{AnnotationResourceIntent, AnnotationResourceIntentOperation} {
+		before, had := live.GetAnnotations()[key]
+		next, has := after.GetAnnotations()[key]
+		if had != has || before != next {
+			return managedWriteBlocked("action edit cannot change field-management annotations")
+		}
+	}
+	before, had := live.GetLabels()[LabelResourceIntentGCFence]
+	next, has := after.GetLabels()[LabelResourceIntentGCFence]
+	if had != has || before != next || !reflect.DeepEqual(live.GetManagedFields(), after.GetManagedFields()) {
+		return managedWriteBlocked("action edit cannot change field-management metadata")
+	}
+	return nil
 }
 
-// Actions can carry a live resource's intent pointer through a CUE edit. Keep
-// that read's UID/RV guard: an unguarded delayed Apply could restore a superseded
-// pointer after its record was deleted. Do not refresh RV on a stale payload.
-func prepareCustomResourceApply(cr *unstructured.Unstructured) error {
-	if cr.GetAnnotations()[AnnotationResourceIntent] != "" || cr.GetLabels()[LabelResourceIntentGCFence] != "" {
-		if cr.GetUID() == "" || cr.GetResourceVersion() == "" {
-			return managedWriteBlocked("intent-bearing Apply requires the original resource UID and resourceVersion")
-		}
-	} else {
-		cr.SetResourceVersion("")
+// PatchActionResource sends only the difference produced by a one-off action.
+// UID and resourceVersion tests fence edits to stale or replaced objects.
+func PatchActionResource(ctx context.Context, cli client.Client, live, after *unstructured.Unstructured) error {
+	if isImmutableResource(live) {
+		return nil
 	}
-	cr.SetManagedFields(nil)
-	unstructured.RemoveNestedField(cr.Object, "metadata", "creationTimestamp")
-	return nil
+	if live.GetUID() == "" || live.GetResourceVersion() == "" || live.GetUID() != after.GetUID() || live.GetResourceVersion() != after.GetResourceVersion() ||
+		live.GroupVersionKind() != after.GroupVersionKind() || client.ObjectKeyFromObject(live) != client.ObjectKeyFromObject(after) {
+		return managedWriteBlocked("action edit requires the original target identity and resourceVersion")
+	}
+	if err := ValidateActionMetadata(live, after); err != nil {
+		return err
+	}
+	if reflect.DeepEqual(live.Object, after.Object) {
+		return nil
+	}
+	patch, err := intentPatch(live, after)
+	if err != nil {
+		return err
+	}
+	return cli.Patch(ctx, after, patch, client.FieldOwner("opensaola-action"))
 }

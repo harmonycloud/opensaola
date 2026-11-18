@@ -18,7 +18,6 @@ package middlewareaction
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -29,11 +28,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	kjson "sigs.k8s.io/json"
 )
-
-func Test_executeCmd(t *testing.T) {
-	t.Skip("executeCmd depends on cluster discovery client/template rendering and executes external shell commands, making unit tests unstable; use envtest or add testability via dependency injection for command runner/templating")
-}
 
 func TestExecutePreActionCue_ResourceMismatchIncludesExpectedAndActual(t *testing.T) {
 	t.Parallel()
@@ -119,6 +115,7 @@ parameters: {
 		parameters: {
 			replicas: 3
 			fromPreAction: true
+			fromCue: 9007199254740995
 		}
 	}
 	resource: {
@@ -140,7 +137,7 @@ parameters: {
 			Labels:    map[string]string{v1.LabelPackageName: packageName},
 		},
 		Spec: v1.MiddlewareSpec{
-			Parameters: runtime.RawExtension{Raw: []byte(`{"replicas":1,"unchanged":true}`)},
+			Parameters: runtime.RawExtension{Raw: []byte(`{"replicas":1,"unchanged":true,"exact":9007199254740993}`)},
 			PreActions: []v1.PreAction{{Name: actionName}},
 		},
 	}
@@ -154,10 +151,16 @@ parameters: {
 		t.Fatalf("RenderPreActions() error = %v", err)
 	}
 
+	for _, result := range []*v1.Middleware{normal, rendered} {
+		values := parametersMap(t, result)
+		if values["exact"] != int64(9007199254740993) || values["fromCue"] != int64(9007199254740995) {
+			t.Fatalf("PreAction changed an integer: %#v", values)
+		}
+	}
 	if got, want := parametersMap(t, rendered), parametersMap(t, normal); !reflect.DeepEqual(got, want) {
 		t.Fatalf("render-only parameters = %#v, want normal execution %#v", got, want)
 	}
-	if got, want := parametersMap(t, mid), map[string]any{"replicas": float64(1), "unchanged": true}; !reflect.DeepEqual(got, want) {
+	if got, want := parametersMap(t, mid), map[string]any{"replicas": int64(1), "unchanged": true, "exact": int64(9007199254740993)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("RenderPreActions() mutated input parameters = %#v, want %#v", got, want)
 	}
 }
@@ -229,7 +232,7 @@ parameters: {
 			t.Fatalf("RenderPreActions() error = %q, want %q", err, want)
 		}
 	}
-	if got, want := parametersMap(t, mid), map[string]any{"replicas": float64(1)}; !reflect.DeepEqual(got, want) {
+	if got, want := parametersMap(t, mid), map[string]any{"replicas": int64(1)}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("render-only preflight applied a partial patch: got %#v, want %#v", got, want)
 	}
 }
@@ -237,7 +240,7 @@ parameters: {
 func parametersMap(t *testing.T, mid *v1.Middleware) map[string]any {
 	t.Helper()
 	result := make(map[string]any)
-	if err := json.Unmarshal(mid.Spec.Parameters.Raw, &result); err != nil {
+	if err := kjson.UnmarshalCaseSensitivePreserveInts(mid.Spec.Parameters.Raw, &result); err != nil {
 		t.Fatalf("decode middleware parameters: %v", err)
 	}
 	return result

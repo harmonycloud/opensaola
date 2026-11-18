@@ -18,6 +18,8 @@ package k8s
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -123,6 +125,68 @@ func TestPauseSnapshotRejectsUntrustedReferences(t *testing.T) {
 				t.Fatalf("invalid baseline accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestPauseHashesPreserveAdjacentIntegersAndLoadLegacySecret(t *testing.T) {
+	w, mid, live := pauseSecretUnitFixture(t)
+	const lower int64 = 9007199254740992
+	ctx := t.Context()
+	var first *v1.ReconcilePauseStatus
+	for _, v := range []int64{lower, lower + 1} {
+		if err := unstructured.SetNestedField(live.Object, v, "spec", "offset"); err != nil {
+			t.Fatal(err)
+		}
+		next, err := w.PrepareReconcilePauseSnapshot(ctx, mid, live)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := w.LoadReconcilePauseSnapshot(ctx, mid, next)
+		if err != nil || data.ActualSpec["offset"] != v {
+			t.Fatalf("snapshot did not preserve %d: %#v, %v", v, data, err)
+		}
+		if first == nil {
+			first = next
+			continue
+		}
+		if next.Hash == first.Hash || next.SnapshotSecret == first.SnapshotSecret {
+			t.Fatal("adjacent values reused one immutable snapshot")
+		}
+		record, _, err := w.loadReconcilePauseSnapshot(ctx, mid, next)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record.Pause.HashVersion = 0
+		// Reproduce the published pre-upgrade hash independently from the new implementation.
+		raw, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var old any
+		if err := json.Unmarshal(raw, &old); err != nil {
+			t.Fatal(err)
+		}
+		raw, err = json.Marshal(old)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash := sha256.Sum256(raw)
+		legacy := next.DeepCopy()
+		legacy.Hash = hex.EncodeToString(hash[:])
+		legacy.SnapshotSecret = "opensaola-pause-" + legacy.Hash[:40]
+		secret, err := buildResourceIntentSecret(mid, *record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		secret.GenerateName = ""
+		secret.Name = legacy.SnapshotSecret
+		if err := w.Client.Create(ctx, secret); err != nil {
+			t.Fatal(err)
+		}
+		data, err = w.LoadReconcilePauseSnapshot(ctx, mid, legacy)
+		if err != nil || data.ActualSpec["offset"] != v {
+			t.Fatalf("legacy snapshot unusable or value rounded: %#v, %v", data, err)
+		}
 	}
 }
 

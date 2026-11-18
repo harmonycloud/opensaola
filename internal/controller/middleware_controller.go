@@ -30,6 +30,7 @@ import (
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
 	"github.com/harmonycloud/opensaola/internal/service/middleware"
+	"github.com/harmonycloud/opensaola/internal/service/status"
 	"github.com/harmonycloud/opensaola/internal/service/watcher"
 	"github.com/harmonycloud/opensaola/pkg/tools/ctxkeys"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -274,6 +275,11 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				retErr = statusErr
 			}
 		}
+		// Advance the processed generation before scheduling the existence-only
+		// fallback; the fallback must not make a successful publish look pending.
+		if retErr == nil && !result.Requeue && result.RequeueAfter == 0 && mid.Status.ObservedGeneration == mid.Generation {
+			result.RequeueAfter = 5 * time.Minute
+		}
 	}()
 
 	if err = middleware.Check(ctx, r.Client, mid); err != nil {
@@ -322,6 +328,20 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 		}
 		r.Recorder.Event(mid, "Normal", "Updated", "Middleware updated successfully")
+	} else {
+		recovered, rebuildErr := middleware.RebuildMissingPrimaryCustomResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, mid)
+		if rebuildErr != nil {
+			condition := status.GetCondition(ctx, &mid.Status.Conditions, v1.CondTypeApplyCluster)
+			r.Recorder.Event(mid, "Warning", condition.Reason, rebuildErr.Error())
+			return ctrl.Result{}, rebuildErr
+		}
+		if recovered {
+			r.Recorder.Event(mid, "Normal", "PrimaryResourceRecovered", "Missing primary resource recovery completed")
+		}
+		// This fallback only checks primary-resource existence. It covers missed
+		// delete events without replaying present resources or migrating legacy
+		// objects. Schedule it only after this generation has already converged.
+		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 	}
 
 	return ctrl.Result{}, nil

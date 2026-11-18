@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -178,6 +179,9 @@ func TestManagedWriterFencesPauseChangesIncludingConflictRetries(t *testing.T) {
 			if err := v1.AddToScheme(scheme); err != nil {
 				t.Fatal(err)
 			}
+			if err := corev1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
 			scheme.AddKnownTypeWithName(gvk, original)
 			objects := []client.Object{owner}
 			if scenario != "missing primary resource" {
@@ -209,7 +213,7 @@ func TestManagedWriterFencesPauseChangesIncludingConflictRetries(t *testing.T) {
 				}
 				return apierrors.NewConflict(schema.GroupResource{Group: gvk.Group, Resource: "things"}, original.GetName(), errors.New("external writer raced"))
 			}})
-			writer := &ManagedResourceWriter{Client: writerClient, Reader: cli}
+			writer := &ManagedResourceWriter{Client: writerClient, Reader: cli, IntentSchemas: intentUnitSchemas{converter: intentTestConverter(t)}}
 			err = writer.Reconcile(context.Background(), owner, intentTestObject(t, `{"data":{"value":"adopted"}}`), "")
 			if !errors.Is(err, ErrObservedSpecChanged) {
 				t.Fatalf("write was not sent back to adoption: %v", err)

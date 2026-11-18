@@ -18,7 +18,6 @@ package middlewareaction
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"runtime"
@@ -29,11 +28,9 @@ import (
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/status"
 	"github.com/harmonycloud/opensaola/pkg/tools"
-	"github.com/harmonycloud/opensaola/pkg/tools/ctxkeys"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/yaml"
 )
 
 // executeHTTP executes an HTTP step
@@ -106,28 +103,7 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 		msg = httpStepSuccessMessage(step.HTTP.Method, step.HTTP.URL, resp.StatusCode, output)
 
 		if step.Output.Expose {
-			stepMap := ctxkeys.StepFrom(*ctx)
-			stepEntry := make(map[string]interface{})
-			stepMap[step.Name] = stepEntry
-
-			var outputMap = make(map[string]interface{})
-			switch step.Output.Type {
-			case "json":
-				err = json.Unmarshal(output, &outputMap)
-				if err != nil {
-					return parseExposedOutputError(step.Output.Type, step.Name)
-				}
-				stepEntry["output"] = outputMap
-			case "yaml":
-				err = yaml.Unmarshal(output, &outputMap)
-				if err != nil {
-					return parseExposedOutputError(step.Output.Type, step.Name)
-				}
-				stepEntry["output"] = outputMap
-			case "string":
-				stepEntry["output"] = string(output)
-			}
-			*ctx = ctxkeys.WithStep(*ctx, stepMap)
+			return exposeStepOutput(ctx, step, output)
 		}
 	}
 	return nil

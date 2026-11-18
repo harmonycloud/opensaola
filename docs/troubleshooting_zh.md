@@ -315,12 +315,12 @@ kubectl get mid <mid-name> -n <namespace> -o json | jq '{
 
 **处理**：
 
-- 开始修改前，必须同时确认 `ReconcilePaused=True`、`.status.reconcilePause` 存在且带 `desiredSpec`、以及 `ReconcileAdoption` 不为 `False`。快照失败时先修复主 CR 缺失、渲染错误或大小超限。
-- `ReconcileAdoptionConflict` 表示暂停期间的实际改动与当前期望态修改了同一路径；确定最终值后再设置 `middleware.cn/resume-policy=merge`。
-- 其他 `ReconcileAdoption=False` 情况保持暂停，按 `message` 修复身份、渲染或大小问题后重试。
-- 仅含 CUE 的 PreAction 会在暂停快照/B/L/D 合并中以内存副本重放，可正常使用 `merge`，且不会执行外部操作。若任一 PreAction 含 CMD、HTTP 或其他非 CUE 步骤，`merge` 会失败关闭；应改为纯 CUE 预动作、将结果固化为显式期望态，或仅在明确接受覆盖暂停期间改动时使用 `apply`。
+- 开始修改前，必须同时确认 `ReconcilePaused=True`、`.status.reconcilePause.snapshotSecret` 指向同命名空间的有效 Secret，以及 `ReconcileAdoption` 不存在或不为 `False`。Secret 保存暂停开始时的实际主 CR `spec` 和暂停前的 overrides，status 只保存引用、身份及 hash 等信息。
+- `merge` 比较暂停开始与恢复前的实际 `spec`，只将期间的增删改应用到当前期望。期间变化的路径采用当前 CR 值，即使同一路径也修改了 MID；其余 MID 期望保留。暂停前已存在且未变化的默认值和漂移不被采纳。
+- `ReconcileSnapshotFailed`、`ReconcileAdoptionFailed` 或其他 `ReconcileAdoption=False` 情况均保持暂停，按 `message` 修复主 CR 缺失、目标身份、Secret 读写或校验、schema、期望态渲染或 Kubernetes 大小限制等问题后重试。Secret 缺失或无效时，恢复不会自动重拍快照；旧 `desiredSpec` 会话的处理见 Runbook。
+- 暂停捕获直接读取实际 CR，不重放 PreAction。`merge` 恢复渲染当前期望时，才在内存副本中重放 PreAction，且每一步都必须有非空 CUE；需要执行 CMD、HTTP 等非 CUE 操作的步骤不支持 `merge`。应改为纯 CUE 预动作、将结果固化为显式期望态，或仅在明确接受覆盖暂停期间改动时使用 `apply`。
 - 仅明确接受覆盖暂停期间主 CR `spec` 变更时才使用 `resume-policy=apply`；不要直接移除 `suspend-reconcile`。
-- MO 不支持 B/L/D 合并：更新其期望配置后移除 `suspend-reconcile` 即恢复普通 reconcile。关联 MID 需单独处理。
+- MO 不执行主 CR 变更采纳：更新其期望配置后移除 `suspend-reconcile` 即恢复普通 reconcile。关联 MID 需单独处理。
 
 完整命令和边界见[Reconcile 暂停与恢复 Runbook](reconcile-suspension_zh.md)。
 
@@ -492,4 +492,4 @@ kubectl rollout restart deployment opensaola -n <operator-namespace>
 
 - [技术文档](opensaola-technical.md) -- 架构、CRD 字段参考、reconcile 流程、状态机细节、标签/annotation 约定
 - [Package 文档](opensaola-packaging.md) -- Package 格式、baseline 系统、action 系统、配置模板、Redis 案例研究
-- [Reconcile 暂停与恢复 Runbook](reconcile-suspension_zh.md) -- MID/MO 暂停、恢复、变更采纳、冲突处理与验收命令
+- [Reconcile 暂停与恢复 Runbook](reconcile-suspension_zh.md) -- MID/MO 暂停、恢复、变更采纳、失败处理与验收命令

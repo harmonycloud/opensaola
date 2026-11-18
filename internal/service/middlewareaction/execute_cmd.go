@@ -19,7 +19,6 @@ package middlewareaction
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -34,6 +33,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	kjson "sigs.k8s.io/json"
 	"sigs.k8s.io/yaml"
 )
 
@@ -99,30 +99,50 @@ func executeCmd(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 		msg = commandStepSuccessMessage(output)
 
 		if step.Output.Expose {
-			stepMap := ctxkeys.StepFrom(*ctx)
-			stepEntry := make(map[string]interface{})
-			stepMap[step.Name] = stepEntry
-
-			var outputMap = make(map[string]interface{})
-			switch step.Output.Type {
-			case "json":
-				err = json.Unmarshal(output, &outputMap)
-				if err != nil {
-					return parseExposedOutputError(step.Output.Type, step.Name)
-				}
-				stepEntry["output"] = outputMap
-			case "yaml":
-				err = yaml.Unmarshal(output, &outputMap)
-				if err != nil {
-					return parseExposedOutputError(step.Output.Type, step.Name)
-				}
-				stepEntry["output"] = outputMap
-			case "string":
-				output = bytes.ReplaceAll(output, []byte("\n"), []byte(""))
-				stepEntry["output"] = string(output)
+			if step.Output.Type == "string" {
+				output = bytes.ReplaceAll(output, []byte("\n"), nil)
 			}
-			*ctx = ctxkeys.WithStep(*ctx, stepMap)
+			return exposeStepOutput(ctx, step, output)
 		}
 	}
 	return nil
+}
+
+// exposeStepOutput decodes a command or HTTP response for subsequent step templates.
+func exposeStepOutput(ctx *context.Context, step v1.Step, output []byte) error {
+	entry := make(map[string]any)
+	switch step.Output.Type {
+	case "json", "yaml":
+		if step.Output.Type == "yaml" {
+			var err error
+			output, err = yaml.YAMLToJSON(output)
+			if err != nil {
+				return parseExposedOutputError(step.Output.Type, step.Name)
+			}
+		}
+		var content map[string]any
+		if err := kjson.UnmarshalCaseSensitivePreserveInts(output, &content); err != nil {
+			return parseExposedOutputError(step.Output.Type, step.Name)
+		}
+		entry["output"] = exposedObjectValue(step.Output.Type, content)
+	case "string":
+		entry["output"] = string(output)
+	}
+	storeStepOutput(ctx, step.Name, entry)
+	return nil
+}
+
+// Older action templates receive an empty map for a null or empty YAML document,
+// and a nil map for JSON null. Keep the distinction when the object is missing.
+func exposedObjectValue(format string, content map[string]any) map[string]any {
+	if format == "yaml" && content == nil {
+		return map[string]any{}
+	}
+	return content
+}
+
+func storeStepOutput(ctx *context.Context, name string, entry map[string]any) {
+	steps := ctxkeys.StepFrom(*ctx)
+	steps[name] = entry
+	*ctx = ctxkeys.WithStep(*ctx, steps)
 }

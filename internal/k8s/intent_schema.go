@@ -38,6 +38,16 @@ import (
 
 const intentSchemaTimeout = 15 * time.Second
 
+// DeclaredResourceIntentSchemaHash binds the API topology to the platform's
+// declaration-first semantics. Resolve deliberately keeps returning the legacy
+// topology hash so version-one records can be validated and migrated without
+// interpreting their deletion history under the new rules. The topology hash
+// already includes the named __untyped_deduced_ references that select opaque
+// list compatibility; typed atomic arrays use different references.
+func DeclaredResourceIntentSchemaHash(legacyHash string) string {
+	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte("opensaola-declared-intent-v2\x00"+legacyHash)))
+}
+
 // IntentSchemaResolver returns the API server's current merge topology. The hash
 // binds a saved intent to that topology; a mismatch must not be guessed through.
 type IntentSchemaResolver interface {
@@ -159,6 +169,9 @@ func (r *liveIntentSchemaResolver) Resolve(ctx context.Context, gvk schema.Group
 	if err != nil {
 		return nil, "", fmt.Errorf("convert intent topology for %s: %w", gvk, err)
 	}
+	if err := validateDeclaredOpaqueTopology(topology); err != nil {
+		return nil, "", err
+	}
 	// OpenAPI properties are maps. The converter preserves their iteration
 	// order in Fields, which must not make a stable topology hash nondeterministic.
 	for i := range topology.Types {
@@ -170,6 +183,20 @@ func (r *liveIntentSchemaResolver) Resolve(ctx context.Context, gvk schema.Group
 	}
 	r.cache[gv] = intentSchemaCacheEntry{hash: hash, converter: converter, topology: topology}
 	return converter, semanticHash, nil
+}
+
+// The converter's named untyped reference is the provenance marker used by the
+// declaration merger. Fail closed if a dependency changes this representation,
+// instead of silently treating opaque named lists as whole-value replacements.
+func validateDeclaredOpaqueTopology(topology *smdschema.Schema) error {
+	definition, ok := topology.FindNamedType("__untyped_deduced_")
+	if !ok || definition.Scalar == nil || *definition.Scalar != smdschema.Untyped || definition.Map == nil || definition.List == nil ||
+		definition.Map.ElementRelationship != smdschema.Separable || definition.List.ElementRelationship != smdschema.Atomic ||
+		definition.Map.ElementType.NamedType == nil || *definition.Map.ElementType.NamedType != "__untyped_deduced_" ||
+		definition.List.ElementType.NamedType == nil || *definition.List.ElementType.NamedType != "__untyped_atomic_" {
+		return fmt.Errorf("unsupported untyped schema representation for declared resource merging")
+	}
+	return nil
 }
 
 func requireIntentSchemaGVK(models map[string]*spec.Schema, gvk schema.GroupVersionKind) (string, error) {

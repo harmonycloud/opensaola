@@ -6,6 +6,7 @@ require (
 	cuelang.org/go v0.13.2
 	github.com/BurntSushi/toml v1.5.0
 	github.com/Masterminds/sprig/v3 v3.3.0
+	github.com/distribution/reference v0.6.0
 	github.com/go-logr/zerologr v1.2.3
 	github.com/google/cel-go v0.26.0
 	github.com/klauspost/compress v1.18.0
@@ -37,6 +38,7 @@ require (
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/moby/spdystream v0.5.1 // indirect
 	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f // indirect
+	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/sagikazarmark/locafero v0.9.0 // indirect

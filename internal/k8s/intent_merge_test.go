@@ -351,6 +351,16 @@ func TestCaptureResourceIntentDefaults(t *testing.T) {
 			want:      `{"env":[{"id":"AUTH","valueFrom":{"secret":"s","optional":false}}]}`,
 		},
 		{
+			name:    "admission injected ordinary field in declared member is not deletion evidence",
+			desired: `{"env":[{"id":"AUTH","value":"declared"}]}`, submitted: `{"env":[{"id":"AUTH","value":"declared"}]}`,
+			accepted: `{"env":[{"id":"AUTH","value":"declared","extra":"injected"}]}`, want: `{"env":[{"id":"AUTH","value":"declared"}]}`,
+		},
+		{
+			name:    "admission value differing from schema default is not captured",
+			desired: `{"env":[{"id":"AUTH","valueFrom":{"secret":"s"}}]}`, submitted: `{"env":[{"id":"AUTH","valueFrom":{"secret":"s"}}]}`,
+			accepted: `{"env":[{"id":"AUTH","valueFrom":{"secret":"s","optional":true}}]}`, want: `{"env":[{"id":"AUTH","valueFrom":{"secret":"s"}}]}`,
+		},
+		{
 			name:      "previous live addition is not captured",
 			desired:   `{"env":[{"id":"AUTH","valueFrom":{"secret":"s"}}]}`,
 			submitted: `{"env":[{"id":"AUTH","extra":"external","valueFrom":{"secret":"s"}}]}`,
@@ -572,11 +582,11 @@ func intentTestConverter(t *testing.T) managedfields.TypeConverter {
           "children":{"type":"array","x-kubernetes-list-type":"map","x-kubernetes-list-map-keys":["id"],"items":{
             "type":"object","properties":{"id":{"type":"string"},"value":{"type":"string"},"extra":{"type":"string"}}
           }},
-          "valueFrom":{"type":"object","properties":{"secret":{"type":"string"},"optional":{"type":"boolean"}}}
+          "valueFrom":{"type":"object","properties":{"secret":{"type":"string"},"optional":{"type":"boolean","default":false}}}
         }
       }},
       "ports":{"type":"array","x-kubernetes-list-type":"map","x-kubernetes-list-map-keys":["port","protocol"],"items":{
-        "type":"object","properties":{"port":{"type":"integer"},"protocol":{"type":"string","default":"TCP"},"target":{"type":"string"}}
+        "type":"object","properties":{"port":{"type":"integer"},"protocol":{"type":"string","default":"TCP"},"target":{"type":"string","default":"default"}}
       }},
       "tags":{"type":"array","x-kubernetes-list-type":"set","items":{"type":"string"}},
       "atomicList":{"type":"array","x-kubernetes-list-type":"atomic","items":{"type":"string"}},
@@ -591,4 +601,81 @@ func intentTestConverter(t *testing.T) managedfields.TypeConverter {
 		t.Fatal(err)
 	}
 	return converter
+}
+
+// Both plans receive identical inputs. Freeze what remains compatible with v1
+// and the intentional difference when a still-declared field drifted in live.
+func TestFieldPlansAgainstV1(t *testing.T) {
+	converter := intentTestConverter(t)
+	for _, tc := range []struct {
+		name, before, live, desired, wantV1, wantCurrent string
+	}{
+		{"declared drift", `{"data":{"mode":"mid"}}`, `{"data":{"mode":"external","other":"keep"}}`, `{"data":{"mode":"mid"}}`, `{"data":{"mode":"external","other":"keep"}}`, `{"data":{"mode":"mid","other":"keep"}}`},
+		{"historical omission", `{"data":{"old":"before","keep":"yes"}}`, `{"data":{"old":"before","keep":"yes","other":"outside"}}`, `{"data":{"keep":"yes"}}`, `{"data":{"keep":"yes","other":"outside"}}`, `{"data":{"keep":"yes","other":"outside"}}`},
+		{"unmanaged sibling", `{"data":{"owned":"old"}}`, `{"data":{"owned":"old","other":"outside"}}`, `{"data":{"owned":"new"}}`, `{"data":{"owned":"new","other":"outside"}}`, `{"data":{"owned":"new","other":"outside"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, l, d := intentTestObject(t, tc.before), intentTestObject(t, tc.live), intentTestObject(t, tc.desired)
+			old, _, err := MergeResourceIntent(converter, b, l, d, nil)
+			if err != nil || !reflect.DeepEqual(old.Object, intentTestObject(t, tc.wantV1).Object) {
+				t.Fatalf("v1 plan: %v, %v", old, err)
+			}
+			plan, err := PlanDeclaredResourceIntent(converter, b, l, d, d, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := plan.Validate(converter, plan.Object); err != nil || !reflect.DeepEqual(plan.Object.Object, intentTestObject(t, tc.wantCurrent).Object) {
+				t.Fatalf("current plan: %v, %v", plan.Object, err)
+			}
+		})
+	}
+}
+
+func TestCaptureContainerPullPolicyForDeclaredImage(t *testing.T) {
+	c := declaredNativePodConverter(t)
+	for _, tc := range []struct {
+		image, got string
+		trusted    bool
+	}{
+		{"registry.example:5443/platform/broker:1.2", "IfNotPresent", true},
+		{"registry.example:5443/platform/broker:1.2", "Always", false},
+		{"broker:latest", "Always", true}, {"broker", "Always", true},
+		{"broker@sha256:" + strings.Repeat("a", 64), "IfNotPresent", true},
+		{"broker:latest@sha256:" + strings.Repeat("b", 64), "Always", true},
+		{"invalid reference", "IfNotPresent", false},
+	} {
+		t.Run(tc.image+"/"+tc.got, func(t *testing.T) {
+			container := map[string]any{"name": "broker", "image": tc.image}
+			raw := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "v1", "kind": "Pod", "metadata": map[string]any{"name": "pod", "namespace": "default"}, "spec": map[string]any{"containers": []any{container}}}}
+			accepted := raw.DeepCopy()
+			items, _, err := unstructured.NestedSlice(accepted.Object, "spec", "containers")
+			if err != nil {
+				t.Fatal(err)
+			}
+			member, ok := items[0].(map[string]any)
+			if !ok {
+				t.Fatal("expected container object")
+			}
+			member["imagePullPolicy"] = tc.got
+			member["terminationMessagePolicy"] = "FallbackToLogsOnError"
+			if err := unstructured.SetNestedSlice(accepted.Object, items, "spec", "containers"); err != nil {
+				t.Fatal(err)
+			}
+			effective, err := CaptureResourceIntentDefaults(c, raw, raw, raw, accepted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _, err := unstructured.NestedSlice(effective.Object, "spec", "containers")
+			if err != nil {
+				t.Fatal(err)
+			}
+			m, ok := got[0].(map[string]any)
+			if !ok {
+				t.Fatal("expected captured container object")
+			}
+			if _, ok := m["imagePullPolicy"]; ok != tc.trusted || m["terminationMessagePolicy"] != nil {
+				t.Fatalf("captured untrusted defaults or omitted a proven one: %v", m)
+			}
+		})
+	}
 }

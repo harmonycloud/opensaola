@@ -154,44 +154,26 @@ func TestIntentRecordsFailClosed(t *testing.T) {
 		})
 	}
 }
-func TestIntentUncertainCommitKeepsPreparedRecord(t *testing.T) {
-	for _, tc := range []struct {
-		name                string
-		writeErr            error
-		committed, wantKeep bool
-	}{
-		{name: "connection_lost", writeErr: errors.New("connection lost"), wantKeep: true},
-		{name: "server_timeout", writeErr: apierrors.NewTimeoutError("timeout", 1), wantKeep: true},
-		{name: "conflict_rejected", writeErr: apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "target", errors.New("conflict"))},
-		{name: "pointer_already_committed", writeErr: apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "target", errors.New("conflict")), committed: true, wantKeep: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			owner := intentUnitOwner()
-			live := intentUnitResource()
-			cli := intentUnitClient(t, live)
-			w := &ManagedResourceWriter{Client: cli, Reader: cli}
-			s, err := w.prepareResourceIntent(ctx, owner, live, live, "", "schema", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if tc.committed {
-				if err := cli.Get(ctx, client.ObjectKeyFromObject(live), live); err != nil {
-					t.Fatal(err)
-				}
-				setIntentPointer(live, s.Name)
-				if err := cli.Update(ctx, live); err != nil {
-					t.Fatal(err)
-				}
-			}
-			w.cleanupUncommittedIntent(ctx, live, s, tc.writeErr)
-			err = cli.Get(ctx, client.ObjectKeyFromObject(s), &corev1.Secret{})
-			if (err == nil) != tc.wantKeep {
-				t.Fatalf("record kept=%v want=%v err=%v", err == nil, tc.wantKeep, err)
-			}
-		})
+
+// Fixtures for reading immutable histories written by earlier versions.
+func (w *ManagedResourceWriter) prepareResourceIntent(ctx context.Context, owner client.Object, live, desired *unstructured.Unstructured, configuration, schemaHash string, preserved []string) (*corev1.Secret, error) {
+	record := newIntentCandidate(owner, live, desired, nil, configuration, schemaHash, preserved)
+	secret, err := buildResourceIntentSecret(owner, *record)
+	if err != nil {
+		return nil, err
 	}
+	return secret, w.Client.Create(ctx, secret)
 }
+
+func setIntentPointer(obj *unstructured.Unstructured, name string) {
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = map[string]string{}
+	}
+	annotations[AnnotationResourceIntent] = name
+	obj.SetAnnotations(annotations)
+}
+
 func TestIntentPatchHasPreconditionsAndNoOwnershipRewrite(t *testing.T) {
 	live := intentUnitResource()
 	live.SetManagedFields([]metav1.ManagedFieldsEntry{{Manager: "other", Operation: metav1.ManagedFieldsOperationUpdate}})
@@ -279,17 +261,17 @@ func TestIntentInitializationRetainsCreateEvidenceAcrossConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	created.SetOwnerReferences([]metav1.OwnerReference{ref})
-	cli := intentUnitClient(t, created)
+	cli := intentUnitClient(t, owner, created)
 	wrapped := &intentInitConflictClient{Client: cli}
 	w := &ManagedResourceWriter{Client: wrapped, Reader: cli, IntentSchemas: intentUnitSchemas{converter: intentTestConverter(t)}}
-	if err := w.initializeResourceIntent(ctx, owner, created, desired, ""); err != nil {
+	if err := w.initializeResourceIntent(ctx, owner, created, desired, "", true); err != nil {
 		t.Fatal(err)
 	}
 	if !wrapped.injected {
 		t.Fatal("no conflict injected")
 	}
-	if len(wrapped.prepared) != 2 || wrapped.prepared[0] == wrapped.prepared[1] {
-		t.Fatal("initialization reused a fenced record after resourceVersion conflict")
+	if len(wrapped.prepared) != 1 || wrapped.prepared[0] != intentLedgerName(owner, created, "") {
+		t.Fatal("initialization did not reuse the stable ledger across the resourceVersion conflict")
 	}
 	latest := created.DeepCopy()
 	if err := cli.Get(ctx, client.ObjectKeyFromObject(created), latest); err != nil {
@@ -335,25 +317,16 @@ func (c *intentDefaultingPreviewClient) Create(_ context.Context, obj client.Obj
 	if len(options.DryRun) != 1 || options.DryRun[0] != metav1.DryRunAll {
 		return errors.New("preflight attempted a real Secret write")
 	}
-	secret, ok := obj.(*corev1.Secret)
-	if !ok {
-		return errors.New("expected intent Secret")
-	}
-	var err error
-	c.previewRecord, err = decodeResourceIntent(secret.Data)
-	if err != nil {
-		return err
-	}
-	return c.createErr
-}
-
-func (c *intentDefaultingPreviewClient) Patch(_ context.Context, obj client.Object, _ client.Patch, opts ...client.PatchOption) error {
-	options := &client.PatchOptions{}
-	for _, option := range opts {
-		option.ApplyToPatch(options)
-	}
-	if len(options.DryRun) != 1 || options.DryRun[0] != metav1.DryRunAll {
-		return errors.New("preflight attempted a real write")
+	if secret, ok := obj.(*corev1.Secret); ok {
+		if !ledgerPending(secret) {
+			return errors.New("preflight omitted the pending ledger envelope")
+		}
+		var err error
+		c.previewRecord, err = decodeResourceIntent(secret.Data)
+		if err != nil {
+			return err
+		}
+		return c.createErr
 	}
 	u, ok := obj.(*unstructured.Unstructured)
 	if !ok {

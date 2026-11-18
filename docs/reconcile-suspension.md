@@ -7,7 +7,7 @@ This runbook explains how to temporarily suspend child-resource writes for a Mid
 ## Scope and guarantees
 
 - `merge` is available only for a MID and automatically adopts changes made to its **primary live CR `spec`** while reconciliation is paused.
-- **PreAction boundary:** the resume desired-state renderer replays CUE-only PreActions on an in-memory MID copy, so their primary-CR `spec` effects match a normal primary-CR write without executing commands, HTTP actions, or Kubernetes writes. If any PreAction contains a non-CUE step (for example CMD or HTTP), `merge` fails closed. Make the action pure CUE, make its result an explicit MID/Baseline desired value, or use `apply` only when intentionally overwriting changes made during the pause.
+- **PreAction boundary:** pause capture reads the actual CR without rendering or executing PreActions. During `merge`, the desired-state renderer replays CUE PreActions on an in-memory MID copy, matching their primary-CR `spec` effects during a normal write; every step must have nonempty CUE. A step without CUE that requires CMD, HTTP, or another non-CUE operation makes `merge` fail closed. Rendering never executes those external operations or Kubernetes writes. Make the action pure CUE, make its result an explicit MID/Baseline desired value, or use `apply` only when intentionally overwriting changes made during the pause.
 - It does not adopt changes to CR metadata, Configuration resources, PreActions, or MiddlewareOperator resources. Update their desired configuration separately.
 - The actual pause-start spec and previous overrides are stored in an immutable Secret in the MID namespace, using the existing fast zstd codec (JSON when compression is not smaller). `.status.reconcilePause` contains only the `snapshotSecret` reference, target identity, hashes and timestamps; it does not duplicate the payload or depend on process memory.
 - No application snapshot size ceiling is imposed; Kubernetes validates the stored Secret and resource sizes. Pause captures the actual spec with GET. Resume compares that observation with the current actual spec. Unchanged defaults, nulls and pre-existing drift are not adopted. Associative lists use API schema keys, sets use membership, and schema-declared atomic values are handled as a whole.
@@ -39,7 +39,7 @@ Before changing the live primary CR, confirm all of the following:
 2. `.status.reconcilePause.snapshotSecret` refers to a valid Secret in the same namespace.
 3. `ReconcileAdoption` is absent or not `False`.
 
-If snapshot capture failed, do not change the live primary CR. Fix the missing/invalid primary CR, target-resolution failure, or size limit first, then recheck the MID.
+If snapshot capture failed, do not change the live primary CR. Fix the missing primary CR, target-resolution failure, Secret write failure, or Kubernetes size-limit issue first, then recheck the MID.
 
 ### 3. Make a primary-CR change that should persist
 
@@ -47,7 +47,7 @@ Modify only the primary CR's `spec`, for example with `kubectl edit <primary-kin
 
 ### 4. Resume with `merge` (when every PreAction step is CUE-only)
 
-Before requesting `merge`, verify that every configured PreAction step is CUE-only. CUE PreActions may modify the primary CR `spec`; their patches are replayed in memory. If an action includes CMD, HTTP, or another non-CUE step, the controller safely rejects `merge`; use the alternatives in [Scope and guarantees](#scope-and-guarantees).
+Before requesting `merge`, verify that every configured PreAction step has nonempty CUE. CUE PreActions may modify the primary CR `spec`; their patches are replayed in memory. A step without CUE that requires CMD, HTTP, or another non-CUE operation makes the controller reject `merge`; use the alternatives in [Scope and guarantees](#scope-and-guarantees).
 
 Keep the pause annotation and request the recovery policy:
 
@@ -118,6 +118,28 @@ kubectl annotate mo <mo-name> -n <namespace> \
 ```
 
 Before resuming an MO, update its desired configuration if a change made during the pause must persist. Any related MID is independent and must be paused and resumed through the MID workflow above.
+
+## Comparison with the historical implementation
+
+Commit `78adfe0`, dated 2026-10-14 and included in `v1.4.0`, switched recovery to actual-state snapshots and adoption of changes made during the pause. The historical implementation below is its parent commit, `d97a165`. Use the preceding procedures for current operations.
+
+| Decision | Historical implementation | Current implementation |
+|----------|---------------------------|------------------------|
+| Pause baseline | Desired `spec` rendered at pause start | Actual CR `spec` read at pause start |
+| Storage and confirmation | `desiredSpec` inside MID status | `.status.reconcilePause.snapshotSecret` refers to a valid immutable Secret in the same namespace; the Secret holds the actual spec and pre-pause overrides |
+| Merge rule | B is pause-time desired state, L is actual state before resume, and D is current desired state; use D when L=B, use L when D=B, accept a shared L=D value, otherwise report a conflict at the changed path | Compare actual specs at pause start and before resume, then apply only that interval's additions, modifications, and deletions to current desired state |
+| Both sides change the same path | Different final values that both differ from B produce `ReconcileAdoptionConflict` and keep the pause active | The actual change made during the pause wins for this `merge`; unrelated current desired inputs remain |
+| Pre-existing defaults and drift | Differences between actual and rendered desired state could be adopted | Values unchanged during the pause are not adopted |
+| Lists and nulls | Arrays are atomic; an observed actual null is treated as the baseline value | Lists follow API schema semantics; unchanged nulls are not adopted, and actual changes are compared using the schema |
+| PreActions | Both capture and merge render desired state and require render-safe CUE steps | Capture does not render; merge performs in-memory CUE rendering |
+| Size limits | A 256 KiB application limit on the desired snapshot, actual spec before resume, and rendered base of a nonempty override | No such application limits; Kubernetes validates resource sizes |
+| Merge retries | Current MID overrides could include an intermediate adoption | Recompute from snapshot `previousOverrides`, excluding reverted intermediate changes |
+
+For example, actual and desired replicas both start at 3. During the pause, the actual CR changes to 5 and MID desired state changes to 4. The historical implementation reports a conflict; current `merge` produces 5. A subsequent explicit MID desired change from 4 to 6 takes effect as 6.
+
+In another example, desired replicas are 3 but actual replicas have already drifted to 2 before the pause, with no changes during the pause. The historical implementation could adopt 2. The current implementation observes no interval change and uses the current desired value, 3.
+
+Explicit MID `merge`/`apply` selection, write protection without a policy, actual-spec verification before writing, and independent MO pause/resume remain unchanged. Sessions with only a legacy `desiredSpec` snapshot must follow the upgrade handling in [Adoption failure](#adoption-failure); an old desired snapshot cannot be converted into an actual baseline.
 
 ## Related documentation
 

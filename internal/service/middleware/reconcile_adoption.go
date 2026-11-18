@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	kjson "sigs.k8s.io/json"
 )
 
 var (
@@ -340,7 +341,7 @@ func decodeSpec(raw []byte) (map[string]any, error) {
 		return map[string]any{}, nil
 	}
 	var spec map[string]any
-	if err := json.Unmarshal(raw, &spec); err != nil {
+	if err := kjson.UnmarshalCaseSensitivePreserveInts(raw, &spec); err != nil {
 		return nil, err
 	}
 	if spec == nil {

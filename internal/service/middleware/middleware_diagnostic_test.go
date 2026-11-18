@@ -22,10 +22,14 @@ import (
 	"strings"
 	"testing"
 
+	"encoding/json"
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
+	"github.com/harmonycloud/opensaola/internal/service/customresource"
+	"github.com/harmonycloud/opensaola/internal/service/middlewareconfiguration"
 	"github.com/harmonycloud/opensaola/pkg/tools/ctxkeys"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -113,7 +117,7 @@ func TestTemplateParseWithBaseline_MissingNecessaryIncludesFieldPath(t *testing.
 }
 
 func TestBuildCustomResource_CreateFailureWritesApplyClusterDiagnostic(t *testing.T) {
-	t.Parallel()
+	configurePauseTestSchemas(t)
 
 	ctx := context.Background()
 	scheme := runtime.NewScheme()
@@ -157,11 +161,11 @@ func TestBuildCustomResource_CreateFailureWritesApplyClusterDiagnostic(t *testin
 		WithStatusSubresource(&v1.Middleware{}).
 		WithObjects(baseline, mid).
 		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if obj.GetObjectKind().GroupVersionKind().Kind == "Deployment" {
 					return errors.New("admission denied: replicas exceeds namespace quota")
 				}
-				return c.Patch(ctx, obj, patch, opts...)
+				return c.Create(ctx, obj, opts...)
 			},
 		}).
 		Build()
@@ -204,5 +208,62 @@ func TestBuildCustomResource_CreateFailureWritesApplyClusterDiagnostic(t *testin
 	}
 	if !strings.Contains(applyCluster.Message, "failedObject=apps/v1/Deployment middleware/demo-redis") {
 		t.Fatalf("expected condition message to include failed object, got %q", applyCluster.Message)
+	}
+}
+
+func TestRenderedMiddlewarePreservesInt64InResourceAndConfiguration(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	labels := map[string]string{v1.LabelPackageName: "integers"}
+	baseline := &v1.MiddlewareBaseline{
+		ObjectMeta: metav1.ObjectMeta{Name: "numbers", Labels: labels},
+		Spec: v1.MiddlewareBaselineSpec{
+			GVK:        v1.GVK{Group: "example.test", Version: "v1", Kind: "Numbers"},
+			Parameters: runtime.RawExtension{Raw: []byte(`{"inherited":9007199254740993,"direct":1,"templated":"{{ .Necessary.exact }}"}`)},
+			Configurations: []v1.Configuration{
+				{Name: "copy", Values: runtime.RawExtension{Raw: []byte(`{"copy":"{{ .Parameters.direct }}"}`)}},
+				{Name: "independent"},
+			},
+		},
+	}
+	mid := &v1.Middleware{ObjectMeta: metav1.ObjectMeta{Name: "exact", Namespace: "default", Labels: labels}, Spec: v1.MiddlewareSpec{
+		Baseline:   "numbers",
+		Necessary:  runtime.RawExtension{Raw: []byte(`{"exact":9223372036854775807}`)},
+		Parameters: runtime.RawExtension{Raw: []byte(`{"direct":9007199254740995}`)},
+	}}
+	copyConfig := &v1.MiddlewareConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "copy", Labels: labels},
+		Spec:       v1.MiddlewareConfigurationSpec{Template: `{"spec":{"copy":{{ .Values.copy }}}}`},
+	}
+	independent := &v1.MiddlewareConfiguration{
+		ObjectMeta: metav1.ObjectMeta{Name: "independent", Labels: labels},
+		Spec:       v1.MiddlewareConfigurationSpec{Template: `{{ if .Values.copy }}unexpected value from previous configuration{{ else }}empty{{ end }}`},
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(baseline, copyConfig, independent).Build()
+	ctx := context.Background()
+	if err := renderMiddlewareWithBaseline(ctx, cli, mid); err != nil {
+		t.Fatal(err)
+	}
+	target, err := customresource.GetNeedPublishCustomResource(ctx, cli, mid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for field, want := range map[string]int64{"inherited": 9007199254740993, "direct": 9007199254740995, "templated": 9223372036854775807} {
+		if got, found, err := unstructured.NestedInt64(target.Object, "spec", field); err != nil || !found || got != want {
+			t.Fatalf("target spec.%s = %v, found %t, err %v; want %d", field, got, found, err, want)
+		}
+	}
+	configs, err := middlewareconfiguration.GetTemplateParsedMiddlewareConfigurations(ctx, cli, consts.HandleActionPublish, mid)
+	if err != nil || len(configs) != 2 {
+		t.Fatalf("rendered %d configurations, err %v", len(configs), err)
+	}
+	var config struct{ Spec struct{ Copy int64 } }
+	if err := json.Unmarshal([]byte(configs[0].Spec.Template), &config); err != nil || config.Spec.Copy != 9007199254740995 {
+		t.Fatalf("rendered configuration = %s, err %v", configs[0].Spec.Template, err)
+	}
+	if got := configs[1].Spec.Template; got != "empty" {
+		t.Fatalf("second configuration: %s", got)
 	}
 }

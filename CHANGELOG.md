@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-18
+
+### Changed
+- Normal managed-resource updates enforce every currently declared field, while using history only for safe removals. Schema-free object lists with unique names merge recursively by name; declared schema map/set/atomic boundaries remain authoritative.
+- Shared mutable resources use create-only POST and a single field plan for existing-resource writes, previews, and verification. One stable per-target Secret holds confirmed history and at most one pending operation. One-off Action edits use guarded JSON Patch.
+- Existing v1 intent records migrate to v2 during normal updates without CLI migration. API defaults remain deletion evidence rather than authoritative user declarations.
+
+### Fixed
+- Removing a named member recursively removes recorded children while retaining external children and identity keys. Conflicting historical removals now block the complete target write instead of reporting success with stale fields.
+- Validate planned removals against dry-run and commit responses. Pending deletion records retain the previous successful history until confirmation, including retries after lost responses, missing target pointers, and restarts.
+- Classify intent deletion conflicts and incomplete field writes before generic keyword matching, so field paths containing `template` or `tls` do not mislabel their failure cause.
+- Accept native CRD omitempty normalization such as omitted `preserveUnknownFields: false` during first installation, without relaxing unknown custom-resource field validation.
+- Validate declared fields against both dry-run and committed API responses; incomplete writes report retryable errors instead of silently succeeding.
+- Recreate deleted primary resources without replaying Configuration or side-effecting PreActions, with create-only publication, same-generation retries, and an existence-check fallback. Pause recovery continues to use actual before/after state.
+- Preserve the target UID when registering Configuration cleanup, and retain verified same-owner history if the owner annotation is missing. A recovered create response can establish history only for explicitly declared fields.
+- Honor mountPath for native volume mounts, preserve declared init-container order, and support withdrawal of native probe defaults. Preserve int64 precision across rendering, action steps, and pause recovery.
+
+### Upgrade notes and limitations
+- v1.4.0 cannot read new v2 ordinary intent records; rolling back the binary alone does not preserve normal updates for migrated resources.
+- Older controllers cannot write the new mutable history Secret. Deploy one active writer version at a time.
+- First migration retains uncertain removals inside formerly atomic opaque lists. Explicit null and schema-atomic values remain whole-value declarations; unknown mutually exclusive CR fields still require accurate schema or business validation.
+
 ## [1.4.0] - 2026-10-24
 
 ### Added

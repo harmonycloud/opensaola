@@ -45,6 +45,12 @@ func TestIntentCollectionSafety(t *testing.T) {
 			s.CreationTimestamp = metav1.Now()
 		}},
 		{name: "unreferenced_same_rv_fenced", wantDelete: true, wantFence: true},
+		{name: "v2_unreferenced_same_rv_fenced", mutate: func(_ *corev1.Secret, _ *unstructured.Unstructured, r *resourceIntent) { r.Version = 2 }, wantDelete: true, wantFence: true},
+		{name: "v2_current_record_retained", mutate: func(s *corev1.Secret, o *unstructured.Unstructured, r *resourceIntent) {
+			r.Version = 2
+			setIntentPointer(o, s.Name)
+		}},
+		{name: "unknown_record_version_retained", mutate: func(_ *corev1.Secret, _ *unstructured.Unstructured, r *resourceIntent) { r.Version = 3 }, wantError: true},
 		{name: "changed_rv_needs_no_fence", mutate: func(_ *corev1.Secret, o *unstructured.Unstructured, _ *resourceIntent) { o.SetResourceVersion("4") }, wantDelete: true},
 		{name: "target_absent", absent: true, wantDelete: true},
 		{name: "target_replaced_never_modified", mutate: func(_ *corev1.Secret, o *unstructured.Unstructured, _ *resourceIntent) { o.SetUID("replacement") }, wantDelete: true},

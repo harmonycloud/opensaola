@@ -19,7 +19,6 @@ package tools
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -34,6 +33,7 @@ import (
 	"k8s.io/client-go/discovery"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	kjson "sigs.k8s.io/json"
 )
 
 type Quoter interface {
@@ -288,12 +288,12 @@ func GetTemplateValues(ctx context.Context, quoter Quoter) (*TemplateValues, err
 		if err != nil {
 			return nil, fmt.Errorf("marshal globe error: %w", err)
 		}
-		err = json.Unmarshal(unifiedByres, &templateValues.Globe)
+		err = kjson.UnmarshalCaseSensitivePreserveInts(unifiedByres, &templateValues.Globe)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal globe error: %w", err)
 		}
 		templateValues.Necessary = make(map[string]interface{})
-		err = json.Unmarshal(unifiedByres, &templateValues.Necessary)
+		err = kjson.UnmarshalCaseSensitivePreserveInts(unifiedByres, &templateValues.Necessary)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal necessary error: %w", err)
 		}

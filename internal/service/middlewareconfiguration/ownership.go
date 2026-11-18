@@ -220,17 +220,12 @@ func removeControllerOwnerReference(refs []metav1.OwnerReference, owner metav1.O
 // drops fields the current field manager owns, and older references may
 // predate it, so migration of orphan-marked resources cannot rely on apply
 // alone.
-func stripLiveControllerOwnerReference(ctx context.Context, cli client.Client, obj *unstructured.Unstructured, owner metav1.Object) error {
-	live := &unstructured.Unstructured{}
-	live.SetGroupVersionKind(obj.GroupVersionKind())
-	if err := cli.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
-		return err
-	}
+func stripLiveControllerOwnerReference(ctx context.Context, cli client.Client, live *unstructured.Unstructured, owner metav1.Object) error {
 	controller := metav1.GetControllerOf(live)
 	if controller == nil || controller.UID != owner.GetUID() {
 		return nil
 	}
-	base := client.MergeFrom(live.DeepCopy())
+	base := client.MergeFromWithOptions(live.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	live.SetOwnerReferences(removeControllerOwnerReference(live.GetOwnerReferences(), owner))
 	return cli.Patch(ctx, live, base)
 }

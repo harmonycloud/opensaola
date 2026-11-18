@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-11-18
+
+### Fixed
+- Restore first publication of StatefulSets with PVC templates. The controller accepts API defaults inside atomic maps and lists while checking declared values, list membership and order. A 5Gi claim still fails verification if admission returns 1Gi. The same comparison covers projected volumes, NetworkPolicy ports, RBAC subjects, admission rules and CRD-declared defaults.
+- Honor Configuration orphan policies when a Middleware or MiddlewareOperator is deleted. The controller detaches obsolete instance owner references from retained resources, including those of paused instances, without replaying their contents. Disabling a Configuration still follows its separate disable policy.
+- Retain a separate Helm-managed data namespace and its catalog Secrets when changing the namespace setting or uninstalling the protected chart revision.
+
+### Upgrade notes
+- If the previous chart created the data namespace, first upgrade with the original `config.dataNamespace` and `config.createDataNamespace=true`. Once that upgrade succeeds, the release manifest records the keep policy. A subsequent upgrade can change the name or turn creation off. Helm needs permission to list namespaces during upgrade.
+- Upgrade the bundled CRDs with the controller. Allow existing instances to reconcile before deleting their owners so the controller can remove legacy references. Kubernetes can already have collected dependents if background deletion started before the upgrade.
+
 ## [1.5.0] - 2026-11-18
 
 ### Changed

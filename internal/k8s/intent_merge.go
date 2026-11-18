@@ -18,11 +18,8 @@ package k8s
 
 import (
 	"fmt"
-	"reflect"
 	"strings"
 
-	"github.com/distribution/reference"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/managedfields"
@@ -86,100 +83,6 @@ func CaptureResourceIntentDefaults(converter managedfields.TypeConverter, rawDes
 		}
 	})
 	return supplementIntentDefaults(converter, parsed, objects[0], objects[1], effectiveDesired, known)
-}
-
-// imagePullPolicy depends on the image in this particular container. Use the
-// same normalized image reference semantics as the Kubernetes API defaulter.
-func (l *declaredDeletionLookup) nativeDefaultAt(object map[string]any, root intentDeclaredType, path fieldpath.Path, actual any) bool {
-	if nativeCapturedDefault(l.merger.nativeType, path, actual) {
-		return true
-	}
-	if len(path) < 2 || path[len(path)-1].FieldName == nil || *path[len(path)-1].FieldName != "imagePullPolicy" ||
-		declaredNativePathType(l.merger.nativeType, path[:len(path)-1]) != reflect.TypeFor[corev1.Container]() {
-		return false
-	}
-	container, _, err := l.find(object, root, path[:len(path)-1])
-	fields, ok := container.value.(map[string]any)
-	if err != nil || !ok {
-		return false
-	}
-	image, ok := fields["image"].(string)
-	if !ok {
-		return false
-	}
-	ref, err := reference.ParseNormalizedNamed(image)
-	if err != nil {
-		return false
-	}
-	var tag string
-	if tagged, ok := reference.TagNameOnly(ref).(reference.Tagged); ok {
-		tag = tagged.Tag()
-	}
-	if tag == "latest" {
-		return actual == string(corev1.PullAlways)
-	}
-	return actual == string(corev1.PullIfNotPresent)
-}
-
-// These built-in defaults come from the versioned Kubernetes core/v1
-// defaulters. Resolve the parent Go type so they cannot match arbitrary CRs.
-func nativeCapturedDefault(root reflect.Type, path fieldpath.Path, actual any) bool {
-	if root == nil || len(path) == 0 || path[len(path)-1].FieldName == nil {
-		return false
-	}
-	parent := declaredNativePathType(root, path[:len(path)-1])
-	if parent == nil {
-		return false
-	}
-	for parent.Kind() == reflect.Pointer {
-		parent = parent.Elem()
-	}
-	field := *path[len(path)-1].FieldName
-	switch parent {
-	case reflect.TypeFor[corev1.Probe]():
-		switch field {
-		case "timeoutSeconds", "successThreshold":
-			return actual == int64(1)
-		case "periodSeconds":
-			return actual == int64(10)
-		case "failureThreshold":
-			return actual == int64(3)
-		}
-	case reflect.TypeFor[corev1.HTTPGetAction]():
-		switch field {
-		case "path":
-			return actual == "/"
-		case "scheme":
-			return actual == string(corev1.URISchemeHTTP)
-		}
-	case reflect.TypeFor[corev1.GRPCAction]():
-		if field == "service" {
-			return actual == ""
-		}
-	case reflect.TypeFor[corev1.Container]():
-		switch field {
-		case "terminationMessagePath":
-			return actual == corev1.TerminationMessagePathDefault
-		case "terminationMessagePolicy":
-			return actual == string(corev1.TerminationMessageReadFile)
-		}
-	}
-	if field == "defaultMode" {
-		switch parent {
-		case reflect.TypeFor[corev1.SecretVolumeSource](), reflect.TypeFor[corev1.ConfigMapVolumeSource](), reflect.TypeFor[corev1.DownwardAPIVolumeSource](), reflect.TypeFor[corev1.ProjectedVolumeSource]():
-			return reflect.DeepEqual(actual, int64(corev1.SecretVolumeSourceDefaultMode))
-		}
-	}
-	// Some built-in structs serialize an empty member unconditionally (for
-	// example container.resources). Only accept what the empty typed parent
-	// actually emits; unknown fields and optional zero values remain external.
-	empty, ok := canonicalDeclaredNativeValue(map[string]any{}, parent)
-	object, isObject := empty.(map[string]any)
-	if !ok || !isObject {
-		return false
-	}
-	v, found := object[field]
-	return found && reflect.DeepEqual(actual, v)
 }
 
 func supplementIntentDefaults(converter managedfields.TypeConverter, source, rawDesired, effectiveDesired *typed.TypedValue, original *unstructured.Unstructured, candidates *fieldpath.Set) (*unstructured.Unstructured, error) {

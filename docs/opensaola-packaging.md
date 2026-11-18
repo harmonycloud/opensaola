@@ -372,10 +372,16 @@ reconcile 一次才能采用新默认。直接修改 `MiddlewareConfiguration.sp
 需要由 MID/MO 引用变更或其他 owner 事件触发。这里的“不再引用”只表示 OpenSaola 不再渲染该 Configuration，
 不代表控制器会扫描集群确认没有其他消费者。
 
-同命名空间资源还需匹配 controller ownerReference；跨命名空间和集群级资源使用清单中的 UID 及来源标记
-校验，不要求跨命名空间 ownerReference，但仍拒绝清理带外部 controller 的资源。MID/MO 删除时则读取实际
-资源上的策略，并以 MCF 顶层策略作为回退；显式 `configurationDeletePolicy` 优先，否则
-`configurationDisablePolicy=orphan` 也会保留资源。
+例如，同命名空间的 ConfigMap 只配置 `middleware.cn/configurationDeletePolicy: orphan` 时，
+删除 MID/MO 会保留 ConfigMap。单独停用该配置时，ConfigMap 使用默认停用策略 `delete`，
+控制器核对已记录的资源 UID、实例 UID 和来源后删除它。此时清单中的
+`controllerReferenceRequired: false` 表示控制器有意省略了指向实例的引用。
+需要该引用的资源在停用时仍会核对它，其他控制器已接管的对象会保留。
+
+升级后控制器会自动移除应保留资源上的旧实例引用，包括已暂停实例的引用。它只修正归属元数据。
+对尚无生命周期清单的老版本，仅对能够从 Configuration 确认来源且仍引用原实例 UID 的对象解除关联，
+旧模板需能识别资源的 `apiVersion` 和 `kind`，失败时实例会产生 `ConfigurationMigrationFailed` 事件并自动重试。后续成功发布才会建立停用清理清单。删除策略优先读取资源上的注解，再读取 MCF 注解。
+未显式配置删除策略时，`configurationDisablePolicy=orphan` 也会在删除实例时保留资源。
 
 旧版本已经停用、且状态清单已丢失的跨命名空间残留，不会仅因升级或重试自动删除。需要核实其身份和当前
 用途后，在允许重新应用配置的前提下恢复原配置引用/渲染，等待成功 reconcile 并确认清单中的资源 UID

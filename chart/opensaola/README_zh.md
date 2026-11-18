@@ -118,6 +118,12 @@ helm upgrade --install opensaola ./chart/opensaola \
   --set config.createDataNamespace=true
 ```
 
+关闭创建开关、更换数据命名空间或卸载本修复版时，Helm 会保留 Chart 已创建的数据命名空间。更名会切换包目录位置；需要沿用旧数据时，应单独迁移。关闭创建开关时，请先准备好目标命名空间。
+
+**从 v1.5.0 等尚未设置保留标记的版本升级时**，若原数据命名空间由 Chart 创建，第一次升级保留原名称和 `config.createDataNamespace=true`，让 `helm.sh/resource-policy: keep` 同时写入现场 Namespace 和本次 release 清单。成功后，第二次升级才关闭开关或更名。直接切换会在渲染阶段报错。卸载前可用 `helm get manifest` 核对当前 release 清单；旧版本（包括回滚恢复的旧修订）仍可能删除命名空间，只给现场对象添加注解不足以保护旧修订的卸载。
+
+升级时，执行 Helm 的身份需要列举 Namespace 的权限，以便在更名时也能找到原来由该 release 管理的命名空间。控制器 RBAC 无需增加权限。需要预检可使用 `helm upgrade --dry-run=server`，离线渲染无法读取已安装资源。
+
 ## RBAC 权限范围
 
 OpenSaola 可以根据中间件包模板渲染并协调 Kubernetes 资源，包括包内 CRD 提供的自定义资源。因此 Helm 默认 RBAC 包含与 `config/rbac/role.yaml` 对齐的动态资源权限，确保全新源码检出后可以直接通过 Helm 安装或升级。

@@ -186,6 +186,9 @@ func TestDeclaredIntentWriterAPI(t *testing.T) {
 	if err := cli.Create(ctx, ns); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("additional_atomic_defaults", func(t *testing.T) {
+		testVersionedAtomicDefaults(t, ctx, cli, resolver, ns.Name)
+	})
 	t.Run("deletion_contract", func(t *testing.T) {
 		runIntentDeletionAPICases(t, ctx, cli, resolver, gvk, ns.Name)
 	})

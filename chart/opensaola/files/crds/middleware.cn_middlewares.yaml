@@ -653,6 +653,11 @@ spec:
                       description: ConfigurationUID identifies the exact MiddlewareConfiguration
                         object instance when available.
                       type: string
+                    controllerReferenceRequired:
+                      description: |-
+                        ControllerReferenceRequired records whether lifecycle cleanup expects this owner's
+                        controller reference. Older same-namespace entries without this field require one.
+                      type: boolean
                     disablePolicy:
                       description: |-
                         DisablePolicy is the resolved lifecycle policy used when this resource stops rendering.

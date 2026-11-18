@@ -76,9 +76,15 @@ func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.R
 	log.FromContext(ctx).V(1).Info("start processing middlewareOperator", "req", req)
 
 	// Handle middlewareOperator
-	if err := r.handleMiddlewareOperator(ctx, req); err != nil {
+	mo, err := k8s.GetMiddlewareOperator(ctx, r.Client, req.Name, req.Namespace)
+	if err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if err := migrateConfigurationReferences(ctx, r.Client, r.Recorder, mo); err != nil {
+		defer retryConfigurationMigration(&result, &retErr)
+	}
+	if err := r.handleMiddlewareOperator(ctx, req, mo); err != nil {
 		if apiErrors.IsNotFound(err) {
-			log.FromContext(ctx).V(1).Info("MiddlewareOperator not found, skipping", "namespace", req.Namespace, "name", req.Name)
 			return ctrl.Result{}, nil
 		}
 		if errors.Is(err, errMiddlewareOperatorFinalizerAdded) {
@@ -121,13 +127,8 @@ func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 // handleMiddlewareOperator handles the middlewareOperator reconcile logic.
 // Uses named return value retErr so the deferred status-write logic can detect and propagate errors.
-func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Context, req ctrl.Request) (retErr error) {
-	// Get middlewareOperator
-	mo, err := k8s.GetMiddlewareOperator(ctx, r.Client, req.Name, req.Namespace)
-	if err != nil {
-		return err
-	}
-
+func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Context, req ctrl.Request, mo *v1.MiddlewareOperator) (retErr error) {
+	var err error
 	// Finalizer logic (always enabled)
 	if !mo.DeletionTimestamp.IsZero() {
 		// Object is being deleted, perform cleanup

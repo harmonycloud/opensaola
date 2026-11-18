@@ -871,7 +871,7 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 | `middleware.cn/dataSyncer` | 数据同步器 GVK/Name | 用户配置 | `group/version/kind/name` |
 | `middleware.cn/oppositeClusterId` | 对端集群 ID | 用户配置 | - |
 
-> `middleware.cn/suspend-reconcile: "true"` 仅暂停该 MID/MO 向下层资源写入：MID 的实际 CR、Configuration 和 CR 删除自愈，以及 MO 的 Configuration、RBAC、Deployment 和 Deployment 漂移修复。finalizer 删除清理与运行状态同步继续执行。修改 MID 的实际 CR 前，除确认 `.status.conditions[type=ReconcilePaused]=True` 外，还必须确认 `.status.reconcilePause.snapshotSecret` 指向同命名空间的有效 Secret，且 `ReconcileAdoption` 不存在或不是 `False`；快照失败时不要开始修改主实际 CR。MO 没有主 CR 快照，只需确认 `ReconcilePaused=True`。灾备只是这一通用能力的典型使用场景之一。
+> `middleware.cn/suspend-reconcile: "true"` 仅暂停该 MID/MO 向下层资源写入：MID 的实际 CR、Configuration 和 CR 删除自愈，以及 MO 的 Configuration、RBAC、Deployment 和 Deployment 漂移修复。finalizer 删除清理与运行状态同步继续执行。控制器升级时也会修正应保留的 Configuration 资源上的旧实例引用，暂停期间业务字段继续冻结。修改 MID 的实际 CR 前，除确认 `.status.conditions[type=ReconcilePaused]=True` 外，还必须确认 `.status.reconcilePause.snapshotSecret` 指向同命名空间的有效 Secret，且 `ReconcileAdoption` 不存在或不是 `False`；快照失败时不要开始修改主实际 CR。MO 没有主 CR 快照，只需确认 `ReconcilePaused=True`。灾备只是这一通用能力的典型使用场景之一。
 >
 > MID 恢复必须显式选择 `merge` 或 `apply`，不能直接删除暂停注解。`merge` 比较 `.status.reconcilePause.snapshotSecret` 引用的实际 CR 快照与恢复前实际 CR，仅将期间的增删改应用到当前渲染期望，并保存为 `.spec.reconcileOverrides`。未变化的默认字段、null 和已有漂移不被采纳；变更路径采纳当前 CR 值，其余路径保留 MID 期望。关联列表按 API schema 的键比较，atomic 值整体处理。写入前再次校验实际 spec；再次变化则重新计算，重试使用 `previousOverrides` 保留暂停前补丁并排除已撤回的中间采纳。成功写入后清理 status 引用、恢复注解并删除暂停 Secret；失败删除由后台回收器重试，MID 删除由 ownerReference 回收。status 不存完整 spec 或旧 overrides，不另设应用层大小上限。`apply` 明确放弃暂停期间改动。身份、schema 或快照异常时保持暂停；旧 `desiredSpec` 快照不会被当成实际基线，升级前应结束旧暂停会话。
 >
@@ -883,7 +883,7 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 >
 > **Configuration 停用生命周期**：当 owner 的下一次 reconcile 发现 Configuration 模板为空或其引用被移除时，会依据成功渲染时写入状态清单的最终策略清理资源。`spec.template` 内资源清单的 `metadata.annotations` 优先于 `MiddlewareConfiguration.metadata.annotations`；不要给已存在的 live 资源手工打该策略注解，控制器不会读取它。
 > 无显式策略时，PVC/PV 为 `orphan`，CRD 无论注解为何都为 `orphan`，其他所有 Kind（包含未知/自定义和集群级资源）为 `delete`。显式 `delete` / `orphan` 可覆盖 PVC/PV 的默认；CRD 在解析和删除时均被硬保护。
-> 控制器只会清理状态清单中记录为 `delete`、且 live 对象的 owner UID、Configuration UID、resource UID 和 controller owner 都仍匹配的对象；外部重建、交接或同名复用的资源会被保留。旧的 `orphan` 清单不会在升级后被追溯删除，必须先在资源仍正常渲染时成功 reconcile，后续停用才采用新默认。
+> 控制器只会清理状态清单中记录为 `delete`、且实际资源 UID、实例 UID 和 Configuration 来源标记仍匹配的对象。对同命名空间的资源，清单中的 `controllerReferenceRequired: false` 允许按策略省略实例引用，其余情况仍需匹配 controller owner。外部重建、交接或同名复用的资源会被保留。旧的 `orphan` 清单不会在升级后被追溯删除，必须先在资源仍正常渲染时成功 reconcile，后续停用才采用新默认。
 > 直接修改 `MiddlewareConfiguration.spec.template` 不会单独触发 MID/MO reconcile；需要 MID/MO 引用变更或其他 owner 事件触发。这里的“不再引用”只表示 OpenSaola 不再渲染该 Configuration，不表示控制器已分析集群中的其他消费者。该路径与 MID/MO 删除时按 `configurationDeletePolicy` / OwnerReference 清理资源不同。
 > 若同名资源已有其他 controller owner，归属校验默认即拒绝写入；`configurationOwnershipPolicy=managed` 保留兼容。历史 Configuration 缺少 owner UID 或旧 owner 已删除时，仅在 app/Configuration 来源匹配且无冲突归属时允许接管；同名 MCF 重建仍视为同一逻辑来源。接管成功后才建立当前 owner 的清理清单，CRD 始终保留。详见[渲染期望记录](resource-intent_zh.md)。MID/MO 删除路径中的 `configurationDeletePolicy=delete` 是独立且更强的删除语义，不应当作上述停用路径的 UID 严格删除。
 

@@ -40,11 +40,6 @@ var _ = Describe("Recorded resource intent controller integration", func() {
 			title = "leaves old steady-state resources untouched then records normal updates"
 		}
 		It(title, func() {
-			resolver, err := k8s.NewIntentSchemaResolver(cfg)
-			Expect(err).NotTo(HaveOccurred())
-			k8s.ConfigureManagedResources(k8sClient)
-			k8s.ConfigureResourceIntents(resolver)
-			DeferCleanup(func() { k8s.ConfigureResourceIntents(nil) })
 			name := "intent-controller-" + randomSuffix()
 			labels := map[string]string{v1.LabelPackageName: name}
 			mb := &v1.MiddlewareBaseline{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}, Spec: v1.MiddlewareBaselineSpec{GVK: v1.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}}}

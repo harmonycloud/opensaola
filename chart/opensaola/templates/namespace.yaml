@@ -1,9 +1,24 @@
 {{- $dataNamespace := include "opensaola.dataNamespace" . -}}
-{{- if and .Values.config.createDataNamespace (ne $dataNamespace .Release.Namespace) }}
+{{- $manageNamespace := and .Values.config.createDataNamespace (ne $dataNamespace .Release.Namespace) -}}
+{{- if .Release.IsUpgrade -}}
+{{- /* A previous revision may own a different namespace than the new values name.
+       Check live ownership at render time, before upgrade hooks or resource pruning. */ -}}
+{{- range (lookup "v1" "Namespace" "" "").items -}}
+  {{- $annotations := .metadata.annotations | default dict -}}
+  {{- $owned := and (eq (index $annotations "meta.helm.sh/release-name") $.Release.Name) (eq (index $annotations "meta.helm.sh/release-namespace") $.Release.Namespace) -}}
+  {{- $retainedInManifest := and $manageNamespace (eq .metadata.name $dataNamespace) -}}
+  {{- if and $owned (ne .metadata.name $.Release.Namespace) (not $retainedInManifest) (ne (index $annotations "helm.sh/resource-policy") "keep") -}}
+    {{- fail (printf "data namespace %q has no Helm keep policy. First upgrade this release with config.dataNamespace=%s and config.createDataNamespace=true; after that upgrade succeeds, retry the requested change." .metadata.name .metadata.name) -}}
+  {{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if $manageNamespace }}
 apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ $dataNamespace }}
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     {{- include "opensaola.labels" . | nindent 4 }}
     app.kubernetes.io/component: data-namespace

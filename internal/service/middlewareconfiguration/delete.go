@@ -19,10 +19,12 @@ package middlewareconfiguration
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -116,24 +118,67 @@ func deleteByGVKAndName(ctx context.Context, cli client.Client, owner metav1.Obj
 		log.FromContext(ctx).Error(err, "failed to get configuration rendered resource by name", "gvk", gvk.String(), "namespace", namespace, "name", name)
 		return "", err
 	}
-	deletePolicy := resolveConfigurationDeletePolicy(configuration, obj)
-	if !shouldDeleteRenderedResource(owner, obj, configuration.Name, deletePolicy) {
-		log.FromContext(ctx).Info("skipping configuration rendered resource delete because it is not owned by OpenSaola lifecycle",
-			"gvk", gvk.String(),
-			"namespace", namespace,
-			"name", name,
-			"configuration", configuration.Name,
-			"controllerOwner", metav1.GetControllerOf(obj),
-		)
+	return retireConfigurationResource(ctx, cli, owner, obj, configuration)
+}
+
+// retireConfigurationResource uses the same observation for the policy decision
+// and mutation. A modified or recreated object must be evaluated again.
+func retireConfigurationResource(ctx context.Context, cli client.Client, owner metav1.Object, live *unstructured.Unstructured, configuration *v1.MiddlewareConfiguration) (deleteByNameResult, error) {
+	policy := resolveConfigurationDeletePolicy(configuration, live)
+	if !shouldDeleteRenderedResource(owner, live, configuration.Name, policy) {
+		if policy == v1.ConfigurationDeletePolicyOrphan && canDetachConfigurationOwner(owner, live, configuration.Name) {
+			if err := stripLiveConfigurationOwnerReference(ctx, cli, live, owner); err != nil && !errors.IsNotFound(err) {
+				return "", err
+			}
+		}
 		return deleteByNameSkipped, nil
 	}
-	err = k8s.DeleteCustomResource(ctx, cli, obj)
-	if err != nil {
-		log.FromContext(ctx).Error(err, "failed to delete configuration rendered resource by name", "gvk", gvk.String(), "namespace", namespace, "name", name)
+	uid, rv := live.GetUID(), live.GetResourceVersion()
+	if err := cli.Delete(ctx, live, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil {
+		if errors.IsNotFound(err) {
+			// The observed target is already gone. Do not broaden this into a list cleanup.
+			return deleteByNameDeleted, nil
+		}
 		return "", err
 	}
-	log.FromContext(ctx).Info("configuration rendered resource delete request submitted by name", "gvk", gvk.String(), "namespace", namespace, "name", name)
 	return deleteByNameDeleted, nil
+}
+
+// An old target can still carry a garbage-collection reference at deletion
+// time. Prefer the exact recorded identity; releases without inventory can
+// still prove a link by the app/configuration markers and the owner's UID.
+func canDetachConfigurationOwner(owner metav1.Object, live *unstructured.Unstructured, configurationName string) bool {
+	if !isOpenSaolaManagedConfiguration(owner, live, configurationName) ||
+		owner.GetUID() == "" || owner.GetNamespace() != live.GetNamespace() {
+		return false
+	}
+	if controller := metav1.GetControllerOf(live); controller != nil && controller.UID != owner.GetUID() {
+		return false
+	}
+	if !slices.ContainsFunc(live.GetOwnerReferences(), func(ref metav1.OwnerReference) bool { return ref.UID == owner.GetUID() }) {
+		return false
+	}
+	if marked := live.GetAnnotations()[v1.AnnotationConfigurationOwnerUID]; marked != "" && marked != string(owner.GetUID()) {
+		return false
+	}
+	var inventory []v1.RenderedConfigurationResource
+	switch m := owner.(type) {
+	case *v1.Middleware:
+		inventory = m.Status.RenderedConfigurationResources
+	case *v1.MiddlewareOperator:
+		inventory = m.Status.RenderedConfigurationResources
+	default:
+		return false
+	}
+	gvk := live.GroupVersionKind()
+	for _, prior := range inventory {
+		if prior.Group == gvk.Group && prior.Kind == gvk.Kind && prior.Namespace == live.GetNamespace() && prior.Name == live.GetName() {
+			return prior.ConfigurationName == configurationName && prior.OwnerUID == owner.GetUID() &&
+				prior.ResourceUID != "" && prior.ResourceUID == live.GetUID() &&
+				hasConfigurationLifecycleMarkers(owner, live, configurationName, prior.ConfigurationUID)
+		}
+	}
+	return true
 }
 
 // DeleteTemplateRenderedResources cleans up extra resources in the delete path without relying on full template rendering.
@@ -235,14 +280,13 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 
 		// Prefer deletion by rendered name
 		if renderedName != "" {
-			if delResult, delErr := deleteByGVKAndName(ctx, cli, owner, gvk, ns, renderedName, &mc); delErr == nil && delResult == deleteByNameDeleted {
-				log.FromContext(ctx).Info("configuration deleted by name, skipping fallback", "cfgName", cfg.Name, "gvk", gvk.String(), "renderedName", renderedName, "namespace", ns)
+			outcome, err := deleteByGVKAndName(ctx, cli, owner, gvk, ns, renderedName, &mc)
+			if err != nil {
+				errList = append(errList, fmt.Sprintf("configuration %s clean up %s/%s: %v", cfg.Name, ns, renderedName, err))
 				continue
-			} else if delErr == nil {
-				log.FromContext(ctx).Info("configuration not found by name, proceeding to fallback", "cfgName", cfg.Name, "gvk", gvk.String(), "renderedName", renderedName, "namespace", ns)
-			} else {
-				// Deletion failed: continue to fallback list deletion
-				log.FromContext(ctx).Info("delete failed, fallback to list", "warning", true, "gvk", gvk.String(), "namespace", ns, "renderedName", renderedName, "err", delErr)
+			}
+			if outcome != deleteByNameNotFound {
+				continue
 			}
 		}
 
@@ -254,23 +298,16 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 			continue
 		}
 		log.FromContext(ctx).Info("configuration fallback list query completed", "cfgName", cfg.Name, "gvk", gvk.String(), "namespace", ns, "items", len(items))
-		for _, item := range items {
-			deletePolicy := resolveConfigurationDeletePolicy(&mc, &item)
-			if !shouldDeleteRenderedResource(owner, &item, cfg.Name, deletePolicy) {
-				log.FromContext(ctx).Info("configuration fallback skipped object because it is not owned by OpenSaola lifecycle",
-					"cfgName", cfg.Name,
-					"gvk", gvk.String(),
-					"namespace", item.GetNamespace(),
-					"name", item.GetName(),
-					"controllerOwner", metav1.GetControllerOf(&item),
-				)
+		for i := range items {
+			item := &items[i]
+			// Several Configurations can render the same kind for this owner.
+			// A list by app label cannot identify which one's policy applies.
+			if item.GetAnnotations()[v1.LabelConfigurations] != cfg.Name {
 				continue
 			}
-			log.FromContext(ctx).Info("configuration fallback deleting object", "cfgName", cfg.Name, "gvk", gvk.String(), "namespace", item.GetNamespace(), "name", item.GetName())
-			obj := item.DeepCopy()
-			obj.SetGroupVersionKind(gvk)
-			if delErr := k8s.DeleteCustomResource(ctx, cli, obj); delErr != nil && !errors.IsNotFound(delErr) {
-				errList = append(errList, fmt.Sprintf("configuration %s delete fallback %s/%s error: %v", cfg.Name, obj.GetNamespace(), obj.GetName(), delErr))
+			item.SetGroupVersionKind(gvk)
+			if _, err := retireConfigurationResource(ctx, cli, owner, item, &mc); err != nil {
+				errList = append(errList, fmt.Sprintf("configuration %s clean up %s/%s: %v", cfg.Name, item.GetNamespace(), item.GetName(), err))
 			}
 		}
 	}

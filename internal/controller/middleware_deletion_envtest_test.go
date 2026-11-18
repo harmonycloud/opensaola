@@ -36,11 +36,6 @@ import (
 
 var _ = Describe("Owned field deletion status", func() {
 	It("keeps the generation pending after blocked deletion and retries without changing MID", func() {
-		resolver, err := k8s.NewIntentSchemaResolver(cfg)
-		Expect(err).NotTo(HaveOccurred())
-		k8s.ConfigureManagedResources(k8sClient)
-		k8s.ConfigureResourceIntents(resolver)
-		DeferCleanup(func() { k8s.ConfigureManagedResources(nil); k8s.ConfigureResourceIntents(nil) })
 		name := "owned-deletion-" + randomSuffix()
 		labels := map[string]string{v1.LabelPackageName: name}
 		baseline := &v1.MiddlewareBaseline{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}, Spec: v1.MiddlewareBaselineSpec{GVK: v1.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}}}
@@ -106,11 +101,6 @@ var _ = Describe("Owned field deletion status", func() {
 
 var _ = Describe("MID native init container execution order", func() {
 	It("merges explicitly sequenced baseline names and preserves injected steps", func() {
-		resolver, err := k8s.NewIntentSchemaResolver(cfg)
-		Expect(err).NotTo(HaveOccurred())
-		k8s.ConfigureManagedResources(k8sClient)
-		k8s.ConfigureResourceIntents(resolver)
-		DeferCleanup(func() { k8s.ConfigureManagedResources(nil); k8s.ConfigureResourceIntents(nil) })
 		name := "init-order-" + randomSuffix()
 		labels := map[string]string{v1.LabelPackageName: name}
 		image := "registry.k8s.io/pause:3.10"

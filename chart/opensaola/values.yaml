@@ -76,8 +76,8 @@ config:
   # -- Namespace where middleware package Secrets are stored. Empty defaults to the Helm release namespace.
   # -- 存放中间件包 Secret 的命名空间。为空时默认使用 Helm 发布实例命名空间。
   dataNamespace: ""
-  # -- Create config.dataNamespace when it is set and differs from the Helm release namespace.
-  # -- 当 config.dataNamespace 已设置且不同于 Helm 发布实例命名空间时，是否创建该命名空间。
+  # -- Create the separate data namespace. Helm retains it on upgrade and uninstall.
+  # -- 创建独立的数据命名空间。升级及卸载时 Helm 会保留此命名空间。
   createDataNamespace: false
   # -- Log level (0=debug, 1=info, 2=warn, 3=error)
   # -- 日志级别（0=debug，1=info，2=warn，3=error）

@@ -122,12 +122,15 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		if policyErr != nil {
 			return nil, policyErr
 		}
-		// The writer preserves live non-controller references when adopting;
-		// template references remain part of the explicit desired object.
-		if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() && disablePolicy != v1.ConfigurationDisablePolicyOrphan {
+		sameNamespace := resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace()
+		requireController := sameNamespace && configurationRequiresControllerReference(m, obj, disablePolicy)
+		if requireController {
 			if err := ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
 				return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
 			}
+		} else if sameNamespace {
+			// A template may itself include this owner, even as a non-controller.
+			obj.SetOwnerReferences(withoutConfigurationOwner(obj.GetOwnerReferences(), owner))
 		}
 
 		writer := k8s.NewManagedResourceWriter(cli)
@@ -152,8 +155,8 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		if writtenUID == "" || live.GetUID() != writtenUID {
 			return nil, fmt.Errorf("configuration target changed after publication: expected UID %q, observed %q", writtenUID, live.GetUID())
 		}
-		if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() && disablePolicy == v1.ConfigurationDisablePolicyOrphan {
-			if err := stripLiveControllerOwnerReference(ctx, cli, live, owner); err != nil {
+		if sameNamespace && !requireController {
+			if err := stripLiveConfigurationOwnerReference(ctx, cli, live, owner); err != nil {
 				return nil, err
 			}
 		}
@@ -162,48 +165,52 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		if !hasConfigurationLifecycleMarkers(owner, live, m.Name, m.GetUID()) {
 			return &renderedConfigurationApplyResult{identity: identity}, nil
 		}
+		if requireController && !metav1.IsControlledBy(live, owner) {
+			// Business field reconciliation preserves lifecycle metadata. Restore
+			// the reference when a previously orphaned target opts back in.
+			if metav1.GetControllerOf(live) != nil {
+				return nil, fmt.Errorf("configuration target %s is now controlled by another owner", client.ObjectKeyFromObject(live))
+			}
+			base := client.MergeFromWithOptions(live.DeepCopy(), client.MergeFromWithOptimisticLock{})
+			if err := ctrl.SetControllerReference(owner, live, cli.Scheme()); err != nil {
+				return nil, err
+			}
+			if err := cli.Patch(ctx, live, base); err != nil {
+				return nil, err
+			}
+			if !metav1.IsControlledBy(live, owner) {
+				return nil, fmt.Errorf("configuration target %s did not accept the controller reference", client.ObjectKeyFromObject(live))
+			}
+		}
 		inventory := &v1.RenderedConfigurationResource{
-			ConfigurationName: m.Name,
-			ConfigurationUID:  m.GetUID(),
-			Group:             live.GroupVersionKind().Group,
-			Version:           live.GroupVersionKind().Version,
-			Kind:              live.GetKind(),
-			Namespace:         live.GetNamespace(),
-			Name:              live.GetName(),
-			OwnerUID:          owner.GetUID(),
-			ResourceUID:       live.GetUID(),
-			Namespaced:        resourceIsNamespaced,
-			DisablePolicy:     disablePolicy,
+			ConfigurationName:           m.Name,
+			ConfigurationUID:            m.GetUID(),
+			Group:                       live.GroupVersionKind().Group,
+			Version:                     live.GroupVersionKind().Version,
+			Kind:                        live.GetKind(),
+			Namespace:                   live.GetNamespace(),
+			Name:                        live.GetName(),
+			OwnerUID:                    owner.GetUID(),
+			ResourceUID:                 live.GetUID(),
+			Namespaced:                  resourceIsNamespaced,
+			DisablePolicy:               disablePolicy,
+			ControllerReferenceRequired: &requireController,
 		}
 		return &renderedConfigurationApplyResult{identity: identity, inventory: inventory}, nil
 
 	case consts.HandleActionDelete:
 		old, err := k8s.GetCustomResource(ctx, cli, obj.GetName(), obj.GetNamespace(), obj.GroupVersionKind())
-		if err != nil && !errors.IsNotFound(err) {
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		if err != nil {
 			return nil, err
 		}
-		if old != nil {
-			if obj.GroupVersionKind().Kind == "CustomResourceDefinition" {
-				return nil, nil
-			}
-			deletePolicy := resolveConfigurationDeletePolicy(m, obj)
-			if !shouldDeleteRenderedResource(owner, old, m.Name, deletePolicy) {
-				log.FromContext(ctx).Info("skipping configuration rendered resource delete",
-					"configuration", m.Name,
-					"gvk", obj.GroupVersionKind().String(),
-					"namespace", old.GetNamespace(),
-					"name", old.GetName(),
-					"deletePolicy", deletePolicy,
-					"controllerOwner", metav1.GetControllerOf(old),
-				)
-				return nil, nil
-			}
-			if err = k8s.DeleteCustomResource(ctx, cli, obj); err != nil && !errors.IsNotFound(err) {
-				log.FromContext(ctx).Error(err, fmt.Sprintf("failed to delete %s", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
-				return nil, fmt.Errorf("failed to delete CR: %w", err)
-			}
-			log.FromContext(ctx).V(1).Info(fmt.Sprintf("deleted %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
+		if obj.GetKind() == "CustomResourceDefinition" {
+			return nil, nil
 		}
+		_, err = retireConfigurationResource(ctx, cli, owner, old, m)
+		return nil, err
 	}
 	return nil, nil
 }

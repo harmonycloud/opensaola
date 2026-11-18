@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func inventoryTestOwner() *v1.Middleware {
@@ -91,7 +92,7 @@ func inventoryLiveObject(owner *v1.Middleware, resource v1.RenderedConfiguration
 	return obj
 }
 
-func inventoryTestClient(t *testing.T, objects ...client.Object) client.Client {
+func inventoryTestClient(t *testing.T, objects ...client.Object) client.WithWatch {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := v1.AddToScheme(scheme); err != nil {
@@ -236,13 +237,20 @@ func TestNormalizeRenderedConfigurationResourcesRejectsSharedIdentity(t *testing
 func TestDeleteDisabledCrossNamespaceResources(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name          string
-		mutate        func(*unstructured.Unstructured)
-		sameNamespace bool
-		deleted       bool
+		name              string
+		mutate            func(*unstructured.Unstructured)
+		sameNamespace     bool
+		referenceRequired *bool
+		deleted           bool
 	}{
 		{name: "cross namespace valid identity", deleted: true},
-		{name: "same namespace missing controller", sameNamespace: true},
+		{name: "legacy same namespace missing controller", sameNamespace: true},
+		{name: "same namespace required controller missing", sameNamespace: true, referenceRequired: boolPtr(true)},
+		{name: "same namespace intentionally orphaned with valid identity", sameNamespace: true, referenceRequired: boolPtr(false), deleted: true},
+		{name: "same namespace intentionally orphaned then replaced", sameNamespace: true, referenceRequired: boolPtr(false), mutate: func(o *unstructured.Unstructured) { o.SetUID("replacement") }},
+		{name: "same namespace intentionally orphaned then claimed", sameNamespace: true, referenceRequired: boolPtr(false), mutate: func(o *unstructured.Unstructured) {
+			o.SetOwnerReferences([]metav1.OwnerReference{redisClusterOwnerRef()})
+		}},
 		{name: "replacement UID", mutate: func(o *unstructured.Unstructured) { o.SetUID("replacement") }},
 		{name: "wrong owner UID", mutate: func(o *unstructured.Unstructured) {
 			a := o.GetAnnotations()
@@ -264,6 +272,7 @@ func TestDeleteDisabledCrossNamespaceResources(t *testing.T) {
 			t.Parallel()
 			owner := inventoryTestOwner()
 			resource := inventoryTestResource(true, v1.ConfigurationDisablePolicyDelete)
+			resource.ControllerReferenceRequired = tt.referenceRequired
 			if !tt.sameNamespace {
 				resource.Namespace = "another-namespace"
 			}
@@ -284,5 +293,40 @@ func TestDeleteDisabledCrossNamespaceResources(t *testing.T) {
 				t.Fatalf("expected protected resource, got %v", err)
 			}
 		})
+	}
+}
+
+func TestDisableCleanupFencesOwnershipHandoff(t *testing.T) {
+	ctx := context.Background()
+	owner := inventoryTestOwner()
+	resource := inventoryTestResource(true, v1.ConfigurationDisablePolicyDelete)
+	resource.ControllerReferenceRequired = boolPtr(false)
+	live := inventoryLiveObject(owner, resource, resource.ResourceUID, false)
+	cli := interceptor.NewClient(inventoryTestClient(t, live), interceptor.Funcs{
+		Delete: func(ctx context.Context, next client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			preconditions := (&client.DeleteOptions{}).ApplyOptions(opts).Preconditions
+			if preconditions == nil || preconditions.UID == nil || *preconditions.UID != live.GetUID() ||
+				preconditions.ResourceVersion == nil || *preconditions.ResourceVersion != obj.GetResourceVersion() {
+				t.Fatal("delete did not fence the observed UID and resourceVersion")
+			}
+			if err := next.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
+				t.Fatal(err)
+			}
+			live.SetOwnerReferences([]metav1.OwnerReference{redisClusterOwnerRef()})
+			if err := next.Update(ctx, live); err != nil {
+				t.Fatal(err)
+			}
+			return next.Delete(ctx, obj, opts...)
+		},
+	})
+	previous := []v1.RenderedConfigurationResource{resource}
+	if err := DeleteDisabledRenderedConfigurationResources(ctx, cli, owner, previous, nil); !apierrors.IsConflict(err) {
+		t.Fatalf("expected delete conflict on transfer of ownership, got %v", err)
+	}
+	if err := DeleteDisabledRenderedConfigurationResources(ctx, cli, owner, previous, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := getInventoryObject(ctx, cli, resource); err != nil {
+		t.Fatalf("transferred resource should still exist: %v", err)
 	}
 }

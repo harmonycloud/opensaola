@@ -176,7 +176,10 @@ func deleteDisabledRenderedConfigurationResource(ctx context.Context, cli client
 		)
 		return nil
 	}
-	if err := k8s.DeleteCustomResource(ctx, cli, obj); err != nil && !apierrors.IsNotFound(err) {
+	// Fence the identity and ownership checks above against both replacement
+	// and an in-place controller handoff before the API server receives DELETE.
+	uid, rv := obj.GetUID(), obj.GetResourceVersion()
+	if err := cli.Delete(ctx, obj, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete disabled configuration resource %s %s/%s: %w", gvk.String(), resource.Namespace, resource.Name, err)
 	}
 	log.FromContext(ctx).Info("deleted disabled configuration resource",

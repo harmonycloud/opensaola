@@ -386,6 +386,10 @@ verify-chart-crds: ## Verify Helm chart CRDs match generated CRDs.
 test-helm-images: ## Test Helm image prefix resolution.
 	bash hack/helm-image-resolution_test.sh
 
+.PHONY: test-helm-data-namespace
+test-helm-data-namespace: ## Test Helm data namespace retention on a disposable Kind cluster.
+	bash hack/helm-data-namespace_test.sh
+
 .PHONY: helm-check
 helm-check: helm-lint helm-template helm-package verify-chart-crds test-helm-images ## Run all Helm chart checks.
 

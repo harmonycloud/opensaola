@@ -73,6 +73,9 @@ type RenderedConfigurationResource struct {
 	ResourceUID types.UID `json:"resourceUID,omitempty"`
 	// Namespaced records whether the rendered resource was namespaced when it was applied.
 	Namespaced bool `json:"namespaced,omitempty"`
+	// ControllerReferenceRequired records whether lifecycle cleanup expects this owner's
+	// controller reference. Older same-namespace entries without this field require one.
+	ControllerReferenceRequired *bool `json:"controllerReferenceRequired,omitempty"`
 	// DisablePolicy is the resolved lifecycle policy used when this resource stops rendering.
 	// Valid values are delete and orphan; without an explicit policy, PVC and PV
 	// resources default to orphan while all other resource types default to delete.

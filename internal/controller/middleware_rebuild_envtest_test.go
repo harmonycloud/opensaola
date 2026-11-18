@@ -30,7 +30,6 @@ import (
 	"github.com/harmonycloud/opensaola/internal/k8s/kubeclient"
 	"github.com/harmonycloud/opensaola/internal/service/middleware"
 	"github.com/harmonycloud/opensaola/internal/service/synchronizer"
-	"github.com/harmonycloud/opensaola/internal/service/watcher"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -48,11 +47,6 @@ import (
 
 var _ = Describe("Missing primary resource event recovery", func() {
 	It("routes real informer deletion through the owner queue and retries only safe primary recovery", func() {
-		resolver, err := k8s.NewIntentSchemaResolver(cfg)
-		Expect(err).NotTo(HaveOccurred())
-		k8s.ConfigureManagedResources(k8sClient)
-		k8s.ConfigureResourceIntents(resolver)
-		DeferCleanup(func() { k8s.ConfigureManagedResources(nil); k8s.ConfigureResourceIntents(nil) })
 		name := "rebuild-queue-" + randomSuffix()
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
@@ -94,7 +88,7 @@ var _ = Describe("Missing primary resource event recovery", func() {
 		DeferCleanup(func() {
 			stop()
 			Eventually(done).WithTimeout(10 * time.Second).Should(Receive(BeNil()))
-			watcher.StopAllCRWatchers()
+			stopSuiteWatchers()
 		})
 		Expect(k8sClient.Create(ctx, mid)).To(Succeed())
 		key := client.ObjectKeyFromObject(mid)

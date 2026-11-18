@@ -32,12 +32,13 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	kjson "sigs.k8s.io/json"
 )
 
-// ErrPreActionNotRenderSafe is returned when a pause snapshot or B/L/D merge
-// would need to execute a PreAction step with an external side effect. Those
-// render paths may run repeatedly and must never execute commands, HTTP
-// actions, or Kubernetes writes.
+// ErrPreActionNotRenderSafe is returned when desired-state rendering for
+// pause recovery encounters a PreAction step without a CUE patch. Rendering
+// may run repeatedly and must never execute commands, HTTP actions, or
+// Kubernetes writes. Pause snapshot capture does not render PreActions.
 var ErrPreActionNotRenderSafe = errors.New("pre-action is not render-safe")
 
 func HandlePreActions(ctx context.Context, cli client.Client, m tools.Quoter) (err error) {
@@ -46,8 +47,8 @@ func HandlePreActions(ctx context.Context, cli client.Client, m tools.Quoter) (e
 
 // RenderPreActions applies PreAction CUE patches to an in-memory object for
 // desired-state rendering. It is intentionally strict: every step must have a
-// CUE patch, because rendering a pause snapshot or retrying a B/L/D merge must
-// not run commands, HTTP actions, or Kubernetes writes.
+// CUE patch, because rendering desired state for merge recovery or its retries
+// must not run commands, HTTP actions, or Kubernetes writes.
 func RenderPreActions(ctx context.Context, cli client.Client, m tools.Quoter) error {
 	return handlePreActions(ctx, cli, m, true)
 }
@@ -203,7 +204,7 @@ func executePreAction(ctx context.Context, cli client.Client, obj *unstructured.
 		}
 		quoter = middleware
 		parameters = make(map[string]any)
-		err = json.Unmarshal(middleware.Spec.Parameters.Raw, &parameters)
+		err = kjson.UnmarshalCaseSensitivePreserveInts(middleware.Spec.Parameters.Raw, &parameters)
 		if err != nil {
 			return err
 		}
@@ -223,7 +224,7 @@ func executePreAction(ctx context.Context, cli client.Client, obj *unstructured.
 	}
 
 	if m.Spec.Necessary.Raw != nil {
-		err = json.Unmarshal(m.Spec.Necessary.Raw, &templateValues.Necessary)
+		err = kjson.UnmarshalCaseSensitivePreserveInts(m.Spec.Necessary.Raw, &templateValues.Necessary)
 		if err != nil {
 			return err
 		}
@@ -329,21 +330,18 @@ func executePreActionCue(ctx context.Context, cueString string, obj *unstructure
 	}
 
 	cueMap := make(map[string]interface{})
-	err = json.Unmarshal(cueJson, &cueMap)
+	err = kjson.UnmarshalCaseSensitivePreserveInts(cueJson, &cueMap)
 	if err != nil {
 		return fmt.Errorf("unmarshal cue error: %w", err)
 	}
 
 	objMap := make(map[string]interface{})
-	err = json.Unmarshal(objJson, &objMap)
+	err = kjson.UnmarshalCaseSensitivePreserveInts(objJson, &objMap)
 	if err != nil {
 		return fmt.Errorf("unmarshal obj error: %w", err)
 	}
 
 	patches := tools.MergeMap(objMap, cueMap)
-	if err != nil {
-		return fmt.Errorf("merge merge patches error: %w", err)
-	}
 
 	patcheBytes, err := json.Marshal(patches)
 	if err != nil {

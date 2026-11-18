@@ -133,36 +133,9 @@ func (w *ManagedResourceWriter) checkConfigurationClaimants(ctx context.Context,
 	return nil
 }
 
-func (w *ManagedResourceWriter) adoptConfigurationResource(ctx context.Context, owner client.Object, live, desired *unstructured.Unstructured, configuration string) error {
-	if w.IntentSchemas == nil {
-		return managedIdentityError(owner, live, configuration, "configuration adoption requires a resource schema resolver")
-	}
-	converter, hash, err := w.IntentSchemas.Resolve(ctx, desired.GroupVersionKind())
-	if err != nil {
-		return err
-	}
-	input := intentObject(desired)
-	// Never load the old lifecycle's record as a deletion baseline. Overlay
-	// this owner's explicit desired values while preserving omitted fields.
-	merged, _, err := MergeResourceIntent(converter, nil, intentObject(live), input, nil)
-	if err != nil {
-		return err
-	}
-	after := live.DeepCopy()
-	for key, value := range merged.Object {
-		if key != "metadata" {
-			after.Object[key] = value
-		}
-	}
-	labels := merged.GetLabels()
-	if fence := live.GetLabels()[LabelResourceIntentGCFence]; fence != "" {
-		if labels == nil {
-			labels = map[string]string{}
-		}
-		labels[LabelResourceIntentGCFence] = fence
-	}
-	after.SetLabels(labels)
-	after.SetAnnotations(merged.GetAnnotations())
+// adoptConfigurationReferences replaces the obsolete controller reference and
+// retains independent non-controller references from the directly observed target.
+func adoptConfigurationReferences(after, live, desired *unstructured.Unstructured) {
 	// Work from the directly read references, not a possibly cached service
 	// snapshot. Only the obsolete controller reference is replaced or removed.
 	var refs []metav1.OwnerReference
@@ -185,34 +158,4 @@ func (w *ManagedResourceWriter) adoptConfigurationResource(ctx context.Context, 
 		}
 	}
 	after.SetOwnerReferences(refs)
-	if err := verifyIntentIdentity(owner, after, desired, configuration); err != nil {
-		return err
-	}
-	accepted, err := w.validateIntentPatch(ctx, live, after)
-	if err != nil {
-		return err
-	}
-	effective, err := CaptureResourceIntentDefaults(converter, input, input, intentObject(after), intentObject(accepted))
-	if err != nil {
-		return err
-	}
-	prepared, err := w.prepareResourceIntent(ctx, owner, live, desired, configuration, hash, nil, effective)
-	if err != nil {
-		return err
-	}
-	// Recheck owner suspension/generation and competing claims after dry-run
-	// and Secret preparation. The target UID/RV is checked by the final patch.
-	if _, err = w.freshWriteOwner(ctx, owner); err == nil {
-		_, err = w.configurationNeedsAdoption(ctx, owner, live, desired, configuration)
-	}
-	if err != nil {
-		w.discardIntentRecord(ctx, prepared)
-		return err
-	}
-	setIntentPointer(after, prepared.Name)
-	if err := w.commitIntentPatch(ctx, live, after); err != nil {
-		w.cleanupUncommittedIntent(ctx, live, prepared, err)
-		return err
-	}
-	return nil
 }

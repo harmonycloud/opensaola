@@ -178,6 +178,73 @@ func TestCauseCategory_ImagePullRegistryTLSPrecedence(t *testing.T) {
 	}
 }
 
+func TestCauseCategory_ResourceIntentPrecedence(t *testing.T) {
+	t.Parallel()
+
+	const path = ".spec.template.spec.containers[name=tls-registry].env[name=permission]"
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "blocked deletion overrides field path keywords",
+			err:  fmt.Errorf("apply custom resource: %w", errors.New("resource intent deletion blocked: "+path+" (owned value was changed)")),
+			want: "Conflict",
+		},
+		{
+			name: "unfulfilled deletion overrides field path keywords",
+			err:  fmt.Errorf("apply custom resource: %w", errors.New("resource did not fulfill intended deletions at "+path)),
+			want: "Validation",
+		},
+		{
+			name: "unfulfilled declaration overrides field path keywords",
+			err:  fmt.Errorf("apply custom resource: %w", errors.New("resource did not converge to its declared fields at "+path)),
+			want: "Validation",
+		},
+		{
+			name: "unfulfilled declaration without path",
+			err:  errors.New("resource did not converge to its declared fields"),
+			want: "Validation",
+		},
+		{
+			name: "joined deletion and compensation failure",
+			err:  errors.Join(errors.New("resource did not fulfill intended deletions at "+path), errors.New("restore previous intent pointer: template update failed")),
+			want: "Validation",
+		},
+		{
+			name: "API forbidden overrides blocked deletion",
+			err: errors.Join(errors.New("resource intent deletion blocked: "+path),
+				apiErrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, "history", errors.New("cannot patch history"))),
+			want: "RBACForbidden",
+		},
+		{
+			name: "API unauthorized overrides failed declaration",
+			err:  fmt.Errorf("resource did not converge to its declared fields at %s: %w", path, apiErrors.NewUnauthorized("authentication required")),
+			want: "RBACForbidden",
+		},
+		{
+			name: "API conflict overrides failed deletion",
+			err: errors.Join(errors.New("resource did not fulfill intended deletions at "+path),
+				apiErrors.NewConflict(schema.GroupResource{Resource: "secrets"}, "history", errors.New("resource version conflict"))),
+			want: "Conflict",
+		},
+		{
+			name: "API validation overrides blocked deletion",
+			err:  fmt.Errorf("resource intent deletion blocked: %s: %w", path, apiErrors.NewBadRequest("invalid write")),
+			want: "Validation",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := CauseCategory(tt.err); got != tt.want {
+				t.Fatalf("CauseCategory() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCauseCategory_KubernetesAPIStatus(t *testing.T) {
 	t.Parallel()
 

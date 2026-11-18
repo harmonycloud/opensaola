@@ -8,7 +8,7 @@
 ## 适用范围与保证
 
 - `merge` 只适用于 MID，自动采纳其**主实际 CR `spec`** 中暂停期间产生的变更。
-- **PreAction 边界：**恢复时的期望态渲染会在内存中的 MID 副本上重放仅含 CUE 的 PreAction，因此其对主 CR `spec` 的影响与正常主 CR 写入一致，且不会执行命令、HTTP 操作或 Kubernetes 写入。若任一 PreAction 含非 CUE 步骤（例如 CMD 或 HTTP），该 MID 的 `merge` 会失败关闭；应改为纯 CUE 预动作、将结果固化为 MID/Baseline 的显式期望值，或仅在明确接受覆盖暂停期间变更时使用 `apply`。
+- **PreAction 边界：**暂停捕获只读取实际 CR，不渲染或执行 PreAction。`merge` 恢复时，期望态渲染会在内存中的 MID 副本上重放 CUE PreAction，使其对主 CR `spec` 的影响与正常主 CR 写入一致；每一步都必须有非空 CUE。没有 CUE、需要执行 CMD、HTTP 等非 CUE 操作的步骤会使 `merge` 失败关闭，渲染过程不会执行这些外部操作或 Kubernetes 写入。应改为纯 CUE 预动作、将结果固化为 MID/Baseline 的显式期望值，或仅在明确接受覆盖暂停期间变更时使用 `apply`。
 - 不自动采纳 CR metadata、Configuration、PreAction 或 MiddlewareOperator 的变更；这些资源需要分别回写期望配置。
 - 暂停开始时的实际 `spec` 和旧 overrides 保存在 MID 同命名空间的不可变 Secret，复用快速 zstd 压缩（压缩无收益时保存 JSON）。`.status.reconcilePause` 只保存 `snapshotSecret` 引用、目标身份、hash 和时间，不保存完整内容，也不依赖进程内缓存。
 - 不设应用层快照大小上限，由 Kubernetes 校验存储后的 Secret 和资源大小。暂停开始时通过 GET 保存实际 `spec`；恢复时只比较该快照与当前实际 `spec`。暂停前已存在且没有变化的默认字段、`null` 和已有漂移不会采纳到 MID。关联列表按 API schema 的键比较，set 按成员比较，schema 声明为 atomic 的值按整体处理。
@@ -48,7 +48,7 @@ kubectl get mid <mid-name> -n <namespace> -o json | jq '{
 
 ### 4. 使用 `merge` 恢复（PreAction 仅含 CUE 步骤）
 
-请求 `merge` 前，确认所有已配置的 PreAction 都仅含 CUE 步骤。CUE 预动作会在内存中重放，因此可以修改主 CR 的 `spec`；若含 CMD、HTTP 或其他非 CUE 步骤，控制器会安全拒绝 `merge`，请按[适用范围与保证](#适用范围与保证)中的替代方案处理。
+请求 `merge` 前，确认所有已配置的 PreAction 每一步都有非空 CUE。CUE 预动作会在内存中重放，因此可以修改主 CR 的 `spec`；没有 CUE、需要执行 CMD、HTTP 等非 CUE 操作的步骤会使控制器拒绝 `merge`，请按[适用范围与保证](#适用范围与保证)中的替代方案处理。
 
 保留暂停注解，并请求恢复策略：
 
@@ -119,6 +119,28 @@ kubectl annotate mo <mo-name> -n <namespace> \
 ```
 
 恢复 MO 前，如需保留暂停期间的修改，应先更新它的期望配置。关联 MID 独立管理，必须按上面的 MID 流程分别暂停和恢复。
+
+## 历史实现对比
+
+2026-10-14 的 `78adfe0` 将暂停恢复切换为实际状态快照和期间变更采纳，`v1.4.0` 已包含该变更。下表的旧实现以其父提交 `d97a165` 为准；当前操作使用上面的步骤。
+
+| 判断项 | 旧实现 | 当前实现 |
+|--------|--------|----------|
+| 暂停基线 | 暂停时渲染的期望 `spec` | 暂停时读取的实际 CR `spec` |
+| 存储与确认 | MID status 内的 `desiredSpec` | `.status.reconcilePause.snapshotSecret` 指向同命名空间的有效不可变 Secret；实际 spec 和暂停前 overrides 保存在 Secret 中 |
+| 合并规则 | B 为暂停时期望、L 为恢复前实际、D 为当前期望；L=B 时取 D，D=B 时取 L，L=D 时接受共同值，其余差异路径冲突 | 比较暂停开始与恢复前的实际 spec，仅将期间增删改应用到当前期望 |
+| 同路径双方修改 | 最终值不同且均偏离 B 时，报告 `ReconcileAdoptionConflict` 并保持暂停 | 本次 `merge` 采用实际 CR 的期间变更；其他当前期望保留 |
+| 暂停前已有默认值与漂移 | 可能因实际与渲染期望不同而被采纳 | 暂停期间未变化就不采纳 |
+| 列表与 null | 数组整体比较；观察到的实际 null 视为基线值 | 列表遵循 API schema；未变化 null 不采纳，实际发生的变化按 schema 比较 |
+| PreAction | 暂停捕获和恢复合并都需要渲染，均受 CUE 渲染限制 | 暂停捕获不渲染；恢复合并才执行内存 CUE 渲染 |
+| 大小限制 | 快照期望、恢复前实际 spec、非空 override 的渲染基线各有 256 KiB 应用限制 | 无这些应用层上限，由 Kubernetes 校验资源大小 |
+| 合并重试 | 使用当前 MID overrides，可能带入上轮中间采纳结果 | 从快照中的 `previousOverrides` 重算，排除已撤回的中间修改 |
+
+例如，暂停开始时实际与期望副本数都是 3，期间实际改为 5、MID 期望改为 4：旧实现报告冲突，当前 `merge` 得到 5。恢复后再显式把 MID 期望从 4 改成 6，则新期望 6 生效。
+
+另一个例子是暂停前期望为 3、实际已漂移为 2，且暂停期间没有修改：旧实现可能采纳 2；当前实现没有观察到期间变化，使用当前期望 3。
+
+MID 显式选择 `merge`/`apply`、无策略保持保护、写入前核对实际 spec、MO 独立暂停恢复的规则保持不变。只有旧 `desiredSpec` 快照的会话按[采纳失败](#采纳失败)中的升级处理步骤恢复，不能把旧期望快照转换为实际基线。
 
 ## 关联文档
 

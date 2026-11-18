@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"runtime"
 
 	"cuelang.org/go/cue"
@@ -31,7 +32,6 @@ import (
 	"github.com/harmonycloud/opensaola/internal/k8s/kubeclient"
 	"github.com/harmonycloud/opensaola/internal/service/status"
 	"github.com/harmonycloud/opensaola/pkg/tools"
-	"github.com/harmonycloud/opensaola/pkg/tools/ctxkeys"
 	corev1 "k8s.io/api/core/v1"
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,7 +43,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/yaml"
+	kjson "sigs.k8s.io/json"
 )
 
 // executeCue executes a CUE step
@@ -173,30 +173,8 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 
 			msg = kubectlExecSuccessMessage(execCommand, stdout.Bytes())
 
-			output := stdout.Bytes()
 			if step.Output.Expose {
-				stepMap := ctxkeys.StepFrom(*ctx)
-				stepEntry := make(map[string]interface{})
-				stepMap[step.Name] = stepEntry
-
-				var outputMap = make(map[string]interface{})
-				switch step.Output.Type {
-				case "json":
-					err = json.Unmarshal(output, &outputMap)
-					if err != nil {
-						return parseExposedOutputError(step.Output.Type, step.Name)
-					}
-					stepEntry["output"] = outputMap
-				case "yaml":
-					err = yaml.Unmarshal(output, &outputMap)
-					if err != nil {
-						return parseExposedOutputError(step.Output.Type, step.Name)
-					}
-					stepEntry["output"] = outputMap
-				case "string":
-					stepEntry["output"] = string(output)
-				}
-				*ctx = ctxkeys.WithStep(*ctx, stepMap)
+				return exposeStepOutput(ctx, step, stdout.Bytes())
 			}
 		case StepTypeKubectlGet:
 			// Build CUE value
@@ -240,38 +218,15 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 			}
 
 			if step.Output.Expose {
-				stepMap := ctxkeys.StepFrom(*ctx)
-				stepEntry := make(map[string]interface{})
-				stepMap[step.Name] = stepEntry
-
-				var outputMap = make(map[string]interface{})
-				switch step.Output.Type {
-				case "json":
-					var output []byte
-					output, err = json.Marshal(obj)
-					if err != nil {
-						return err
+				entry := make(map[string]any)
+				if step.Output.Type == "json" || step.Output.Type == "yaml" {
+					var content map[string]any
+					if obj != nil {
+						content = obj.Object
 					}
-					err = json.Unmarshal(output, &outputMap)
-					if err != nil {
-						return err
-					}
-					stepEntry["output"] = outputMap
-				case "yaml":
-					var output []byte
-					output, err = yaml.Marshal(obj)
-					if err != nil {
-						return err
-					}
-					err = yaml.Unmarshal(output, &outputMap)
-					if err != nil {
-						return err
-					}
-					stepEntry["output"] = outputMap
-				case "string":
-
+					entry["output"] = exposedObjectValue(step.Output.Type, content)
 				}
-				*ctx = ctxkeys.WithStep(*ctx, stepMap)
+				storeStepOutput(ctx, step.Name, entry)
 			}
 		case StepTypeKubectlEdit:
 			// Build CUE value
@@ -326,99 +281,110 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 			if err != nil {
 				return fmt.Errorf("resource output error: %w", err)
 			}
-			outputMap, err := tools.JsonToMap(outputJson)
-			if err != nil {
-				return fmt.Errorf("json to map error: %w", err)
+			var outputMap map[string]any
+			if err := kjson.UnmarshalCaseSensitivePreserveInts(outputJson, &outputMap); err != nil {
+				return fmt.Errorf("decode action output: %w", err)
 			}
-
-			var obj = new(unstructured.Unstructured)
-			obj.SetAPIVersion(apiversion)
-			obj.SetKind(kind)
-			obj.SetName(name)
-			obj.SetNamespace(namespace)
-			obj.SetLabels(labels)
-			obj.SetAnnotations(annotations)
-
-			cr, getCRerr := k8s.GetCustomResource(*ctx, cli, name, namespace, obj.GroupVersionKind())
-			if getCRerr != nil && !apiErrors.IsNotFound(getCRerr) {
-				return getCRerr
-			}
-
-			// Create if not exists
-			if getCRerr != nil && apiErrors.IsNotFound(getCRerr) {
-				var objJson []byte
-				objJson, err = json.Marshal(obj)
-				if err != nil {
-					return fmt.Errorf("json marshal error: %w", err)
-				}
-				var objMap = make(map[string]interface{})
-				err = json.Unmarshal(objJson, &objMap)
-				if err != nil {
-					return fmt.Errorf("json unmarshal error: %w", err)
-				}
-				patch := tools.MergeMap(objMap, outputMap)
-				var patchJson []byte
-				patchJson, err = json.Marshal(patch)
-				if err != nil {
-					return fmt.Errorf("json marshal error: %w", err)
-				}
-				err = json.Unmarshal(patchJson, &obj)
-				if err != nil {
-					return fmt.Errorf("json unmarshal error: %w", err)
-				}
-				// Skip creation if spec is empty or has no keys
-				specMap, ok := obj.Object["spec"].(map[string]interface{})
-				if !ok || len(specMap) == 0 {
-					return nil
-				}
-
-				err = k8s.CreateCustomResource(*ctx, cli, obj)
-				if err != nil {
-					return fmt.Errorf("CreateCustomResource err :%w", err)
-				}
-			} else {
-
-				crAnnotations := cr.GetAnnotations()
-				for k, v := range annotations {
-					crAnnotations[k] = v
-				}
-				cr.SetAnnotations(crAnnotations)
-
-				crLabels := cr.GetLabels()
-				for k, v := range labels {
-					crLabels[k] = v
-				}
-				cr.SetLabels(crLabels)
-
-				var crJson []byte
-				crJson, err = json.Marshal(cr)
-				if err != nil {
-					return fmt.Errorf("json marshal error: %w", err)
-				}
-				var crMap = make(map[string]interface{})
-				err = json.Unmarshal(crJson, &crMap)
-				if err != nil {
-					return fmt.Errorf("json unmarshal error: %w", err)
-				}
-				patch := tools.MergeMap(crMap, outputMap)
-				var patchJson []byte
-				patchJson, err = json.Marshal(patch)
-				if err != nil {
-					return fmt.Errorf("json marshal error: %w", err)
-				}
-				err = json.Unmarshal(patchJson, cr)
-				if err != nil {
-					return fmt.Errorf("json unmarshal error: %w", err)
-				}
-				err = k8s.PatchCustomResource(*ctx, cli, cr)
-				if err != nil {
-					return fmt.Errorf("UpdateCustomResource err :%w", err)
-				}
+			target := &unstructured.Unstructured{}
+			target.SetAPIVersion(apiversion)
+			target.SetKind(kind)
+			target.SetName(name)
+			target.SetNamespace(namespace)
+			if err := editActionResource(*ctx, cli, target, labels, annotations, outputMap); err != nil {
+				return err
 			}
 		}
 	}
 
 	return nil
+}
+
+// editActionResource applies a one-off CUE overlay to exactly the object read.
+func editActionResource(ctx context.Context, cli client.Client, target *unstructured.Unstructured, labels, annotations map[string]string, output map[string]any) error {
+	live, err := k8s.GetCustomResource(ctx, cli, target.GetName(), target.GetNamespace(), target.GroupVersionKind())
+	if err != nil && !apiErrors.IsNotFound(err) {
+		return err
+	}
+	create := apiErrors.IsNotFound(err)
+	after := target.DeepCopy()
+	if !create {
+		after = live.DeepCopy()
+	}
+	if len(labels) != 0 {
+		current := after.GetLabels()
+		if current == nil {
+			current = map[string]string{}
+		}
+		maps.Copy(current, labels)
+		after.SetLabels(current)
+	}
+	if len(annotations) != 0 {
+		current := after.GetAnnotations()
+		if current == nil {
+			current = map[string]string{}
+		}
+		maps.Copy(current, annotations)
+		after.SetAnnotations(current)
+	}
+	if create {
+		after.Object = tools.MergeMap(after.Object, output)
+	} else {
+		after, err = mergeActionOutput(ctx, k8s.NewManagedResourceWriter(cli).IntentSchemas, after, output)
+		if err != nil {
+			return err
+		}
+	}
+	if after.GroupVersionKind() != target.GroupVersionKind() || client.ObjectKeyFromObject(after) != client.ObjectKeyFromObject(target) {
+		return fmt.Errorf("action output changed the target identity")
+	}
+	if create {
+		if err := k8s.ValidateActionMetadata(nil, after); err != nil {
+			return err
+		}
+		spec, _ := after.Object["spec"].(map[string]any)
+		if len(spec) == 0 {
+			return nil
+		}
+		return cli.Create(ctx, after, client.FieldOwner("opensaola-action"))
+	}
+	return k8s.PatchActionResource(ctx, cli, live, after)
+}
+
+// A one-off edit has no deletion history. Use the same list keys as the
+// shared writer for business fields. Explicit status and metadata edits keep
+// their existing semantics and are checked against the original target below.
+func mergeActionOutput(ctx context.Context, schemas k8s.IntentSchemaResolver, after *unstructured.Unstructured, output map[string]any) (*unstructured.Unstructured, error) {
+	envelope := make(map[string]any)
+	fields := make(map[string]any)
+	for key, value := range output {
+		switch key {
+		case "apiVersion", "kind", "metadata", "status":
+			envelope[key] = value
+		default:
+			fields[key] = value
+		}
+	}
+	targetGVK := after.GroupVersionKind()
+	targetKey := client.ObjectKeyFromObject(after)
+	after.Object = tools.MergeMap(after.Object, envelope)
+	if after.GroupVersionKind() != targetGVK || client.ObjectKeyFromObject(after) != targetKey {
+		return nil, fmt.Errorf("action output changed the target identity")
+	}
+	if len(fields) == 0 {
+		return after, nil
+	}
+	if schemas == nil {
+		return nil, fmt.Errorf("action field edit requires a resource schema resolver")
+	}
+	converter, _, err := schemas.Resolve(ctx, targetGVK)
+	if err != nil {
+		return nil, err
+	}
+	declaration := &unstructured.Unstructured{Object: fields}
+	declaration.SetGroupVersionKind(targetGVK)
+	declaration.SetName(targetKey.Name)
+	declaration.SetNamespace(targetKey.Namespace)
+	return k8s.OverlayActionFields(converter, after, declaration)
 }
 
 // mapCue maps CUE to JSON

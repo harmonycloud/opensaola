@@ -17,6 +17,7 @@ limitations under the License.
 package k8s
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -38,7 +39,10 @@ var ErrReconcilePauseSnapshotInvalid = errors.New("reconcile pause snapshot is i
 // The complete observed spec and pre-pause overrides belong in an owned Secret,
 // not in Middleware status. The record reuses the intent codec and collector,
 // but is explicitly distinct from a rendered-intent baseline.
+const exactPauseHashVersion = 2
+
 type reconcilePauseData struct {
+	HashVersion       int                    `json:"hashVersion,omitempty"`
 	Generation        int64                  `json:"generation"`
 	PreviousOverrides *v1.ReconcileOverrides `json:"previousOverrides,omitempty"`
 }
@@ -80,7 +84,7 @@ func (w *ManagedResourceWriter) PrepareReconcilePauseSnapshot(ctx context.Contex
 	record := resourceIntent{
 		Version: 1, PublicationProtocol: intentPublicationProtocol,
 		BaseResourceVersion: mid.ResourceVersion, OwnerUID: mid.UID, ResourceUID: live.GetUID(),
-		Desired: actual, Pause: &reconcilePauseData{Generation: mid.Generation, PreviousOverrides: mid.Spec.ReconcileOverrides.DeepCopy()},
+		Desired: actual, Pause: &reconcilePauseData{HashVersion: exactPauseHashVersion, Generation: mid.Generation, PreviousOverrides: mid.Spec.ReconcileOverrides.DeepCopy()},
 	}
 	hash, err := pauseRecordHash(&record)
 	if err != nil {
@@ -216,7 +220,16 @@ func pauseRecordHash(record *resourceIntent) (string, error) {
 	// Canonicalize RawExtension contents as well as map ordering, so immutable
 	// storage and subsequent decoding produce the same complete-record hash.
 	var normalized any
-	if err := json.Unmarshal(raw, &normalized); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	switch record.Pause.HashVersion {
+	case 0:
+		// Existing immutable records used float64 in the canonical hash.
+	case exactPauseHashVersion:
+		dec.UseNumber()
+	default:
+		return "", invalidPauseSnapshot("unknown hash format")
+	}
+	if err := dec.Decode(&normalized); err != nil {
 		return "", invalidPauseSnapshot("cannot normalize record")
 	}
 	raw, err = json.Marshal(normalized)

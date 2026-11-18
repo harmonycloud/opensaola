@@ -21,21 +21,25 @@ import (
 	"testing"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/managedfields"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 // orphanTestClient equips the fake client with an explicit RESTMapper. The
 // default fake RESTMapper cannot resolve core types, which would silently
 // skip the namespace-scoped ownerReference branch under test.
-func orphanTestClient(t *testing.T, objects ...client.Object) client.Client {
+func orphanTestClient(t *testing.T, objects ...client.Object) client.WithWatch {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := v1.AddToScheme(scheme); err != nil {
@@ -48,6 +52,40 @@ func orphanTestClient(t *testing.T, objects ...client.Object) client.Client {
 	mapper.Add(schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}, meta.RESTScopeNamespace)
 	mapper.Add(v1.GroupVersion.WithKind("Middleware"), meta.RESTScopeNamespace)
 	return fake.NewClientBuilder().WithScheme(scheme).WithRESTMapper(mapper).WithObjects(objects...).Build()
+}
+
+type orphanWriteSchemas struct{}
+
+func (orphanWriteSchemas) Resolve(context.Context, schema.GroupVersionKind) (managedfields.TypeConverter, string, error) {
+	return managedfields.NewDeducedTypeConverter(), "configmap-test", nil
+}
+
+func orphanWriteClient(t *testing.T, objects ...client.Object) client.Client {
+	t.Helper()
+	k8s.ConfigureResourceIntents(orphanWriteSchemas{})
+	t.Cleanup(func() { k8s.ConfigureResourceIntents(nil) })
+	cli := orphanTestClient(t, objects...)
+	return interceptor.NewClient(cli, interceptor.Funcs{
+		Create: func(ctx context.Context, next client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if obj.GetObjectKind().GroupVersionKind().Kind == "ConfigMap" && len((&client.CreateOptions{}).ApplyOptions(opts).DryRun) == 0 {
+				obj.SetUID("created-configmap")
+			}
+			return next.Create(ctx, obj, opts...)
+		},
+		Patch: func(ctx context.Context, next client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if len((&client.PatchOptions{}).ApplyOptions(opts).DryRun) > 0 {
+				live := &unstructured.Unstructured{}
+				live.SetGroupVersionKind(obj.GetObjectKind().GroupVersionKind())
+				if err := next.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
+					return err
+				}
+				// The fake client omits the dry-run response. Patch a detached
+				// tracker to simulate admission without changing the original.
+				return fake.NewClientBuilder().WithScheme(next.Scheme()).WithObjects(live).Build().Patch(ctx, obj, patch)
+			}
+			return next.Patch(ctx, obj, patch, opts...)
+		},
+	})
 }
 
 const orphanTestConfigMapTemplate = `
@@ -77,8 +115,8 @@ func fetchAppliedConfigMap(t *testing.T, cli client.Client) *corev1.ConfigMap {
 }
 
 func TestHandleOrphanPolicySkipsControllerOwnership(t *testing.T) {
-	t.Parallel()
-	cli := orphanTestClient(t, testMiddleware())
+
+	cli := orphanWriteClient(t, testMiddleware())
 	cfg := orphanTestConfig(map[string]string{
 		v1.AnnotationConfigurationDisablePolicy: v1.ConfigurationDisablePolicyOrphan,
 	})
@@ -92,8 +130,8 @@ func TestHandleOrphanPolicySkipsControllerOwnership(t *testing.T) {
 }
 
 func TestHandleDefaultPolicyTakesControllerOwnership(t *testing.T) {
-	t.Parallel()
-	cli := orphanTestClient(t, testMiddleware())
+
+	cli := orphanWriteClient(t, testMiddleware())
 	if _, err := Handle(context.Background(), cli, testMiddleware(), consts.HandleActionPublish, orphanTestConfig(nil)); err != nil {
 		t.Fatalf("handle default configuration: %v", err)
 	}
@@ -105,7 +143,7 @@ func TestHandleDefaultPolicyTakesControllerOwnership(t *testing.T) {
 }
 
 func TestHandleOrphanPolicyStripsPriorControllerOwnership(t *testing.T) {
-	t.Parallel()
+
 	existing := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "shared-sample",
@@ -115,7 +153,7 @@ func TestHandleOrphanPolicyStripsPriorControllerOwnership(t *testing.T) {
 			OwnerReferences: []metav1.OwnerReference{middlewareOwnerRef()},
 		},
 	}
-	cli := orphanTestClient(t, testMiddleware(), existing)
+	cli := orphanWriteClient(t, testMiddleware(), existing)
 	cfg := orphanTestConfig(map[string]string{
 		v1.AnnotationConfigurationDisablePolicy: v1.ConfigurationDisablePolicyOrphan,
 	})

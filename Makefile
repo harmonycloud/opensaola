@@ -189,9 +189,9 @@ vet: ## Run go vet against code.
 
 # ---------------------------------------------------------------
 # Testing Tiers:
-#   make test          -- Unit tests (excludes controller envtest and e2e)
+#   make test          -- Unit tests (includes controller unit tests)
 #   make test-race     -- Unit tests with Go race detector
-#   make test-envtest  -- Controller integration tests (requires setup-envtest)
+#   make test-envtest  -- API server integration tests (requires setup-envtest)
 #   make test-e2e      -- E2E tests on existing Kind cluster
 #   make test-e2e-smoke-- E2E tests (auto-creates/destroys Kind cluster)
 #   make bench         -- Performance benchmarks
@@ -213,7 +213,7 @@ test-release-automation:
 
 .PHONY: test
 test: test-makefile test-release-automation manifests generate fmt vet ## Run tests.
-	go test $$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v '^$$' | grep -v /e2e | grep -v /internal/controller) -coverprofile cover.out
+	go test $$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v '^$$' | grep -v /e2e) -coverprofile cover.out
 
 .PHONY: coverage
 coverage: test ## Open test coverage report in browser.
@@ -221,11 +221,19 @@ coverage: test ## Open test coverage report in browser.
 
 .PHONY: test-race
 test-race: manifests generate fmt vet ## Run tests with race detector.
-	go test -race $$(go list ./... | grep -v /e2e | grep -v /internal/controller) -count=1
+	go test -race $$(go list ./... | grep -v /e2e) -count=1
 
 .PHONY: test-envtest
-test-envtest: manifests generate setup-envtest ## Run envtest integration tests only.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -tags envtest ./internal/controller/... ./internal/k8s/... ./internal/service/middlewareconfiguration/... -v -count=1
+test-envtest: manifests generate setup-envtest ## Run all internal tests with envtest enabled.
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -tags envtest ./internal/... -v -count=1
+
+# Field management release checks use dedicated disposable Kind clusters.
+.PHONY: test-fields-redis test-fields-kafka
+test-fields-redis: ## Verify field management with Redis on a fresh Kind cluster.
+	bash hack/test-field-workload.sh redis
+
+test-fields-kafka: ## Verify the supplied original Kafka package on a fresh Kind cluster.
+	bash hack/test-field-workload.sh kafka
 
 .PHONY: bench
 bench: ## Run Go benchmarks (fast, no external deps).

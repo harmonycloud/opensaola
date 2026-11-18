@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -252,6 +253,19 @@ func TestLocalIntentReconcile(t *testing.T) {
 				t.Fatal(err)
 			}
 			unstructured.RemoveNestedField(desired.Object, "spec", "template", "spec", "volumes")
+			if legacy {
+				beforeDeletion := localIntentGet(t, ctx, cli, desired)
+				if err := w.Reconcile(ctx, owner, desired, ""); !apierrors.IsInvalid(err) || !strings.Contains(err.Error(), "secret.secretName") {
+					t.Fatalf("unrecorded Secret defaultMode must reject the incomplete Secret volume: %v", err)
+				}
+				live := localIntentGet(t, ctx, cli, desired)
+				localGCCheckBusiness(t, beforeDeletion, live)
+				if live.GetAnnotations()[k8s.AnnotationResourceIntent] != beforeDeletion.GetAnnotations()[k8s.AnnotationResourceIntent] {
+					t.Fatal("rejected legacy volume removal advanced history")
+				}
+				t.Log("pre-record defaultMode remains unclaimed; API validation rejects the complete update without partial deletion")
+				return
+			}
 			if err := w.Reconcile(ctx, owner, desired, ""); err != nil {
 				t.Fatal(err)
 			}
@@ -267,10 +281,7 @@ func TestLocalIntentReconcile(t *testing.T) {
 			}
 			volumes, _, _ := unstructured.NestedSlice(live.Object, "spec", "template", "spec", "volumes")
 			if len(volumes) != 0 {
-				if !legacy {
-					t.Fatalf("new SSA resource defaulted Secret volume must be deleted: %v", volumes)
-				}
-				t.Logf("LIMITATION: defaulted secret volume retained conservatively; env and volumeMount cleanup succeeded: %v", volumes)
+				t.Fatalf("new SSA resource defaulted Secret volume must be deleted: %v", volumes)
 			} else {
 				t.Log("secret env, volumeMount and volume removed")
 			}
@@ -290,10 +301,15 @@ func TestLocalIntentReconcile(t *testing.T) {
 					t.Fatal(err)
 				}
 				localIntentPatch(t, ctx, cli, enabledDesired, "manager", `[{"op":"replace","path":"/spec/template/spec/volumes/0/secret/defaultMode","value":256},{"op":"add","path":"/spec/template/spec/volumes/0/secret/optional","value":true}]`)
-				if err := w.Reconcile(ctx, owner, desired, ""); err != nil {
-					t.Fatal(err)
+				beforeConflict := localIntentGet(t, ctx, cli, desired)
+				if err := w.Reconcile(ctx, owner, desired, ""); err == nil {
+					t.Fatal("externally modified historical default must block the complete resource update")
 				}
 				live = localIntentGet(t, ctx, cli, desired)
+				localGCCheckBusiness(t, beforeConflict, live)
+				if live.GetAnnotations()[k8s.AnnotationResourceIntent] != beforeConflict.GetAnnotations()[k8s.AnnotationResourceIntent] {
+					t.Fatal("blocked deletion advanced history")
+				}
 				volumes, _, _ = unstructured.NestedSlice(live.Object, "spec", "template", "spec", "volumes")
 				if len(volumes) != 1 {
 					t.Fatalf("externally edited Secret volume was deleted: %v", volumes)
@@ -307,7 +323,7 @@ func TestLocalIntentReconcile(t *testing.T) {
 				if mode != 256 || !optional {
 					t.Fatalf("external defaultMode/optional drift lost: mode=%d optional=%t", mode, optional)
 				}
-				t.Log("repeated unchanged defaulted volumes deleted; externally modified defaultMode and added optional preserved")
+				t.Log("repeated unchanged defaulted volumes deleted; external defaultMode conflict rejected the entire update")
 			}
 		})
 	}
@@ -331,7 +347,7 @@ func TestLocalIntentReconcile(t *testing.T) {
 		}
 		t.Log("legacy AUTH intentionally retained: this is protected ambiguity, not successful cleanup")
 	})
-	t.Run("externally_changed_deleted_key_is_preserved", func(t *testing.T) {
+	t.Run("externally_changed_deleted_key_blocks_entire_write", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 		owner := localIntentOwner(t, ctx, cli)
@@ -341,17 +357,22 @@ func TestLocalIntentReconcile(t *testing.T) {
 			t.Fatal(err)
 		}
 		localIntentPatch(t, ctx, cli, desired, "external-controller", `[{"op":"replace","path":"/data/AUTH","value":"external-value"}]`)
+		beforeConflict := localIntentGet(t, ctx, cli, desired)
 		desired.Object["data"] = map[string]interface{}{"KEEP": "after"}
-		if err := w.Reconcile(ctx, owner, desired, ""); err != nil {
-			t.Fatal(err)
+		if err := w.Reconcile(ctx, owner, desired, ""); err == nil {
+			t.Fatal("external edit did not block deletion")
 		}
 		live := localIntentGet(t, ctx, cli, desired)
+		localGCCheckBusiness(t, beforeConflict, live)
+		if live.GetAnnotations()[k8s.AnnotationResourceIntent] != beforeConflict.GetAnnotations()[k8s.AnnotationResourceIntent] {
+			t.Fatal("blocked deletion advanced history")
+		}
 		value, _, _ := unstructured.NestedString(live.Object, "data", "AUTH")
 		if value != "external-value" {
 			t.Fatalf("external change was deleted or overwritten: %q", value)
 		}
 	})
-	t.Run("external_apply_shared_key_is_preserved", func(t *testing.T) {
+	t.Run("external_apply_shared_key_blocks_entire_write", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 		owner := localIntentOwner(t, ctx, cli)
@@ -366,11 +387,16 @@ func TestLocalIntentReconcile(t *testing.T) {
 		if err := cli.Patch(ctx, external, client.Apply, client.FieldOwner("disaster-recovery")); err != nil {
 			t.Fatal(err)
 		}
+		beforeConflict := localIntentGet(t, ctx, cli, desired)
 		desired.Object["data"] = map[string]interface{}{"KEEP": "after"}
-		if err := w.Reconcile(ctx, owner, desired, ""); err != nil {
-			t.Fatal(err)
+		if err := w.Reconcile(ctx, owner, desired, ""); err == nil {
+			t.Fatal("external Apply ownership did not block deletion")
 		}
 		live := localIntentGet(t, ctx, cli, desired)
+		localGCCheckBusiness(t, beforeConflict, live)
+		if live.GetAnnotations()[k8s.AnnotationResourceIntent] != beforeConflict.GetAnnotations()[k8s.AnnotationResourceIntent] {
+			t.Fatal("blocked deletion advanced history")
+		}
 		value, _, _ := unstructured.NestedString(live.Object, "data", "AUTH")
 		if value != "shared" {
 			t.Fatalf("shared Apply ownership was ignored: %q", value)
@@ -521,8 +547,8 @@ func TestLocalIntentReconcile(t *testing.T) {
 				t.Fatalf("unexpected server commit outcome: %v", data)
 			}
 			var records corev1.SecretList
-			if err := cli.List(ctx, &records, client.InNamespace(owner.Namespace)); err != nil || len(records.Items) != 2 {
-				t.Fatalf("uncertain publication lost prepared record: count=%d err=%v", len(records.Items), err)
+			if err := cli.List(ctx, &records, client.InNamespace(owner.Namespace)); err != nil || len(records.Items) != 1 || records.Items[0].Annotations[k8s.AnnotationResourceIntentOperation] == "" {
+				t.Fatalf("uncertain publication lost pending operation: count=%d err=%v", len(records.Items), err)
 			}
 			pointer := live.GetAnnotations()[k8s.AnnotationResourceIntent]
 			if err := cli.Get(ctx, client.ObjectKey{Namespace: owner.Namespace, Name: pointer}, &corev1.Secret{}); err != nil {
@@ -539,8 +565,8 @@ func TestLocalIntentReconcile(t *testing.T) {
 			// Scope accelerated collection to this fixture, leaving the separate
 			// default-interval GC acceptance test and other namespaces untouched.
 			result, err := localGC(cli, owner.Namespace).Sweep(ctx)
-			if err != nil || result.Deleted != 1 || result.Kept != 1 {
-				t.Fatalf("orphan preparation collection: %+v err=%v", result, err)
+			if err != nil || result.Deleted != 0 || result.Kept != 1 {
+				t.Fatalf("confirmed field history collection: %+v err=%v", result, err)
 			}
 		})
 	}
@@ -773,13 +799,14 @@ func TestLocalIntentReconcile(t *testing.T) {
 				t.Fatalf("CRD map merge failed: %v", settings)
 			}
 			entries, _, _ := unstructured.NestedSlice(live.Object, "spec", "entries")
-			found := make(map[string]string)
+			found := make(map[string]map[string]interface{})
 			for _, item := range entries {
 				entry := localIntentMap(t, item)
-				found[fmt.Sprint(entry["name"])] = fmt.Sprint(entry["value"])
+				found[fmt.Sprint(entry["name"])] = entry
 			}
-			if _, exists := found["auth"]; exists || found["keep"] != "after" || found["external"] != "preserve" || found["protected"] != "retain-if-external-child" {
-				t.Fatalf("CRD associative list merge failed: %v", found)
+			if _, exists := found["auth"]; exists || found["keep"]["value"] != "after" || found["external"]["value"] != "preserve" ||
+				!reflect.DeepEqual(found["protected"], map[string]interface{}{"name": "protected", "note": "external-same-manager"}) {
+				t.Fatalf("CRD associative list failed to remove old declarations while preserving external children: %v", found)
 			}
 			t.Logf("CRD schema map/list deletion and external additions preserved; status=%s", phase)
 		})

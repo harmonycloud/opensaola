@@ -18,81 +18,18 @@ package k8s
 
 import (
 	"fmt"
-	"sort"
+	"reflect"
 	"strings"
 
+	"github.com/distribution/reference"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/managedfields"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
-	"sigs.k8s.io/structured-merge-diff/v6/schema"
 	"sigs.k8s.io/structured-merge-diff/v6/typed"
 	"sigs.k8s.io/structured-merge-diff/v6/value"
 )
-
-// MergeResourceIntent applies only changes between the last successfully written
-// desired object (before) and desired to live. The API schema, not field names,
-// determines map/list membership and atomic boundaries. A nil before bootstraps
-// by overlaying desired without inferring any omitted field's ownership.
-//
-// Deletions preserve externally changed values and protected fields. A removed
-// associative-list item is preserved in full if deleting it would also remove
-// externally added or changed children. The returned paths describe these
-// retained deletions; the caller must report them rather than claim convergence.
-// protected is an optional set of fields independently protected by the caller.
-// This function never derives provenance from managedFields manager names.
-//
-// Status and system metadata are copied unchanged from live; only labels and
-// annotations participate in the merge. All arguments are left untouched.
-func MergeResourceIntent(converter managedfields.TypeConverter, before, live, desired *unstructured.Unstructured, protected *fieldpath.Set) (*unstructured.Unstructured, []string, error) {
-	if converter == nil || live == nil || desired == nil {
-		return nil, nil, fmt.Errorf("intent merge requires a schema converter, live object and desired object")
-	}
-	for _, obj := range []*unstructured.Unstructured{before, desired} {
-		if obj == nil {
-			continue
-		}
-		if obj.GroupVersionKind() != live.GroupVersionKind() || obj.GetName() != live.GetName() || obj.GetNamespace() != live.GetNamespace() {
-			return nil, nil, fmt.Errorf("intent merge requires matching apiVersion, kind, name and namespace")
-		}
-	}
-	if live.GetAPIVersion() == "" || live.GetKind() == "" {
-		return nil, nil, fmt.Errorf("intent merge requires an explicit apiVersion and kind")
-	}
-	l, err := converter.ObjectToTyped(intentMergeScope(live))
-	if err != nil {
-		return nil, nil, fmt.Errorf("live resource schema validation failed for %s %s/%s", live.GetKind(), live.GetNamespace(), live.GetName())
-	}
-	d, err := converter.ObjectToTyped(intentMergeScope(desired))
-	if err != nil {
-		return nil, nil, fmt.Errorf("desired resource schema validation failed for %s %s/%s", desired.GetKind(), desired.GetNamespace(), desired.GetName())
-	}
-	var merged *typed.TypedValue
-	var preserved []string
-	if before == nil {
-		merged, err = l.Merge(d)
-	} else {
-		b, parseErr := converter.ObjectToTyped(intentMergeScope(before))
-		if parseErr != nil {
-			return nil, nil, fmt.Errorf("previous resource schema validation failed for %s %s/%s", before.GetKind(), before.GetNamespace(), before.GetName())
-		}
-		merged, preserved, err = mergeTypedIntent(b, l, d, protected)
-	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("merge resource intent: %w", err)
-	}
-	obj, err := converter.TypedToObject(merged)
-	if err != nil {
-		return nil, nil, fmt.Errorf("decode merged resource: %w", err)
-	}
-	result, ok := obj.(*unstructured.Unstructured)
-	if !ok {
-		return nil, nil, fmt.Errorf("schema converter returned unsupported merged resource %T", obj)
-	}
-	result = result.DeepCopy()
-	restoreIntentSystemFields(result, live)
-	return result, preserved, nil
-}
 
 // CarryResourceIntentDefaults carries previously captured API defaults into the
 // next effective desired object. It never carries defaults across a removed
@@ -110,7 +47,7 @@ func CarryResourceIntentDefaults(converter managedfields.TypeConverter, rawBefor
 	return supplementIntentDefaults(converter, objects[1], objects[2], objects[2], newDesired, change.Added.Leaves())
 }
 
-// CaptureResourceIntentDefaults captures only fields added by the API server
+// CaptureResourceIntentDefaults captures only recognized defaults added by the API server
 // during this specific write/preview. Existing live additions and changed
 // values are not defaults. A captured field must belong to associative items
 // explicitly present in rawDesired, and its immediate parent must already
@@ -131,7 +68,118 @@ func CaptureResourceIntentDefaults(converter managedfields.TypeConverter, rawDes
 	if err != nil {
 		return nil, fmt.Errorf("cannot compare submitted and accepted resource defaults")
 	}
-	return supplementIntentDefaults(converter, objects[3], objects[0], objects[1], effectiveDesired, change.Added.Leaves())
+	// A mutating webhook can add an arbitrary leaf to an explicitly declared
+	// member in the same request. Its mere appearance must never authorize a
+	// future deletion. Match actual values to trusted schema or native defaults.
+	parsed := objects[3]
+	root := intentDeclaredType{ref: parsed.TypeRef()}
+	merger := intentDeclaredMerger{topology: parsed.Schema(), root: root.ref, nativeType: declaredNativeType(accepted.GroupVersionKind())}
+	lookup := declaredDeletionLookup{merger: &merger, lists: map[string]map[string]intentDeclaredMember{}}
+	known := fieldpath.NewSet()
+	change.Added.Leaves().Iterate(func(path fieldpath.Path) {
+		if len(path) < 2 || path[len(path)-1].FieldName == nil {
+			return
+		}
+		actual, typ, lookupErr := lookup.find(accepted.Object, root, path)
+		if lookupErr == nil && actual.present && (merger.acceptedDefault(actual.value, typ, path) || lookup.nativeDefaultAt(accepted.Object, root, path, actual.value)) {
+			known.Insert(path)
+		}
+	})
+	return supplementIntentDefaults(converter, parsed, objects[0], objects[1], effectiveDesired, known)
+}
+
+// imagePullPolicy depends on the image in this particular container. Use the
+// same normalized image reference semantics as the Kubernetes API defaulter.
+func (l *declaredDeletionLookup) nativeDefaultAt(object map[string]any, root intentDeclaredType, path fieldpath.Path, actual any) bool {
+	if nativeCapturedDefault(l.merger.nativeType, path, actual) {
+		return true
+	}
+	if len(path) < 2 || path[len(path)-1].FieldName == nil || *path[len(path)-1].FieldName != "imagePullPolicy" ||
+		declaredNativePathType(l.merger.nativeType, path[:len(path)-1]) != reflect.TypeFor[corev1.Container]() {
+		return false
+	}
+	container, _, err := l.find(object, root, path[:len(path)-1])
+	fields, ok := container.value.(map[string]any)
+	if err != nil || !ok {
+		return false
+	}
+	image, ok := fields["image"].(string)
+	if !ok {
+		return false
+	}
+	ref, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		return false
+	}
+	var tag string
+	if tagged, ok := reference.TagNameOnly(ref).(reference.Tagged); ok {
+		tag = tagged.Tag()
+	}
+	if tag == "latest" {
+		return actual == string(corev1.PullAlways)
+	}
+	return actual == string(corev1.PullIfNotPresent)
+}
+
+// These built-in defaults come from the versioned Kubernetes core/v1
+// defaulters. Resolve the parent Go type so they cannot match arbitrary CRs.
+func nativeCapturedDefault(root reflect.Type, path fieldpath.Path, actual any) bool {
+	if root == nil || len(path) == 0 || path[len(path)-1].FieldName == nil {
+		return false
+	}
+	parent := declaredNativePathType(root, path[:len(path)-1])
+	if parent == nil {
+		return false
+	}
+	for parent.Kind() == reflect.Pointer {
+		parent = parent.Elem()
+	}
+	field := *path[len(path)-1].FieldName
+	switch parent {
+	case reflect.TypeFor[corev1.Probe]():
+		switch field {
+		case "timeoutSeconds", "successThreshold":
+			return actual == int64(1)
+		case "periodSeconds":
+			return actual == int64(10)
+		case "failureThreshold":
+			return actual == int64(3)
+		}
+	case reflect.TypeFor[corev1.HTTPGetAction]():
+		switch field {
+		case "path":
+			return actual == "/"
+		case "scheme":
+			return actual == string(corev1.URISchemeHTTP)
+		}
+	case reflect.TypeFor[corev1.GRPCAction]():
+		if field == "service" {
+			return actual == ""
+		}
+	case reflect.TypeFor[corev1.Container]():
+		switch field {
+		case "terminationMessagePath":
+			return actual == corev1.TerminationMessagePathDefault
+		case "terminationMessagePolicy":
+			return actual == string(corev1.TerminationMessageReadFile)
+		}
+	}
+	if field == "defaultMode" {
+		switch parent {
+		case reflect.TypeFor[corev1.SecretVolumeSource](), reflect.TypeFor[corev1.ConfigMapVolumeSource](), reflect.TypeFor[corev1.DownwardAPIVolumeSource](), reflect.TypeFor[corev1.ProjectedVolumeSource]():
+			return reflect.DeepEqual(actual, int64(corev1.SecretVolumeSourceDefaultMode))
+		}
+	}
+	// Some built-in structs serialize an empty member unconditionally (for
+	// example container.resources). Only accept what the empty typed parent
+	// actually emits; unknown fields and optional zero values remain external.
+	empty, ok := canonicalDeclaredNativeValue(map[string]any{}, parent)
+	object, isObject := empty.(map[string]any)
+	if !ok || !isObject {
+		return false
+	}
+	v, found := object[field]
+	return found && reflect.DeepEqual(actual, v)
 }
 
 func supplementIntentDefaults(converter managedfields.TypeConverter, source, rawDesired, effectiveDesired *typed.TypedValue, original *unstructured.Unstructured, candidates *fieldpath.Set) (*unstructured.Unstructured, error) {
@@ -272,132 +320,6 @@ func intentDefaultsObjects(converter managedfields.TypeConverter, objects ...*un
 		}
 	}
 	return parsed, nil
-}
-
-func mergeTypedIntent(b, l, d *typed.TypedValue, protected *fieldpath.Set) (*typed.TypedValue, []string, error) {
-	change, err := b.Compare(d)
-	if err != nil {
-		return nil, nil, err
-	}
-	drift, err := b.Compare(l)
-	if err != nil {
-		return nil, nil, err
-	}
-	liveFields, err := l.ToFieldSet()
-	if err != nil {
-		return nil, nil, err
-	}
-	// An absent leaf needs no deletion. A still-present list item whose child
-	// was removed, however, was externally edited just like a changed child.
-	// The live-field presence check below distinguishes these two cases.
-	externalChanges := drift.Added.Union(drift.Modified).Union(drift.Removed)
-	blockedItems := fieldpath.NewSet()
-	change.Removed.Iterate(func(path fieldpath.Path) {
-		if len(path) == 0 || path[len(path)-1].Key == nil {
-			return
-		}
-		if intentPathsOverlap(externalChanges, path) || intentPathsOverlap(protected, path) {
-			if intentContainsPath(liveFields, path) {
-				blockedItems.Insert(path)
-			}
-		}
-	})
-	remove := fieldpath.NewSet()
-	retained := fieldpath.NewSet()
-	change.Removed.Iterate(func(path fieldpath.Path) {
-		if !intentContainsPath(liveFields, path) {
-			return
-		}
-		if intentPathsOverlap(blockedItems, path) || intentPathsOverlap(externalChanges, path) || intentPathsOverlap(protected, path) {
-			retained.Insert(path)
-			return
-		}
-		remove.Insert(path)
-	})
-	write := change.Added.Union(change.Modified)
-	liveDesired, err := l.Compare(d)
-	if err != nil {
-		return nil, nil, err
-	}
-	stillDifferent := liveDesired.Added.Union(liveDesired.Modified).Union(liveDesired.Removed)
-	blockedWrites := fieldpath.NewSet()
-	var schemaErr error
-	write.Iterate(func(path fieldpath.Path) {
-		if schemaErr != nil || !intentContainsPath(liveFields, path) || !intentPathsOverlap(externalChanges, path) || !intentPathsOverlap(stillDifferent, path) {
-			return
-		}
-		var atomic bool
-		atomic, schemaErr = intentAtomicContainerAt(d, path)
-		if atomic {
-			blockedWrites.Insert(path)
-			retained.Insert(path)
-		}
-	})
-	if schemaErr != nil {
-		return nil, nil, schemaErr
-	}
-	// Extract only B -> D additions/changes, with their associative key fields.
-	// Re-merging all of D would overwrite live values unchanged in our intent.
-	// A container declared atomic has no safe independently editable children:
-	// when both parties changed it, preserve live and report the conflict.
-	// Compare includes both newly added containers and their descendants.
-	// Extract leaves only: passing the parent membership marker as well would
-	// extract a partial container instead of its descendant values.
-	patch := d.ExtractItems(write.Leaves().RecursiveDifference(blockedWrites), typed.WithAppendKeyFields())
-	merged, err := l.RemoveItems(remove).Merge(patch)
-	if err != nil {
-		return nil, nil, err
-	}
-	var preserved []string
-	retained.Iterate(func(path fieldpath.Path) {
-		// A parent retained path explains its descendants without an enormous
-		// warning for every leaf in a removed container/list item.
-		for i := 1; i < len(path); i++ {
-			if retained.Has(path[:i]) {
-				return
-			}
-		}
-		preserved = append(preserved, intentSafePath(path))
-	})
-	sort.Strings(preserved)
-	if len(preserved) > 1 {
-		unique := preserved[:1]
-		for _, path := range preserved[1:] {
-			if path != unique[len(unique)-1] {
-				unique = append(unique, path)
-			}
-		}
-		preserved = unique
-	}
-	return merged, preserved, nil
-}
-
-func intentAtomicContainerAt(obj *typed.TypedValue, path fieldpath.Path) (bool, error) {
-	ref := obj.TypeRef()
-	for _, element := range path {
-		atom, ok := obj.Schema().Resolve(ref)
-		if !ok {
-			return false, fmt.Errorf("cannot resolve schema at %s", intentSafePath(path))
-		}
-		switch {
-		case element.FieldName != nil && atom.Map != nil:
-			if field, exists := atom.Map.FindField(*element.FieldName); exists {
-				ref = field.Type
-			} else {
-				ref = atom.Map.ElementType
-			}
-		case (element.Key != nil || element.Value != nil || element.Index != nil) && atom.List != nil:
-			ref = atom.List.ElementType
-		default:
-			return false, fmt.Errorf("cannot traverse schema at %s", intentSafePath(path))
-		}
-	}
-	atom, ok := obj.Schema().Resolve(ref)
-	if !ok {
-		return false, fmt.Errorf("cannot resolve schema at %s", intentSafePath(path))
-	}
-	return (atom.Map != nil && atom.Map.ElementRelationship == schema.Atomic) ||
-		(atom.List != nil && atom.List.ElementRelationship == schema.Atomic), nil
 }
 
 func intentPathsOverlap(set *fieldpath.Set, path fieldpath.Path) bool {

@@ -127,6 +127,7 @@ func TestResourceIntentStorageAPI(t *testing.T) {
 				t.Fatal("new record did not exercise JSON larger than the Secret payload limit")
 			}
 			t.Logf("raw JSON=%d stored zstd=%d", len(raw), len(secret.Data[intentZstdKey]))
+			firstOperation := live.GetAnnotations()[AnnotationResourceIntentOperation]
 			next := deploymentFor(t, owner, "temporary")
 			env := []any{map[string]any{"name": "KEEP", "value": "yes"}}
 			containers, _, err := unstructured.NestedSlice(next.Object, "spec", "template", "spec", "containers")
@@ -159,9 +160,17 @@ func TestResourceIntentStorageAPI(t *testing.T) {
 			if err != nil || !found || !reflect.DeepEqual(gotEnv, env) {
 				t.Fatal("large prior record did not support omitted env deletion")
 			}
-			if err := cli.Get(ctx, client.ObjectKeyFromObject(secret), &corev1.Secret{}); !apierrors.IsNotFound(err) {
-				t.Fatalf("old record not reclaimed: %v", err)
+			updated, current, err := writer.loadResourceIntent(ctx, owner, live, "")
+			if err != nil || updated == nil || current.UID != secret.UID || current.ResourceVersion == secret.ResourceVersion || updated.Attempt != nil || updated.DeletionBase != nil {
+				t.Fatalf("stable record did not release the previous large history after confirming the change: %v", err)
 			}
+			if current.Name != secret.Name || firstOperation == "" || firstOperation == live.GetAnnotations()[AnnotationResourceIntentOperation] {
+				t.Fatal("target did not advance the operation while keeping its history identity")
+			}
+			if !reflect.DeepEqual(updated.Desired, intentObject(next)) {
+				t.Fatal("stable record retained the superseded declaration")
+			}
+
 		})
 	}
 	t.Run("multi_mib_record_load_and_collection", func(t *testing.T) {

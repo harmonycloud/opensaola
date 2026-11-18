@@ -68,7 +68,7 @@ func TestApplyReconcileOverridesPreservesDeletionAcrossFutureRenders(t *testing.
 	if _, exists := spec["baselineOnly"]; exists {
 		t.Fatalf("baselineOnly was not removed: %#v", spec)
 	}
-	if got := spec["replicas"]; got != float64(5) {
+	if got := spec["replicas"]; got != int64(5) {
 		t.Fatalf("replicas = %#v, want 5", got)
 	}
 	if got := spec["storage"]; got != "10Gi" {
@@ -105,7 +105,7 @@ func TestApplyReconcileOverridesLetsLaterDesiredPathWin(t *testing.T) {
 	if _, exists := spec["legacy"]; exists {
 		t.Fatalf("unrelated DR deletion was lost: %#v", spec)
 	}
-	if got := spec["replicas"]; got != float64(6) {
+	if got := spec["replicas"]; got != int64(6) {
 		t.Fatalf("later desired replicas = %#v, want 6", got)
 	}
 	if got := spec["storage"]; got != "20Gi" {
@@ -190,7 +190,7 @@ func TestPrimarySpecNormalizesRawExtension(t *testing.T) {
 	if err != nil {
 		t.Fatalf("primarySpec() error = %v", err)
 	}
-	if got := spec["replicas"]; got != float64(3) {
+	if got := spec["replicas"]; got != int64(3) {
 		t.Fatalf("replicas = %#v, want 3", got)
 	}
 	if got, want := string(raw), `{"nested":{"enabled":true},"replicas":3}`; got != want {
@@ -287,7 +287,7 @@ func TestPauseSnapshotAndAdoptionBuildsPersistentOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("primarySpec(rendered) error = %v", err)
 	}
-	want := map[string]any{"replicas": float64(5), "storage": "20Gi"}
+	want := map[string]any{"replicas": int64(5), "storage": "20Gi"}
 	if !reflect.DeepEqual(spec, want) {
 		t.Fatalf("rendered adopted spec = %#v, want %#v", spec, want)
 	}
@@ -450,7 +450,7 @@ parameters: {
 		t.Fatalf("BuildReconcilePauseSnapshot() error = %v", err)
 	}
 	base := loadPauseActualSpec(t, cli, mid, snapshot)
-	if want := map[string]any{"replicas": float64(1), "fromPreAction": true}; !reflect.DeepEqual(base, want) {
+	if want := map[string]any{"replicas": int64(1), "fromPreAction": true}; !reflect.DeepEqual(base, want) {
 		t.Fatalf("snapshot actual spec = %#v, want %#v", base, want)
 	}
 
@@ -478,7 +478,7 @@ parameters: {
 	if err != nil {
 		t.Fatalf("decode override base spec: %v", err)
 	}
-	if want := map[string]any{"replicas": float64(1), "fromPreAction": true}; !reflect.DeepEqual(base, want) {
+	if want := map[string]any{"replicas": int64(1), "fromPreAction": true}; !reflect.DeepEqual(base, want) {
 		t.Fatalf("override base spec = %#v, want %#v", base, want)
 	}
 }
@@ -535,6 +535,8 @@ func TestPauseAdoptionUsesActualBeforeAndAfter(t *testing.T) {
 	configurePauseTestSchemas(t)
 	for _, tc := range []struct{ name, desired, before, after, want string }{
 		{"unchanged defaults and drift", `{"replicas":3}`, `{"replicas":2,"default":"yes","nested":{"selector":null}}`, `{"replicas":2,"default":"yes","nested":{"selector":null}}`, `{}`},
+		{"adjacent integer above 2^53", `{"replicas":9007199254740992}`, `{"replicas":9007199254740992}`, `{"replicas":9007199254740993}`, `{"replicas":9007199254740993}`},
+		{"reverse adjacent integer", `{"replicas":9007199254740993}`, `{"replicas":9007199254740993}`, `{"replicas":9007199254740992}`, `{"replicas":9007199254740992}`},
 		{"only changed replica", `{"replicas":3}`, `{"replicas":2,"default":"yes"}`, `{"replicas":5,"default":"yes"}`, `{"replicas":5}`},
 		{"changed observed default", `{"replicas":3}`, `{"replicas":3,"default":"before"}`, `{"replicas":3,"default":"after"}`, `{"default":"after"}`},
 		{"removed desired field", `{"replicas":3,"legacy":true}`, `{"replicas":3,"legacy":true,"default":"yes"}`, `{"replicas":3,"default":"yes"}`, `{"legacy":null}`},

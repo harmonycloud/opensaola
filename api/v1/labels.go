@@ -86,8 +86,8 @@ const (
 type ReconcileResumePolicy string
 
 const (
-	// ReconcileResumePolicyMerge adopts non-conflicting actual CR spec changes
-	// before restoring normal desired-state reconciliation.
+	// ReconcileResumePolicyMerge adopts actual CR spec changes observed during
+	// the pause before restoring normal desired-state reconciliation.
 	ReconcileResumePolicyMerge ReconcileResumePolicy = "merge"
 	// ReconcileResumePolicyApply explicitly discards actual CR changes and
 	// reapplies OpenSaola's existing desired state.

@@ -18,7 +18,6 @@ package middlewareconfiguration
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
 	"github.com/harmonycloud/opensaola/internal/cache"
@@ -101,7 +100,7 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 
 func GetTemplateParsedMiddlewareConfigurations(ctx context.Context, cli client.Client, act consts.HandleAction, quoter tools.Quoter) ([]*v1.MiddlewareConfiguration, error) {
 	var middlewareConfigurations []*v1.MiddlewareConfiguration
-	templateValues, err := tools.GetTemplateValues(ctx, quoter)
+	baseValues, err := tools.GetTemplateValues(ctx, quoter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get template values: %w", err)
 	}
@@ -114,27 +113,14 @@ func GetTemplateParsedMiddlewareConfigurations(ctx context.Context, cli client.C
 			return nil, fmt.Errorf("get configuration %s error: %w", cfg.Name, err)
 		}
 
-		// Assign Values
-		if len(cfg.Values.Raw) > 0 {
-			var data []byte
-			data, err = cfg.Values.MarshalJSON()
-			if err != nil {
-				return nil, err
-			}
-
-			var parse string
-			parse, err = tools.TemplateParse(ctx, string(data), templateValues)
-			if err != nil {
-				return nil, err
-			}
-			err = json.Unmarshal([]byte(parse), &templateValues.Values)
-			if err != nil {
-				return nil, err
-			}
+		// Each configuration renders with its own values.
+		templateValues := *baseValues
+		if err := applyConfigurationValues(ctx, cfg, &templateValues); err != nil {
+			return nil, err
 		}
 
 		var template string
-		template, err = handleTemplate(ctx, templateValues, &mc)
+		template, err = handleTemplate(ctx, &templateValues, &mc)
 		if err != nil {
 			return nil, fmt.Errorf("failed to handle template: %s %w", cfg.Name, err)
 		}

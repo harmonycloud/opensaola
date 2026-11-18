@@ -234,6 +234,59 @@ var _ = Describe("Suspend reconcile", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(primary), primary)).To(Succeed())
 				Expect(primary.GetResourceVersion()).To(Equal(rv))
+				// Exercise the writer again, not just the steady-state gate. A new
+				// unrelated MID generation must retain the adopted effective values
+				// when ordinary writes enforce the complete current declaration.
+				Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+				mid.Spec.Necessary = runtime.RawExtension{Raw: []byte(`{"unrelatedReconcile":"after-resume"}`)}
+				Expect(k8sClient.Update(ctx, mid)).To(Succeed())
+				_, err = reconcileMiddleware(name, "default")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(k8sClient.Get(ctx, key, primary)).To(Succeed())
+				afterNextGeneration, err := json.Marshal(primary.Object["spec"])
+				Expect(err).NotTo(HaveOccurred())
+				Expect(afterNextGeneration).To(MatchJSON(afterResume))
+				if scenario == "env changes" {
+					// Persisted overrides are JSON merge patches: containers remains
+					// one array boundary even though the writer merges named items.
+					// Adding another desired container deactivates this whole array
+					// override, so main's original env declaration wins again.
+					nextSpec := runtime.DeepCopyJSON(spec)
+					nextContainers, _, err := unstructured.NestedSlice(nextSpec, "template", "spec", "containers")
+					Expect(err).NotTo(HaveOccurred())
+					nextContainers = append(nextContainers, map[string]any{"name": "sidecar", "image": "registry.k8s.io/pause:3.10"})
+					Expect(unstructured.SetNestedSlice(nextSpec, nextContainers, "template", "spec", "containers")).To(Succeed())
+					nextRaw, err := json.Marshal(nextSpec)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+					mid.Spec.Parameters = runtime.RawExtension{Raw: nextRaw}
+					Expect(k8sClient.Update(ctx, mid)).To(Succeed())
+					_, err = reconcileMiddleware(name, "default")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(k8sClient.Get(ctx, key, primary)).To(Succeed())
+					currentContainers, _, err := unstructured.NestedSlice(primary.Object, "spec", "template", "spec", "containers")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(currentContainers).To(HaveLen(2))
+					for _, item := range currentContainers {
+						current, ok := item.(map[string]any)
+						Expect(ok).To(BeTrue())
+						if current["name"] == "main" {
+							Expect(current["env"]).To(ConsistOf(map[string]any{"name": "KEEP", "value": "old"}, map[string]any{"name": "REMOVE", "value": "old"}))
+						}
+					}
+					// Filtering does not mutate the stored override. Returning the
+					// array to its original base reactivates the adopted env values.
+					Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+					Expect(mid.Spec.ReconcileOverrides.SpecPatch.Raw).To(MatchJSON(wantPatch))
+					mid.Spec.Parameters = runtime.RawExtension{Raw: raw}
+					Expect(k8sClient.Update(ctx, mid)).To(Succeed())
+					_, err = reconcileMiddleware(name, "default")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(k8sClient.Get(ctx, key, primary)).To(Succeed())
+					afterReturnToBase, err := json.Marshal(primary.Object["spec"])
+					Expect(err).NotTo(HaveOccurred())
+					Expect(afterReturnToBase).To(MatchJSON(afterResume))
+				}
 			})
 		}
 	}

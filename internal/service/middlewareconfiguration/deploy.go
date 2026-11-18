@@ -105,11 +105,6 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 	tempAnnotations[v1.LabelConfigurations] = m.Name
 	obj.SetAnnotations(tempAnnotations)
 
-	old, err := k8s.GetCustomResource(ctx, cli, obj.GetName(), obj.GetNamespace(), obj.GroupVersionKind())
-	if err != nil && !errors.IsNotFound(err) {
-		return nil, err
-	}
-	isExists := old != nil
 	// Describe the intended lifecycle; the writer checks the exact live object
 	// before publishing it. A prior cleanup marker is not a prerequisite for
 	// adopting a proven legacy Configuration resource.
@@ -130,29 +125,15 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		// The writer preserves live non-controller references when adopting;
 		// template references remain part of the explicit desired object.
 		if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() && disablePolicy != v1.ConfigurationDisablePolicyOrphan {
-			if err = ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
+			if err := ctrl.SetControllerReference(owner, obj, cli.Scheme()); err != nil {
 				return nil, fmt.Errorf("failed to set ControllerReference: %w", err)
 			}
 		}
 
 		writer := k8s.NewManagedResourceWriter(cli)
-		if isExists {
-			if err = writer.Reconcile(ctx, ownerObj, obj, m.Name); err != nil {
-				return nil, err
-			}
-			if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() && disablePolicy == v1.ConfigurationDisablePolicyOrphan {
-				if err = stripLiveControllerOwnerReference(ctx, cli, obj, owner); err != nil {
-					return nil, err
-				}
-			}
-			log.FromContext(ctx).V(1).Info(fmt.Sprintf("updated %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
-		} else {
-			err = writer.Reconcile(ctx, ownerObj, obj, m.Name)
-			if err != nil && !errors.IsAlreadyExists(err) {
-				log.FromContext(ctx).V(1).Info(fmt.Sprintf("failed to create %s", obj.GetKind()), "obj", obj)
-				return nil, fmt.Errorf("failed to create CR: %w", err)
-			}
-			log.FromContext(ctx).V(1).Info(fmt.Sprintf("created %s successfully", obj.GetKind()), "name", obj.GetName(), "namespace", obj.GetNamespace())
+		writtenUID, err := writer.ReconcileWithUID(ctx, ownerObj, obj, m.Name)
+		if err != nil {
+			return nil, err
 		}
 
 		identity := v1.RenderedConfigurationResource{
@@ -167,6 +148,14 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		live.SetGroupVersionKind(obj.GroupVersionKind())
 		if err := writer.Reader.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
 			return nil, fmt.Errorf("get applied configuration resource: %w", err)
+		}
+		if writtenUID == "" || live.GetUID() != writtenUID {
+			return nil, fmt.Errorf("configuration target changed after publication: expected UID %q, observed %q", writtenUID, live.GetUID())
+		}
+		if resourceIsNamespaced && obj.GetNamespace() == owner.GetNamespace() && disablePolicy == v1.ConfigurationDisablePolicyOrphan {
+			if err := stripLiveControllerOwnerReference(ctx, cli, live, owner); err != nil {
+				return nil, err
+			}
 		}
 		// Cleanup authority is established only by the successfully published
 		// live identity, never by an adoption decision made before the write.
@@ -189,7 +178,11 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		return &renderedConfigurationApplyResult{identity: identity, inventory: inventory}, nil
 
 	case consts.HandleActionDelete:
-		if isExists {
+		old, err := k8s.GetCustomResource(ctx, cli, obj.GetName(), obj.GetNamespace(), obj.GroupVersionKind())
+		if err != nil && !errors.IsNotFound(err) {
+			return nil, err
+		}
+		if old != nil {
 			if obj.GroupVersionKind().Kind == "CustomResourceDefinition" {
 				return nil, nil
 			}

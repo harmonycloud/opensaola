@@ -494,8 +494,8 @@ func newResourceEventHandlerFuncs(ctx context.Context, cli client.Client, notify
 			case middlewareReconcileEvents <- event.GenericEvent{Object: mid}:
 			case <-ctx.Done():
 			default:
-				// A full queue must never stall informer delivery. The deleted CR is
-				// rebuilt by the next steady-state SSA compatibility reconcile instead.
+				// A full queue must never stall informer delivery. The owner's
+				// periodic read-only existence check retries missing-resource recovery.
 				log.FromContext(ctx).Info("middleware reconcile queue full, dropping CR rebuild request",
 					"warning", true,
 					"middleware", mid.Name,

@@ -63,7 +63,7 @@ jobs:
         run: make test-race
 
   envtest:
-    name: Controller Integration Tests
+    name: API Server Integration Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +72,7 @@ jobs:
           go-version-file: go.mod
       - name: Setup envtest binaries
         run: make setup-envtest
-      - name: Run controller envtest
+      - name: Run API server integration tests
         run: make test-envtest
 
   build:
@@ -113,6 +113,9 @@ jobs:
       - name: Run E2E smoke
         run: make test-e2e-smoke
         timeout-minutes: 15
+      - name: Verify field management and Redis persistence on fresh Kind
+        run: make test-fields-redis
+        timeout-minutes: 25
 
   verify:
     name: Verify Generated Code

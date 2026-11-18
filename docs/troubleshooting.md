@@ -315,12 +315,12 @@ kubectl get mid <mid-name> -n <namespace> -o json | jq '{
 
 **Resolution**:
 
-- Before modifying the primary CR, confirm `ReconcilePaused=True`, a `.status.reconcilePause` with `desiredSpec`, and `ReconcileAdoption` not `False`. If capture failed, first fix the missing primary CR, render error, or size limit.
-- `ReconcileAdoptionConflict` means a live change made during the pause and current desired state changed the same path. Decide the intended value, then request `middleware.cn/resume-policy=merge` again.
-- For another `ReconcileAdoption=False`, keep the pause active and fix the identity, render, or size issue reported in `message` before retrying.
-- CUE-only PreActions are replayed on an in-memory copy during pause snapshot/B/L/D merge and may modify the primary CR `spec` safely. If any PreAction contains CMD, HTTP, or another non-CUE step, `merge` fails closed. Make the action pure CUE, make its result explicit desired state, or use `apply` only when intentionally overwriting the change made during the pause.
+- Before modifying the primary CR, confirm `ReconcilePaused=True`, `.status.reconcilePause.snapshotSecret` pointing to a valid Secret in the same namespace, and `ReconcileAdoption` absent or not `False`. The Secret stores the actual primary-CR `spec` at pause start and pre-pause overrides; status holds only the reference, identity, hashes, and related metadata.
+- `merge` compares actual specs at pause start and before resume, applying only that interval's additions, modifications, and deletions to current desired state. Changed paths use current CR values even if the MID also changed those paths; unrelated MID desired values remain. Unchanged defaults and pre-existing drift are not adopted.
+- For `ReconcileSnapshotFailed`, `ReconcileAdoptionFailed`, or another `ReconcileAdoption=False`, keep the pause active. Follow `message` to fix a missing primary CR, target identity, Secret read/write or validation, schema, desired-state rendering, or Kubernetes size-limit issue before retrying. Missing or invalid Secrets never trigger a new snapshot during resume; see the runbook for legacy `desiredSpec` sessions.
+- Pause capture reads the actual CR directly without replaying PreActions. PreActions are replayed on an in-memory copy only when `merge` renders current desired state, and every step must have non-empty CUE. Steps requiring CMD, HTTP, or other non-CUE operations are unsupported by `merge`. Make the action pure CUE, make its result explicit desired state, or use `apply` only when intentionally overwriting changes made during the pause.
 - Use `resume-policy=apply` only after explicitly accepting that the paused primary-CR `spec` changes will be overwritten; never remove `suspend-reconcile` directly.
-- An MO does not support B/L/D merging: update its desired configuration, then remove `suspend-reconcile` to resume ordinary reconciliation. Handle each related MID separately.
+- An MO does not adopt primary-CR changes: update its desired configuration, then remove `suspend-reconcile` to resume ordinary reconciliation. Handle each related MID separately.
 
 See the [Reconciliation Suspension and Recovery Runbook](reconcile-suspension.md) for full commands and boundaries.
 
@@ -492,4 +492,4 @@ kubectl rollout restart deployment opensaola -n <operator-namespace>
 
 - [Technical Documentation](opensaola-technical.md) -- Architecture, CRD field reference, reconcile flows, state machine details, labels/annotations conventions
 - [Package Documentation](opensaola-packaging.md) -- Package format, baseline system, action system, configuration templates, Redis case study
-- [Reconciliation Suspension and Recovery Runbook](reconcile-suspension.md) -- MID/MO pause, recovery, change adoption, conflict handling, and verification commands
+- [Reconciliation Suspension and Recovery Runbook](reconcile-suspension.md) -- MID/MO pause, recovery, change adoption, failure handling, and verification commands

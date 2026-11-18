@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"sync"
 
+	kjson "sigs.k8s.io/json"
 	"sigs.k8s.io/yaml"
 
 	"github.com/harmonycloud/opensaola/internal/service/middlewarebaseline"
@@ -322,7 +323,7 @@ func renderMiddlewareWithBaseline(ctx context.Context, cli client.Client, m *v1.
 		return fmt.Errorf("get baseline error: %w", err)
 	}
 
-	err = tools.StructMerge(&baseline.Spec.Parameters, &m.Spec.Parameters, tools.StructMergeMapType)
+	err = mergeMiddlewareParameters(ctx, cli, &baseline, m)
 	if err != nil {
 		return fmt.Errorf("struct merge error: %w", err)
 	}
@@ -442,7 +443,7 @@ func renderMiddlewareWithBaseline(ctx context.Context, cli client.Client, m *v1.
 	configurationsYamlBytes = tools.ProcessYAMLGoTemp(configurationsYamlBytes)
 
 	parameters := make(map[string]any)
-	err = yaml.Unmarshal([]byte(parametersParse), &parameters)
+	err = kjson.UnmarshalCaseSensitivePreserveInts(m.Spec.Parameters.Raw, &parameters)
 	if err != nil {
 		return err
 	}

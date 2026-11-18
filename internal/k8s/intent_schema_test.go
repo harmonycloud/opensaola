@@ -32,7 +32,26 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
+	smdschema "sigs.k8s.io/structured-merge-diff/v6/schema"
 )
+
+func TestDeclaredIntentSchemaPolicyHash(t *testing.T) {
+	legacy := "sha256:legacy-topology"
+	declared := DeclaredResourceIntentSchemaHash(legacy)
+	if declared == legacy || declared != DeclaredResourceIntentSchemaHash(legacy) || declared == DeclaredResourceIntentSchemaHash("sha256:different-topology") {
+		t.Fatal("declared policy must be stable and distinct from legacy/topology changes")
+	}
+	parsed, err := declaredTestConverter(t).ObjectToTyped(intentTestObject(t, `{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDeclaredOpaqueTopology(parsed.Schema()); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDeclaredOpaqueTopology(&smdschema.Schema{}); err == nil {
+		t.Fatal("an unknown converter representation must not silently disable name compatibility")
+	}
+}
 
 func intentSchemaDocument(t *testing.T, gvk schema.GroupVersionKind, atomicMap bool) []byte {
 	t.Helper()

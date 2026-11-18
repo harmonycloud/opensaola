@@ -575,7 +575,7 @@ Redis 和 MySQL 未使用此文件。
 >
 > **控制器托管的实际状态采纳 override**：`spec.reconcileOverrides` 不是包作者可配置的常规输入。它只在 MID 主 CR 完成常规渲染后，条件式作用于该 CR 的 `spec`；不会传入 Configuration 模板或 PreAction。它只保留相对 `baseSpec` 未被后续 MID/Baseline 显式修改的路径，因此后续同路径的显式期望变更优先，其他已采纳的暂停期间差异仍保留。
 >
-> **PreAction 与恢复合并**：暂停快照和 B/L/D 合并会在内存中的 MID 副本上重放仅含 CUE 的 PreAction，因此其对主 CR `spec` 的影响与正常写入一致，且不会执行命令、HTTP 操作或 Kubernetes 写入。若任一 PreAction 含非 CUE 步骤（例如 CMD 或 HTTP），`resume-policy=merge` 会失败关闭；应改为纯 CUE 预动作、把结果固化为 MID/Baseline 的显式期望态，或仅在明确接受覆盖暂停期间改动时使用 `apply`。
+> **PreAction 与恢复合并**：暂停捕获直接读取实际主 CR `spec`，不重放 PreAction。`resume-policy=merge` 恢复时，才在内存中的 MID 副本上重放 PreAction 来渲染当前期望，再合入暂停期间实际 `spec` 的增删改；该渲染不会执行命令、HTTP 操作或 Kubernetes 写入。每个 PreAction 步骤都必须有非空 CUE；需要执行 CMD、HTTP 等非 CUE 操作的步骤不支持 `merge`。应改为纯 CUE 预动作、把结果固化为 MID/Baseline 的显式期望态，或仅在明确接受覆盖暂停期间改动时使用 `apply`。完整操作与边界见[Reconcile 暂停与恢复 Runbook](reconcile-suspension_zh.md)。
 
 **详细说明**：
 

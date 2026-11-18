@@ -50,6 +50,7 @@ type adoptionAPIClient struct {
 	key          client.ObjectKey
 	onSecret     func(context.Context) error
 	beforeCommit func(context.Context) error
+	afterConfirm func(context.Context) error
 }
 
 func (c *adoptionAPIClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
@@ -75,7 +76,15 @@ func (c *adoptionAPIClient) Patch(ctx context.Context, obj client.Object, patch 
 			return err
 		}
 	}
-	return c.Client.Patch(ctx, obj, patch, opts...)
+	if err := c.Client.Patch(ctx, obj, patch, opts...); err != nil {
+		return err
+	}
+	if _, history := obj.(*corev1.Secret); history && len(options.DryRun) == 0 && c.afterConfirm != nil {
+		callback := c.afterConfirm
+		c.afterConfirm = nil
+		return callback(ctx)
+	}
+	return nil
 }
 
 func TestConfigurationAdoptionAPI(t *testing.T) {
@@ -197,11 +206,172 @@ spec:
 		if err := cli.Get(ctx, client.ObjectKey{Namespace: f.owner.Namespace, Name: live.GetAnnotations()[k8s.AnnotationResourceIntent]}, secret); err != nil {
 			t.Fatal(err)
 		}
-		if ref := metav1.GetControllerOf(secret); ref == nil || ref.UID != f.owner.UID || secret.Immutable == nil || !*secret.Immutable {
-			t.Fatal("adoption did not establish a private immutable record for the current owner")
+		if ref := metav1.GetControllerOf(secret); ref == nil || ref.UID != f.owner.UID || (secret.Immutable != nil && *secret.Immutable) || secret.Labels["middleware.cn/field-history"] != "v1" || secret.Annotations[k8s.AnnotationResourceIntentOperation] != "" || live.GetAnnotations()[k8s.AnnotationResourceIntentOperation] == "" {
+			t.Fatal("adoption did not confirm private field history for the current owner")
 		}
 		return live
 	}
+	for _, format := range []string{"current", "legacy_immutable", "externally_modified_rules"} {
+		t.Run("same_owner_history_survives_missing_owner_marker_"+format, func(t *testing.T) {
+			f := newFixture(t, false)
+			if _, err := Handle(ctx, cli, f.owner, consts.HandleActionPublish, f.config); err != nil {
+				t.Fatal(err)
+			}
+			live := get(t, f)
+			ledger := live.GetAnnotations()[k8s.AnnotationResourceIntent]
+			annotations := live.GetAnnotations()
+			if format == "legacy_immutable" {
+				var old corev1.Secret
+				if err := cli.Get(ctx, client.ObjectKey{Namespace: f.owner.Namespace, Name: ledger}, &old); err != nil {
+					t.Fatal(err)
+				}
+				legacy := old.DeepCopy()
+				legacy.ObjectMeta = metav1.ObjectMeta{Namespace: old.Namespace, GenerateName: "old-intent-", Labels: map[string]string{"middleware.cn/resource-intent-record": string(f.owner.UID)}, OwnerReferences: old.OwnerReferences}
+				legacy.Immutable = new(true)
+				if err := cli.Create(ctx, legacy); err != nil {
+					t.Fatal(err)
+				}
+				annotations[k8s.AnnotationResourceIntent] = legacy.Name
+				if err := cli.Delete(ctx, &old); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if format == "externally_modified_rules" {
+				live.Object["rules"] = []any{map[string]any{"apiGroups": []any{""}, "resources": []any{"configmaps"}, "verbs": []any{"list"}}}
+			}
+			delete(annotations, v1.AnnotationConfigurationOwnerUID)
+			annotations["external-note"] = "preserve"
+			live.SetAnnotations(annotations)
+			if err := cli.Update(ctx, live); err != nil {
+				t.Fatal(err)
+			}
+			f.config.Spec.Template = fmt.Sprintf("apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nmetadata:\n  name: %s\n", f.live.GetName())
+			if err := cli.Update(ctx, f.config); err != nil {
+				t.Fatal(err)
+			}
+			result, err := Handle(ctx, cli, f.owner, consts.HandleActionUpdate, f.config)
+			actual := get(t, f)
+			if format == "externally_modified_rules" {
+				if err == nil || result != nil || !reflect.DeepEqual(live.Object, actual.Object) {
+					t.Fatalf("changed rule did not block the whole adoption: result=%v err=%v", result, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			rules, found := actual.Object["rules"]
+			if found && rules != nil && !reflect.DeepEqual(rules, []any{}) {
+				t.Fatal("previously declared RBAC rule survived adoption")
+			}
+			if ledger == "" || actual.GetAnnotations()[k8s.AnnotationResourceIntent] != ledger || actual.GetAnnotations()["external-note"] != "preserve" || actual.GetAnnotations()[v1.AnnotationConfigurationOwnerUID] != string(f.owner.UID) || result.inventory == nil || result.inventory.ResourceUID != live.GetUID() {
+				t.Fatal("adoption did not preserve history and restore identity")
+			}
+		})
+	}
+	t.Run("same_name_replacement_after_publication_cannot_enter_inventory", func(t *testing.T) {
+		f := newFixture(t, false)
+		replaced := false
+		wrapped := &adoptionAPIClient{Client: cli, key: client.ObjectKeyFromObject(f.live), afterConfirm: func(ctx context.Context) error {
+			live := get(t, f)
+			if err := cli.Delete(ctx, live); err != nil {
+				return err
+			}
+			duplicate := live.DeepCopy()
+			duplicate.SetResourceVersion("")
+			duplicate.SetUID("")
+			duplicate.SetManagedFields(nil)
+			if err := cli.Create(ctx, duplicate); err != nil {
+				return err
+			}
+			replaced = duplicate.GetUID() != live.GetUID()
+			return nil
+		}}
+		result, err := Handle(ctx, wrapped, f.owner, consts.HandleActionPublish, f.config)
+		if !replaced || err == nil || !strings.Contains(err.Error(), "target changed after publication") || result != nil {
+			t.Fatalf("replacement promoted to cleanup inventory: replaced=%v result=%v err=%v", replaced, result, err)
+		}
+	})
+	t.Run("shared_deployment_releases_mounts_and_restores_replica_default", func(t *testing.T) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "shared-deployment-"}}
+		if err := cli.Create(ctx, ns); err != nil {
+			t.Fatal(err)
+		}
+		owner := &v1.Middleware{ObjectMeta: metav1.ObjectMeta{Name: "owner", Namespace: ns.Name}, Spec: v1.MiddlewareSpec{Baseline: "example"}}
+		if err := cli.Create(ctx, owner); err != nil {
+			t.Fatal(err)
+		}
+		conf := &v1.MiddlewareConfiguration{ObjectMeta: metav1.ObjectMeta{Name: "shared-" + ns.Name}}
+		const template = `apiVersion: apps/v1
+kind: Deployment
+metadata: {name: shared}
+spec:
+  selector: {matchLabels: {app: shared}}
+  template:
+    metadata: {labels: {app: shared}}
+    spec:
+      containers:
+      - name: broker
+        image: example.invalid/broker:1
+`
+		const mounts = `        volumeMounts:
+        - {name: log, mountPath: /one}
+        - {name: log, mountPath: /two}
+      volumes:
+      - {name: log, emptyDir: {}}
+`
+		conf.Spec.Template = template + mounts + "  replicas: 3\n"
+		if err := cli.Create(ctx, conf); err != nil {
+			t.Fatal(err)
+		}
+		result, err := Handle(ctx, cli, owner, consts.HandleActionPublish, conf)
+		if err != nil || result == nil || result.inventory == nil {
+			t.Fatalf("publish: %v / %v", result, err)
+		}
+		uid := result.inventory.ResourceUID
+		target := &unstructured.Unstructured{Object: map[string]any{"apiVersion": "apps/v1", "kind": "Deployment", "metadata": map[string]any{"name": "shared", "namespace": ns.Name}}}
+		read := func() *unstructured.Unstructured {
+			t.Helper()
+			actual := target.DeepCopy()
+			if err := cli.Get(ctx, client.ObjectKeyFromObject(target), actual); err != nil {
+				t.Fatal(err)
+			}
+			return actual
+		}
+		current := read()
+		containers, _, _ := unstructured.NestedSlice(current.Object, "spec", "template", "spec", "containers")
+		first, ok := containers[0].(map[string]any)
+		if !ok {
+			t.Fatal("invalid container")
+		}
+		mounted, _, _ := unstructured.NestedSlice(first, "volumeMounts")
+		if len(mounted) != 2 {
+			t.Fatalf("mountPath identity lost: %v", mounted)
+		}
+		ext := target.DeepCopy()
+		ext.Object["spec"] = map[string]any{"template": map[string]any{"spec": map[string]any{"containers": []any{map[string]any{"name": "broker", "env": []any{map[string]any{"name": "AUDIT_KEEP", "value": "external"}}}}}}}
+		if err := cli.Patch(ctx, ext, client.Apply, client.FieldOwner("auditor")); err != nil {
+			t.Fatal(err)
+		}
+		conf.Spec.Template = template
+		result, err = Handle(ctx, cli, owner, consts.HandleActionUpdate, conf)
+		if err != nil || result == nil || result.inventory == nil || result.inventory.ResourceUID != uid {
+			t.Fatalf("update: %v / %v", result, err)
+		}
+		current = read()
+		replicas, _, _ := unstructured.NestedInt64(current.Object, "spec", "replicas")
+		containers, _, _ = unstructured.NestedSlice(current.Object, "spec", "template", "spec", "containers")
+		first, ok = containers[0].(map[string]any)
+		if !ok {
+			t.Fatal("invalid container")
+		}
+		kept, _, _ := unstructured.NestedSlice(first, "env")
+		mounted, _, _ = unstructured.NestedSlice(first, "volumeMounts")
+		volumes, _, _ := unstructured.NestedSlice(current.Object, "spec", "template", "spec", "volumes")
+		if replicas != 1 || len(mounted) != 0 || len(volumes) != 0 || !reflect.DeepEqual(kept, []any{map[string]any{"name": "AUDIT_KEEP", "value": "external"}}) {
+			t.Fatalf("replicas=%d mounts=%v volumes=%v env=%v", replicas, mounted, volumes, kept)
+		}
+	})
 	t.Run("retained_CRD_existing_CR_and_recreated_sources", func(t *testing.T) {
 		f := newFixture(t, true)
 		group, _, err := unstructured.NestedString(f.live.Object, "spec", "group")
@@ -383,8 +553,28 @@ spec:
 			if err := cli.List(ctx, &records, client.InNamespace(f.owner.Namespace), client.MatchingLabels{"middleware.cn/resource-intent-record": string(f.owner.UID)}); err != nil {
 				t.Fatal(err)
 			}
-			if len(records.Items) != 0 {
-				t.Fatal("failed adoption leaked uncommitted records")
+			if scenario == "record_failure" {
+				if len(records.Items) != 0 {
+					t.Fatal("failed secret creation left field history")
+				}
+				return
+			}
+			if len(records.Items) != 1 || records.Items[0].Annotations[k8s.AnnotationResourceIntentOperation] == "" || !metav1.IsControlledBy(&records.Items[0], f.owner) {
+				t.Fatal("failed adoption did not retain exactly one identifiable, unconfirmed attempt")
+			}
+			if scenario == "owner_paused" {
+				f.owner.Annotations = nil
+				if err := cli.Update(ctx, f.owner); err != nil {
+					t.Fatal(err)
+				}
+				result, err := Handle(ctx, cli, f.owner, consts.HandleActionPublish, f.config)
+				if err != nil || result == nil || result.inventory == nil {
+					t.Fatalf("eligible adoption could not resume the pending operation: %v", err)
+				}
+				current := get(t, f)
+				if current.GetAnnotations()[k8s.AnnotationResourceIntent] != records.Items[0].Name || current.GetAnnotations()[v1.AnnotationConfigurationOwnerUID] != string(f.owner.UID) {
+					t.Fatal("resumed adoption did not publish the same ledger and new owner")
+				}
 			}
 		})
 	}

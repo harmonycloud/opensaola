@@ -40,31 +40,6 @@ func newTestCR(name, namespace string, labels, annotations map[string]string) *u
 	return cr
 }
 
-// TestSSACleanMetadata verifies that PatchCustomResource and UpdateCustomResource
-// clean metadata fields required by SSA before sending the request.
-// SSA requires resourceVersion, managedFields, and creationTimestamp to be cleared.
-func TestSSACleanMetadata(t *testing.T) {
-	cr := newTestCR("obj1", "ns1", map[string]string{"a": "b"}, nil)
-	cr.SetResourceVersion("12345")
-	metadata, ok := cr.Object["metadata"].(map[string]interface{})
-	if !ok {
-		t.Fatal("expected metadata map")
-	}
-	metadata["creationTimestamp"] = "2026-01-01T00:00:00Z"
-
-	// Simulate the metadata cleaning logic (same as in PatchCustomResource/UpdateCustomResource)
-	cr.SetResourceVersion("")
-	cr.SetManagedFields(nil)
-	delete(metadata, "creationTimestamp")
-
-	if cr.GetResourceVersion() != "" {
-		t.Errorf("expected empty resourceVersion, got %s", cr.GetResourceVersion())
-	}
-	if _, exists := metadata["creationTimestamp"]; exists {
-		t.Error("expected creationTimestamp to be removed")
-	}
-}
-
 // TestIsImmutableResource verifies immutable resource detection.
 func TestIsImmutableResource(t *testing.T) {
 	cr := newTestCR("obj1", "ns1", nil, nil)

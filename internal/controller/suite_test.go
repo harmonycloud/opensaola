@@ -20,6 +20,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -30,6 +31,8 @@ import (
 
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -37,6 +40,7 @@ import (
 
 	middlewarecnv1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/resource/logger"
+	"github.com/harmonycloud/opensaola/internal/service/watcher"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -57,19 +61,10 @@ func TestControllers(t *testing.T) {
 	RunSpecs(t, "Controller Suite")
 }
 
-var _ = BeforeSuite(func() {
-	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
-	logger.Initialize(zerolog.DebugLevel)
-
-	ctx, cancel = context.WithCancel(context.TODO())
-
-	var err error
-	err = middlewarecnv1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
-
-	// +kubebuilder:scaffold:scheme
-
-	By("bootstrapping test environment")
+// Ordinary Go tests run before the Ginkgo suite and can initialize the shared
+// discovery/config singleton while rendering. Isolate the entire process before
+// m.Run, not just BeforeSuite, so dynamic watchers cannot retain another cluster.
+func TestMain(m *testing.M) {
 	testEnv = &envtest.Environment{
 		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
@@ -80,21 +75,77 @@ var _ = BeforeSuite(func() {
 		testEnv.BinaryAssetsDirectory = getFirstFoundEnvTestBinaryDir()
 	}
 
-	// cfg is defined in this file globally.
+	var err error
 	cfg, err = testEnv.Start()
-	Expect(err).NotTo(HaveOccurred())
-	Expect(cfg).NotTo(BeNil())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "start isolated controller test API:", err)
+		os.Exit(1)
+	}
 
+	// Dynamic primary-resource watchers resolve their client through kubeconfig.
+	// Pin that path to this temporary API server before any controller runs;
+	// tests must never fall back to the developer's current cluster.
+	kubeconfigDir, err := os.MkdirTemp("", "opensaola-controller-envtest-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create controller test kubeconfig directory:", err)
+		_ = testEnv.Stop()
+		os.Exit(1)
+	}
+	previousKubeconfig, hadKubeconfig := os.LookupEnv("KUBECONFIG")
+	cleanup := func() error {
+		watcher.StopAllCRWatchers()
+		stopErr := testEnv.Stop()
+		if stopErr != nil {
+			fmt.Fprintln(os.Stderr, "stop isolated controller test API:", stopErr)
+		}
+		if hadKubeconfig {
+			_ = os.Setenv("KUBECONFIG", previousKubeconfig)
+		} else {
+			_ = os.Unsetenv("KUBECONFIG")
+		}
+		_ = os.RemoveAll(kubeconfigDir)
+		return stopErr
+	}
+	configPath := filepath.Join(kubeconfigDir, "kubeconfig")
+	if err := clientcmd.WriteToFile(clientcmdapi.Config{
+		Clusters:       map[string]*clientcmdapi.Cluster{"envtest": {Server: cfg.Host, CertificateAuthorityData: cfg.CAData}},
+		AuthInfos:      map[string]*clientcmdapi.AuthInfo{"envtest": {ClientCertificateData: cfg.CertData, ClientKeyData: cfg.KeyData}},
+		Contexts:       map[string]*clientcmdapi.Context{"envtest": {Cluster: "envtest", AuthInfo: "envtest"}},
+		CurrentContext: "envtest",
+	}, configPath); err != nil {
+		fmt.Fprintln(os.Stderr, "write controller test kubeconfig:", err)
+		_ = cleanup()
+		os.Exit(1)
+	}
+	if err := os.Setenv("KUBECONFIG", configPath); err != nil {
+		fmt.Fprintln(os.Stderr, "select controller test kubeconfig:", err)
+		_ = cleanup()
+		os.Exit(1)
+	}
+	code := m.Run()
+	if err := cleanup(); err != nil {
+		code = 1
+	}
+	os.Exit(code)
+}
+
+var _ = BeforeSuite(func() {
+	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
+	logger.Initialize(zerolog.DebugLevel)
+	ctx, cancel = context.WithCancel(context.TODO())
+	Expect(middlewarecnv1.AddToScheme(scheme.Scheme)).To(Succeed())
+	// +kubebuilder:scaffold:scheme
+
+	var err error
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
 })
 
 var _ = AfterSuite(func() {
-	By("tearing down the test environment")
+	By("stopping controller suite observers")
 	cancel()
-	err := testEnv.Stop()
-	Expect(err).NotTo(HaveOccurred())
+	watcher.StopAllCRWatchers()
 })
 
 // getFirstFoundEnvTestBinaryDir locates the first binary in the specified path.

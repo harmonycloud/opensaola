@@ -23,10 +23,12 @@ import (
 	"time"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/k8s"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -340,6 +342,66 @@ func TestCustomResourceDeleteSkipsRebuildWhenMiddlewareSuspended(t *testing.T) {
 
 	if createCalls != 0 {
 		t.Fatalf("custom resource rebuild create calls = %d, want 0 while suspended", createCalls)
+	}
+}
+
+func TestCustomResourceDeleteEnqueuesOnlyCurrentWritableOwner(t *testing.T) {
+	k8s.ConfigureManagedResources(nil)
+	t.Cleanup(func() { k8s.ConfigureManagedResources(nil) })
+	for _, tc := range []struct {
+		name      string
+		suspended bool
+		paused    bool
+		deleting  bool
+		ownerUID  string
+		wantEvent bool
+	}{
+		{name: "current owner", ownerUID: "mid-uid", wantEvent: true},
+		{name: "suspended owner", ownerUID: "mid-uid", suspended: true},
+		{name: "pause without recovery approval", ownerUID: "mid-uid", paused: true},
+		{name: "deleting owner", ownerUID: "mid-uid", deleting: true},
+		{name: "old owner UID", ownerUID: "old-mid-uid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// This package-level channel is deliberately tested serially.
+			for len(middlewareReconcileEvents) > 0 {
+				<-middlewareReconcileEvents
+			}
+			scheme := runtime.NewScheme()
+			if err := v1.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			mid := &v1.Middleware{ObjectMeta: metav1.ObjectMeta{Name: "mid-a", Namespace: "ns1", UID: "mid-uid"}}
+			if tc.suspended {
+				mid.Annotations = map[string]string{v1.AnnotationSuspendReconcile: "true"}
+			}
+			if tc.paused {
+				mid.Status.Conditions = []metav1.Condition{{Type: v1.CondTypeReconcilePaused, Status: metav1.ConditionTrue}}
+			}
+			if tc.deleting {
+				now := metav1.Now()
+				mid.DeletionTimestamp = &now
+				mid.Finalizers = []string{v1.FinalizerMiddleware}
+			}
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mid).Build()
+			cr := testCustomResource("ns1", "redis-a", "1", true, nil, "mid-a")
+			refs := cr.GetOwnerReferences()
+			controller := true
+			refs[0].Controller = &controller
+			refs[0].UID = types.UID(tc.ownerUID)
+			cr.SetOwnerReferences(refs)
+			newResourceEventHandlerFuncs(t.Context(), cli, nil).DeleteFunc(cache.DeletedFinalStateUnknown{Obj: cr})
+			select {
+			case event := <-middlewareReconcileEvents:
+				if !tc.wantEvent || event.Object.GetUID() != mid.UID || event.Object.GetName() != mid.Name {
+					t.Fatalf("unexpected recovery event: %#v", event)
+				}
+			default:
+				if tc.wantEvent {
+					t.Fatal("current writable owner did not receive a recovery event")
+				}
+			}
+		})
 	}
 }
 

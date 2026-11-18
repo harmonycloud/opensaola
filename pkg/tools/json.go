@@ -17,9 +17,11 @@ limitations under the License.
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -36,6 +38,14 @@ const (
 	StructMergeMapType   StructMergeType = "map"
 	StructMergeArrayType StructMergeType = "array"
 )
+
+// Keep number tokens exact until they reach their destination type. In
+// particular a RawExtension may carry an int64 that a float64 cannot represent.
+func decodeMergeJSON(data []byte, into any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	return decoder.Decode(into)
+}
 
 func StructMerge(old, new any, typo StructMergeType) error {
 	var (
@@ -59,16 +69,16 @@ func StructMerge(old, new any, typo StructMergeType) error {
 	} else if string(oldBytes) == "null" {
 		return nil
 	} else if string(newBytes) == "null" {
-		return json.Unmarshal(oldBytes, new)
+		return decodeMergeJSON(oldBytes, new)
 	}
 
 	switch typo {
 	case StructMergeMapType:
-		err = json.Unmarshal(oldBytes, &oldMap)
+		err = decodeMergeJSON(oldBytes, &oldMap)
 		if err != nil {
 			return fmt.Errorf("failed to unmarshal old object: %w", err)
 		}
-		err = json.Unmarshal(newBytes, &newMap)
+		err = decodeMergeJSON(newBytes, &newMap)
 		if err != nil {
 			return fmt.Errorf("failed to unmarshal new object: %w", err)
 		}
@@ -78,11 +88,11 @@ func StructMerge(old, new any, typo StructMergeType) error {
 			return fmt.Errorf("failed to marshal result: %w", err)
 		}
 	case StructMergeArrayType:
-		err = json.Unmarshal(oldBytes, &oldSlice)
+		err = decodeMergeJSON(oldBytes, &oldSlice)
 		if err != nil {
 			return fmt.Errorf("failed to unmarshal old object: %w", err)
 		}
-		err = json.Unmarshal(newBytes, &newSlice)
+		err = decodeMergeJSON(newBytes, &newSlice)
 		if err != nil {
 			return fmt.Errorf("failed to unmarshal new object: %w", err)
 		}
@@ -94,7 +104,7 @@ func StructMerge(old, new any, typo StructMergeType) error {
 
 	}
 
-	return json.Unmarshal(resultBytes, new)
+	return decodeMergeJSON(resultBytes, new)
 }
 
 var jsonLog = ctrl.Log.WithName("tools").WithName("json")
@@ -178,7 +188,7 @@ func MergeArray(old, new []any) []any {
 							_, ok2 := v[ask]
 							if ok1 && ok2 {
 								keyFound = true
-								if o[ask] == v[ask] {
+								if reflect.DeepEqual(o[ask], v[ask]) {
 									old[oldIdx] = MergeMap(o, v)
 									found = true
 									break

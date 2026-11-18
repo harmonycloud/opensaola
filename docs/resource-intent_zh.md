@@ -30,6 +30,10 @@
 | `resume-policy=merge` 已获暂停状态机允许 | 仍比较暂停前后实际值；先应用有效 override，再按最终 D 写入 |
 | `resume-policy=apply` 已获暂停状态机允许 | 使用当前 D，保持显式放弃暂停期间改动的原有语义 |
 
+原子对象和原子列表的声明、写入预演、实际回执和重复更新共用同一套比较规则。平台递归核对声明值。对于回执中多出的字段，先按集群 OpenAPI 中该字段的 `default` 核对，原生 Kubernetes 类型还可以按对应类型的已知默认化或版本转换规则核对。规则可用声明中的同级字段计算默认值；回执里的额外字段本身不构成默认值证据。原子列表仍核对长度和顺序。新增列表项、未知字段、改错的默认值或被改写的声明均会导致校验失败。正常补齐的字段本身不授予日后删除该字段的权限。
+
+例如，StatefulSet 的 PVC 模板回执可以多出 `apiVersion: v1`、`kind: PersistentVolumeClaim`、`spec.volumeMode: Filesystem` 和 `status.phase: Pending`。声明 5Gi 时，回执 5120Mi 可以通过，1Gi 会失败。同一比较规则也适用于 Pod 模板的 downwardAPI 字段选择器、服务账号令牌投射、NetworkPolicy 端口、RBAC 绑定的 subjects 和准入规则。例如，RoleBinding 引用 User 或 Group 时可以补 RBAC 的 API 组，引用 ServiceAccount 时不能补该组。自定义资源使用自身 CRD 公布的默认值。集群或 webhook 独有且未在 schema 中声明的补充值，需要有独立依据才能被原子字段校验接受。
+
 这里的 B 是“我们曾明确提交的期望”，不是“证明没人曾写过相同字段”。历史通用 `manager/Update` 条目本身既不授权删除，也不阻止已记录模板变化。无法识别使用同一个 manager、写入相同值的另一方意图；本实现不声称提供写入者身份认证。
 
 例如 Kafka 的 opaque Pod 模板中，D 声明 `containers[name=broker].volumeMounts[name=log].mountPath=/root/logs`，L 的同一容器没有该挂载：本轮会补上它，即使 B 已经记录过完全相同的值。L 中 D 未涉及的其他容器、挂载和环境变量保留。若 D 中某个父节点本身明确为 `null`，该节点下的外部字段不能再算“未涉及”；不能把 YAML 的 `metadata:` 当成省略 metadata。

@@ -20,19 +20,28 @@ package middlewareconfiguration
 
 import (
 	"context"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
+	admissionv1 "k8s.io/api/admission/v1"
+	registrationv1 "k8s.io/api/admissionregistration/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -99,11 +108,15 @@ func TestConfigurationAdoptionAPI(t *testing.T) {
 		}
 	})
 	scheme := runtime.NewScheme()
-	for _, add := range []func(*runtime.Scheme) error{v1.AddToScheme, corev1.AddToScheme, rbacv1.AddToScheme, apiextensionsv1.AddToScheme} {
+	for _, add := range []func(*runtime.Scheme) error{v1.AddToScheme, corev1.AddToScheme, appsv1.AddToScheme, registrationv1.AddToScheme, rbacv1.AddToScheme, apiextensionsv1.AddToScheme} {
 		if err := add(scheme); err != nil {
 			t.Fatal(err)
 		}
 	}
+	var writes atomic.Int64
+	restConfig.Wrap(func(next http.RoundTripper) http.RoundTripper {
+		return configurationWriteCounter{next, &writes}
+	})
 	cli, err := client.New(restConfig, client.Options{Scheme: scheme})
 	if err != nil {
 		t.Fatal(err)
@@ -211,6 +224,12 @@ spec:
 		}
 		return live
 	}
+	t.Run("AtomicDefaults", func(t *testing.T) {
+		testAtomicDefaults(t, ctx, cli, resolver, &writes)
+	})
+	t.Run("StatefulSetFirstPublish", func(t *testing.T) {
+		testStatefulSetFirstPublish(t, ctx, cli, &writes)
+	})
 	for _, format := range []string{"current", "legacy_immutable", "externally_modified_rules"} {
 		t.Run("same_owner_history_survives_missing_owner_marker_"+format, func(t *testing.T) {
 			f := newFixture(t, false)
@@ -593,4 +612,203 @@ spec:
 			t.Fatal("external Helm resource was modified")
 		}
 	})
+}
+
+func testStatefulSetFirstPublish(t *testing.T, ctx context.Context, cli client.Client, writes *atomic.Int64) {
+	const template = `apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: database
+spec:
+  serviceName: database
+  selector:
+    matchLabels: {app: database}
+  template:
+    metadata:
+      labels: {app: database}
+    spec:
+      containers:
+      - name: database
+        image: registry.k8s.io/pause:3.10
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 5Gi
+`
+	for _, tc := range []struct {
+		name   string
+		mutate bool
+	}{
+		{"apiserver_defaults_do_not_change_declared_storage", false},
+		{"admission_rewrites_declared_storage", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "stateful-publish-"}}
+			if err := cli.Create(ctx, ns); err != nil {
+				t.Fatal(err)
+			}
+			owner := &v1.MiddlewareOperator{ObjectMeta: metav1.ObjectMeta{Name: "database", Namespace: ns.Name}}
+			if err := cli.Create(ctx, owner); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &v1.MiddlewareConfiguration{ObjectMeta: metav1.ObjectMeta{Name: ns.Name}}
+			cfg.Spec.Template = template
+			if err := cli.Create(ctx, cfg); err != nil {
+				t.Fatal(err)
+			}
+			target := client.ObjectKey{Namespace: ns.Name, Name: "database"}
+			var dryRuns *atomic.Int32
+			if tc.mutate {
+				dryRuns = installConfigurationMutationWebhook(t, ctx, cli, ns.Name, template, `[{"op":"replace","path":"/spec/volumeClaimTemplates/0/spec/resources/requests/storage","value":"1Gi"}]`)
+			}
+			result, err := Handle(ctx, cli, owner, consts.HandleActionPublish, cfg)
+			if tc.mutate {
+				if err == nil || !strings.Contains(err.Error(), "volumeClaimTemplates") || result != nil {
+					t.Fatalf("wanted an error identifying the changed declaration and no inventory, got result %v error %v", result, err)
+				}
+				if dryRuns.Load() == 0 {
+					t.Fatal("the API server did not send the writer's dry-run to admission")
+				}
+				if err := cli.Get(ctx, target, &appsv1.StatefulSet{}); !apierrors.IsNotFound(err) {
+					t.Fatalf("expected no persisted StatefulSet: %v", err)
+				}
+				var secrets corev1.SecretList
+				if err := cli.List(ctx, &secrets, client.InNamespace(ns.Name)); err != nil {
+					t.Fatal(err)
+				}
+				if len(secrets.Items) != 0 {
+					t.Fatalf("rejected first publish created %d history Secrets", len(secrets.Items))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var live appsv1.StatefulSet
+			if err := cli.Get(ctx, target, &live); err != nil {
+				t.Fatal(err)
+			}
+			if result == nil || result.inventory == nil || result.inventory.ResourceUID != live.UID || len(live.Spec.VolumeClaimTemplates) != 1 {
+				t.Fatalf("missing applied claim template or inventory: %+v", result)
+			}
+			claim := live.Spec.VolumeClaimTemplates[0]
+			if claim.Name != "data" || claim.Spec.Resources.Requests.Storage().String() != "5Gi" || claim.Spec.VolumeMode == nil || *claim.Spec.VolumeMode != corev1.PersistentVolumeFilesystem {
+				t.Fatalf("expected data/5Gi with the server-defaulted Filesystem mode, got %+v", claim)
+			}
+			if live.Annotations[k8s.AnnotationResourceIntent] == "" {
+				t.Fatal("no persisted field history")
+			}
+			key := client.ObjectKey{Namespace: ns.Name, Name: live.Annotations[k8s.AnnotationResourceIntent]}
+			var history corev1.Secret
+			if err := cli.Get(ctx, key, &history); err != nil {
+				t.Fatal(err)
+			}
+			beforeReplay := writes.Load()
+			if _, err := Handle(ctx, cli, owner, consts.HandleActionUpdate, cfg); err != nil {
+				t.Fatal(err)
+			}
+			if delta := writes.Load() - beforeReplay; delta != 0 {
+				t.Fatalf("unchanged configuration sent %d non-dry-run writes", delta)
+			}
+			var repeated appsv1.StatefulSet
+			var sameHistory corev1.Secret
+			if err := cli.Get(ctx, target, &repeated); err != nil {
+				t.Fatal(err)
+			}
+			if err := cli.Get(ctx, key, &sameHistory); err != nil {
+				t.Fatal(err)
+			}
+			if repeated.UID != live.UID || repeated.ResourceVersion != live.ResourceVersion || sameHistory.ResourceVersion != history.ResourceVersion {
+				t.Fatal("unchanged configuration rewrote the StatefulSet or its field history")
+			}
+		})
+	}
+}
+
+// Use the API server's mutating admission chain, with a dry-run probe to wait
+// for its dynamic webhook cache before testing the actual publication path.
+func installConfigurationMutationWebhook(t *testing.T, ctx context.Context, cli client.Client, namespace, template, patch string) *atomic.Int32 {
+	t.Helper()
+	var dryRuns atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var review admissionv1.AdmissionReview
+		if err := json.NewDecoder(r.Body).Decode(&review); err != nil || review.Request == nil {
+			http.Error(w, "invalid admission review", http.StatusBadRequest)
+			return
+		}
+		if review.Request.DryRun != nil && *review.Request.DryRun {
+			dryRuns.Add(1)
+		}
+		patchType := admissionv1.PatchTypeJSONPatch
+		response := admissionv1.AdmissionReview{TypeMeta: review.TypeMeta, Response: &admissionv1.AdmissionResponse{
+			UID: review.Request.UID, Allowed: true, PatchType: &patchType, Patch: []byte(patch),
+		}}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Errorf("write admission response: %v", err)
+		}
+	}))
+	t.Cleanup(server.Close)
+	var probe unstructured.Unstructured
+	if err := yaml.Unmarshal([]byte(template), &probe); err != nil {
+		t.Fatal(err)
+	}
+	probe.SetNamespace(namespace)
+	gvk := probe.GroupVersionKind()
+	resource, err := cli.RESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sideEffects := registrationv1.SideEffectClassNone
+	config := &registrationv1.MutatingWebhookConfiguration{ObjectMeta: metav1.ObjectMeta{Name: namespace}, Webhooks: []registrationv1.MutatingWebhook{{
+		Name: "configuration.test.opensaola.io", SideEffects: &sideEffects, AdmissionReviewVersions: []string{"v1"},
+		NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: namespace}},
+		ClientConfig:      registrationv1.WebhookClientConfig{URL: &server.URL, CABundle: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})},
+		Rules: []registrationv1.RuleWithOperations{{Operations: []registrationv1.OperationType{registrationv1.Create}, Rule: registrationv1.Rule{
+			APIGroups: []string{gvk.Group}, APIVersions: []string{gvk.Version}, Resources: []string{resource.Resource.Resource},
+		}}},
+	}}}
+	if err := cli.Create(ctx, config); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := cli.Delete(ctx, config); err != nil {
+			t.Error(err)
+		}
+	})
+	if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 20*time.Second, true, func(ctx context.Context) (bool, error) {
+		preview := probe.DeepCopy()
+		if err := cli.Create(ctx, preview, client.DryRunAll); err != nil {
+			return false, err
+		}
+		return dryRuns.Load() > 0, nil
+	}); err != nil {
+		t.Fatalf("webhook never admitted the dry-run probe: %v", err)
+	}
+	dryRuns.Store(0)
+	return &dryRuns
+}
+
+// Observe writes at the HTTP boundary so even a no-op PATCH (unchanged RV) is
+// counted and server-side dry-run requests are distinguishable from mutations.
+type configurationWriteCounter struct {
+	next   http.RoundTripper
+	writes *atomic.Int64
+}
+
+func (c configurationWriteCounter) RoundTrip(r *http.Request) (*http.Response, error) {
+	switch r.Method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		if r.URL.Query().Get("dryRun") == "" {
+			c.writes.Add(1)
+		}
+	}
+	return c.next.RoundTrip(r)
 }

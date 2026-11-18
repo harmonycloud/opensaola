@@ -19,6 +19,7 @@ package middlewareconfiguration
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -161,13 +162,14 @@ func shouldDeleteDisabledRenderedResource(owner metav1.Object, obj metav1.Object
 		return false
 	}
 	controller := metav1.GetControllerOf(obj)
-	// Only same-namespace resources can carry a namespaced owner's controller
-	// reference. Cross-namespace resources use the UID/marker checks above,
-	// just like cluster-scoped resources, while still rejecting foreign owners.
-	if resource.Namespaced && obj.GetNamespace() == owner.GetNamespace() {
+	if controller != nil {
 		return sameControllerOwner(owner, controller)
 	}
-	return controller == nil || sameControllerOwner(owner, controller)
+	if resource.Namespaced && obj.GetNamespace() == owner.GetNamespace() {
+		// A missing reference is safe only when publication explicitly opted out.
+		return resource.ControllerReferenceRequired != nil && !*resource.ControllerReferenceRequired
+	}
+	return true
 }
 
 func isOpenSaolaManagedConfiguration(owner metav1.Object, obj metav1.Object, configurationName string) bool {
@@ -196,38 +198,42 @@ func shouldDeleteRenderedResource(owner metav1.Object, obj metav1.Object, config
 	return isOpenSaolaManagedConfiguration(owner, obj, configurationName)
 }
 
-// removeControllerOwnerReference drops any controller reference pointing at
-// owner while preserving unrelated owners. Resources marked to outlive their
-// owner (configurationDisablePolicy=orphan) must stay outside the owner's
-// garbage-collection domain; on update this also migrates resources that a
-// previous revision had already taken controller ownership of.
-func removeControllerOwnerReference(refs []metav1.OwnerReference, owner metav1.Object) []metav1.OwnerReference {
-	if len(refs) == 0 || owner == nil {
+// Either orphan policy needs a resource outside the owner's GC domain. The
+// opposite operation can still explicitly delete it according to its own policy.
+func configurationRequiresControllerReference(m *v1.MiddlewareConfiguration, obj metav1.Object, disablePolicy string) bool {
+	return disablePolicy != v1.ConfigurationDisablePolicyOrphan &&
+		configurationPolicy(m, obj, v1.AnnotationConfigurationDeletePolicy) != v1.ConfigurationDeletePolicyOrphan
+}
+
+// All references to this UID allow Kubernetes GC, including non-controller references.
+func withoutConfigurationOwner(refs []metav1.OwnerReference, owner metav1.Object) []metav1.OwnerReference {
+	if owner == nil || owner.GetUID() == "" {
 		return refs
 	}
-	kept := make([]metav1.OwnerReference, 0, len(refs))
-	for _, ref := range refs {
-		if ref.Controller != nil && *ref.Controller && ref.UID == owner.GetUID() {
-			continue
-		}
-		kept = append(kept, ref)
+	kept := slices.DeleteFunc(refs, func(ref metav1.OwnerReference) bool { return ref.UID == owner.GetUID() })
+	if len(kept) == 0 {
+		return nil
 	}
 	return kept
 }
 
-// stripLiveControllerOwnerReference removes the owner's controller reference
-// from the live object with an explicit merge patch. Server-side apply only
-// drops fields the current field manager owns, and older references may
-// predate it, so migration of orphan-marked resources cannot rely on apply
-// alone.
-func stripLiveControllerOwnerReference(ctx context.Context, cli client.Client, live *unstructured.Unstructured, owner metav1.Object) error {
-	controller := metav1.GetControllerOf(live)
-	if controller == nil || controller.UID != owner.GetUID() {
+func stripLiveConfigurationOwnerReference(ctx context.Context, cli client.Client, live *unstructured.Unstructured, owner metav1.Object) error {
+	refs := live.GetOwnerReferences()
+	kept := withoutConfigurationOwner(refs, owner)
+	if len(kept) == len(refs) {
 		return nil
 	}
 	base := client.MergeFromWithOptions(live.DeepCopy(), client.MergeFromWithOptimisticLock{})
-	live.SetOwnerReferences(removeControllerOwnerReference(live.GetOwnerReferences(), owner))
-	return cli.Patch(ctx, live, base)
+	live.SetOwnerReferences(kept)
+	if err := cli.Patch(ctx, live, base); err != nil {
+		return err
+	}
+	for _, ref := range live.GetOwnerReferences() {
+		if ref.UID == owner.GetUID() {
+			return fmt.Errorf("configuration resource %s/%s retains owner reference %s after patch", live.GetNamespace(), live.GetName(), ref.UID)
+		}
+	}
+	return nil
 }
 
 // resolveConfigurationDeletePolicy resolves the effective delete policy for a

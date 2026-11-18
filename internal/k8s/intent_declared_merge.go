@@ -212,7 +212,7 @@ func (m *intentDeclaredMerger) merge(b, l, d, raw intentDeclaredValue, typ inten
 				return intentDeclaredValue{value: tools.MergeMap(runtime.DeepCopyJSON(current), runtime.DeepCopyJSON(wanted)), present: true}, nil
 			}
 			m.assert(path, typ, raw.value, assertValue)
-			if l.present && m.equivalent(raw.value, l.value, typ, path) {
+			if l.present && m.matchesDeclaredValue(raw.value, l.value, typ, path) {
 				return copyDeclaredValue(l), nil
 			}
 			return copyDeclaredValue(raw), nil
@@ -247,7 +247,7 @@ func (m *intentDeclaredMerger) merge(b, l, d, raw intentDeclaredValue, typ inten
 			return intentDeclaredValue{value: tools.MergeArray(current, wanted), present: true}, nil
 		}
 		m.assert(path, typ, raw.value, assertValue)
-		if l.present && m.equivalent(wanted, l.value, typ, path) {
+		if l.present && m.matchesDeclaredValue(wanted, l.value, typ, path) {
 			return copyDeclaredValue(l), nil
 		}
 		return copyDeclaredValue(raw), nil
@@ -634,11 +634,23 @@ func declaredEqual(a, b any, ref schema.TypeRef) bool {
 	return value.Equals(value.NewValueInterface(a), value.NewValueInterface(b))
 }
 
-// Equality uses the same membership keys as merging. In particular, reordering
-// an associative list is not an external edit that should prevent deletion of a
-// parent member. Quantity formatting and actual schema defaults are semantic;
-// arbitrary zero values and missing opaque fields are not guessed equivalent.
+// A historical value authorizes deletion only under the original symmetric
+// equality rules. A declaration can additionally accept a versioned API default
+// in the response, and only in the submitted -> observed direction.
 func (m *intentDeclaredMerger) equivalent(a, b any, typ intentDeclaredType, path fieldpath.Path) bool {
+	return (declaredValueComparison{intentDeclaredMerger: m}).equal(a, b, typ, path)
+}
+
+func (m *intentDeclaredMerger) matchesDeclaredValue(wanted, observed any, typ intentDeclaredType, path fieldpath.Path) bool {
+	return (declaredValueComparison{intentDeclaredMerger: m, allowAdmissionDefaults: true}).equal(wanted, observed, typ, path)
+}
+
+type declaredValueComparison struct {
+	*intentDeclaredMerger
+	allowAdmissionDefaults bool
+}
+
+func (m declaredValueComparison) equal(a, b any, typ intentDeclaredType, path fieldpath.Path) bool {
 	if declaredEqual(a, b, typ.ref) {
 		return true
 	}
@@ -653,84 +665,95 @@ func (m *intentDeclaredMerger) equivalent(a, b any, typ intentDeclaredType, path
 	if err != nil {
 		return false
 	}
-	if am, ok := a.(map[string]any); ok {
-		bm, ok := b.(map[string]any)
-		if !ok || !opaque && atom.Map == nil {
+	switch left := a.(type) {
+	case map[string]any:
+		right, ok := b.(map[string]any)
+		return ok && (opaque || atom.Map != nil) && m.equalMap(left, right, atom, opaque, path)
+	case []any:
+		right, ok := b.([]any)
+		return ok && m.equalList(left, right, atom, opaque, path)
+	default:
+		return false
+	}
+}
+
+func (m declaredValueComparison) equalMap(wanted, observed map[string]any, atom schema.Atom, opaque bool, path fieldpath.Path) bool {
+	for key, expected := range wanted {
+		child, _ := declaredMapChildType(atom, opaque, key)
+		childPath := appendDeclaredPath(path, fieldpath.PathElement{FieldName: &key})
+		actual, found := observed[key]
+		if !found {
+			if m.allowAdmissionDefaults && m.nativeFieldOmittable(childPath, expected) {
+				continue
+			}
+			if child.defaultValue == nil {
+				return false
+			}
+			actual = child.defaultValue
+		}
+		if !m.equal(expected, actual, child, childPath) {
 			return false
 		}
-		keys := map[string]struct{}{}
-		for key := range am {
-			keys[key] = struct{}{}
+	}
+	for key, actual := range observed {
+		if _, found := wanted[key]; found {
+			continue
 		}
-		for key := range bm {
-			keys[key] = struct{}{}
+		child, _ := declaredMapChildType(atom, opaque, key)
+		childPath := appendDeclaredPath(path, fieldpath.PathElement{FieldName: &key})
+		if child.defaultValue != nil && m.equal(child.defaultValue, actual, child, childPath) {
+			continue
 		}
-		for key := range keys {
-			child := intentDeclaredType{opaque: opaque}
-			if opaque {
-				child.ref = opaqueDeclaredRef()
-			} else if field, ok := atom.Map.FindField(key); ok {
-				child.ref, child.defaultValue = field.Type, field.Default
-			} else {
-				child.ref = atom.Map.ElementType
+		if m.allowAdmissionDefaults {
+			if expected, ok := nativeAdmissionDefault(m.nativeType, childPath, wanted); ok && m.equal(expected, actual, child, childPath) {
+				continue
 			}
-			av, ap := am[key]
-			bv, bp := bm[key]
-			if !ap && child.defaultValue != nil {
-				av, ap = child.defaultValue, true
-			}
-			if !bp && child.defaultValue != nil {
-				bv, bp = child.defaultValue, true
-			}
-			if ap != bp || !m.equivalent(av, bv, child, appendDeclaredPath(path, fieldpath.PathElement{FieldName: &key})) {
+		}
+		return false
+	}
+	return true
+}
+
+func (m declaredValueComparison) equalList(al, bl []any, atom schema.Atom, opaque bool, path fieldpath.Path) bool {
+	if len(al) != len(bl) {
+		return false
+	}
+	keys, associative, err := declaredListKeys(atom, opaque, path, intentDeclaredValue{value: al, present: true}, intentDeclaredValue{value: bl, present: true})
+	if err != nil {
+		return false
+	}
+	child := intentDeclaredType{opaque: opaque}
+	if opaque {
+		child.ref = opaqueDeclaredRef()
+	} else if atom.List != nil {
+		child.ref = atom.List.ElementType
+	} else {
+		return false
+	}
+	if associative {
+		left, leftErr := m.listMembers(intentDeclaredValue{value: al, present: true}, atom, opaque, keys, path)
+		right, rightErr := m.listMembers(intentDeclaredValue{value: bl, present: true}, atom, opaque, keys, path)
+		if leftErr != nil || rightErr != nil {
+			return false
+		}
+		index := map[string]int{}
+		for i, member := range right {
+			index[member.id] = i
+		}
+		for _, member := range left {
+			i, ok := index[member.id]
+			if !ok || !m.equal(member.value, right[i].value, child, appendDeclaredPath(path, member.path)) {
 				return false
 			}
 		}
 		return true
 	}
-	if al, ok := a.([]any); ok {
-		bl, ok := b.([]any)
-		if !ok || len(al) != len(bl) {
+	for i := range al {
+		if !m.equal(al[i], bl[i], child, appendDeclaredPath(path, fieldpath.PathElement{Index: &i})) {
 			return false
 		}
-		keys, associative, err := declaredListKeys(atom, opaque, path, intentDeclaredValue{value: al, present: true}, intentDeclaredValue{value: bl, present: true})
-		if err != nil {
-			return false
-		}
-		child := intentDeclaredType{opaque: opaque}
-		if opaque {
-			child.ref = opaqueDeclaredRef()
-		} else if atom.List != nil {
-			child.ref = atom.List.ElementType
-		} else {
-			return false
-		}
-		if associative {
-			left, leftErr := m.listMembers(intentDeclaredValue{value: al, present: true}, atom, opaque, keys, path)
-			right, rightErr := m.listMembers(intentDeclaredValue{value: bl, present: true}, atom, opaque, keys, path)
-			if leftErr != nil || rightErr != nil {
-				return false
-			}
-			index := map[string]int{}
-			for i, member := range right {
-				index[member.id] = i
-			}
-			for _, member := range left {
-				i, ok := index[member.id]
-				if !ok || !m.equivalent(member.value, right[i].value, child, appendDeclaredPath(path, member.path)) {
-					return false
-				}
-			}
-			return true
-		}
-		for i := range al {
-			if !m.equivalent(al[i], bl[i], child, appendDeclaredPath(path, fieldpath.PathElement{Index: &i})) {
-				return false
-			}
-		}
-		return true
 	}
-	return false
+	return true
 }
 
 // Unlike overlap, this excludes protected descendants: deleting a granular map

@@ -374,10 +374,18 @@ retroactively deleted after upgrade; it must first reconcile successfully to use
 owner event must do so. “No longer referenced” means only that OpenSaola no longer renders the Configuration, not that the
 controller has proven no other cluster consumer exists.
 
-Same-namespace resources must also match the controller ownerReference. Cross-namespace and cluster-scoped resources use
-the inventory UIDs and source markers without requiring a cross-namespace ownerReference; an external controller still
-prevents disable cleanup. On MID/MO deletion, policy is read from the live resource with the MCF metadata as fallback.
-An explicit `configurationDeletePolicy` takes precedence; otherwise `configurationDisablePolicy=orphan` also retains it.
+For example, setting only `middleware.cn/configurationDeletePolicy: orphan` on a same-namespace ConfigMap
+retains it when the MID/MO is deleted. Disabling that Configuration uses the ConfigMap's default disable policy
+of `delete`. OpenSaola verifies the recorded resource UID, owner UID and source before deleting it.
+The inventory value `controllerReferenceRequired: false` records that OpenSaola deliberately omitted the owner
+reference. Targets that require a controller reference must still match it. A foreign controller prevents disable cleanup.
+
+After an upgrade, OpenSaola automatically removes obsolete instance references from retained resources, including
+those of paused instances. It updates only ownership metadata. For versions predating lifecycle inventory, it can
+detach resources that can be identified from the Configuration and still reference the original instance UID.
+Legacy discovery uses the resource’s static `apiVersion` and `kind`. The controller emits a `ConfigurationMigrationFailed` event and retries if discovery fails. A subsequent successful publication establishes disable cleanup authority. Owner deletion reads the resource's
+policy annotation first, then the MCF annotation. In the absence of an explicit delete policy, a disable policy
+of `orphan` also retains the resource on owner deletion.
 
 An already-disabled cross-namespace resource whose inventory was lost in an older version is not automatically deleted
 by upgrading or retrying. After checking its identity and current use, and only if reapplying the configuration is acceptable,

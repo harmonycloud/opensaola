@@ -118,6 +118,12 @@ helm upgrade --install opensaola ./chart/opensaola \
   --set config.createDataNamespace=true
 ```
 
+Helm retains a chart-created data namespace when you turn creation off, select a different namespace, or uninstall this revision. Changing the name switches the catalog location. Move data separately if needed. With creation disabled, provision the selected namespace before upgrading.
+
+**Upgrading a release installed with v1.5.0 or an earlier chart that lacks the keep annotation:** first upgrade with the original data namespace name and `config.createDataNamespace=true`. This records `helm.sh/resource-policy: keep` both on the Namespace and in the deployed Helm manifest. Then turn creation off or change the name in a second upgrade. A direct transition from an unprotected namespace is rejected during rendering. Before uninstall, verify the current release manifest with `helm get manifest`: an old revision, including one restored by rollback, can still delete the namespace. A live annotation alone does not protect an uninstall of an old revision.
+
+For an upgrade the Helm client needs permission to list namespaces to discover the previously managed name, even when new values change it. The controller needs no additional RBAC. Use `helm upgrade --dry-run=server` to exercise this check against the cluster; offline rendering cannot see installed objects.
+
 ## RBAC Scope
 
 OpenSaola can render and reconcile Kubernetes resources from middleware package templates, including custom resources from package-provided CRDs. The default Helm RBAC therefore includes dynamic resource permissions that match `config/rbac/role.yaml`, so a fresh checkout can be installed or upgraded directly with Helm.

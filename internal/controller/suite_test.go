@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -39,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	middlewarecnv1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/resource/logger"
 	"github.com/harmonycloud/opensaola/internal/service/watcher"
 	// +kubebuilder:scaffold:imports
@@ -140,13 +142,33 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+	resolver, err := k8s.NewIntentSchemaResolver(cfg)
+	Expect(err).NotTo(HaveOccurred())
+	// Dynamic watchers outlive individual specs. Install a single direct reader
+	// and schema resolver before they start, as the production manager does.
+	k8s.ConfigureManagedResources(k8sClient)
+	k8s.ConfigureResourceIntents(resolver)
 })
 
 var _ = AfterSuite(func() {
 	By("stopping controller suite observers")
+	stopSuiteWatchers()
 	cancel()
-	watcher.StopAllCRWatchers()
+	k8s.ConfigureManagedResources(nil)
+	k8s.ConfigureResourceIntents(nil)
 })
+
+// Stop and join the informer callbacks before resetting the shared clients
+// or letting another test suite install its own fake reader.
+func stopSuiteWatchers() {
+	watcher.CustomResourceWatcherMap.Range(func(_, value any) bool {
+		cw, ok := value.(*watcher.CustomResourceWatcher)
+		Expect(ok).To(BeTrue())
+		cw.Stop()
+		Eventually(cw.Done()).WithTimeout(10 * time.Second).Should(BeClosed())
+		return true
+	})
+}
 
 // getFirstFoundEnvTestBinaryDir locates the first binary in the specified path.
 // ENVTEST-based tests depend on specific binaries, usually located in paths set by

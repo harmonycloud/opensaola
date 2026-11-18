@@ -197,6 +197,9 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		)
 		return ctrl.Result{Requeue: true}, nil
 	}
+	if err := migrateConfigurationReferences(ctx, r.Client, r.Recorder, mid); err != nil {
+		defer retryConfigurationMigration(&result, &retErr)
+	}
 	if handled, pauseResult, pauseErr := r.handleMiddlewareReconcilePause(ctx, mid); handled {
 		return pauseResult, pauseErr
 	}

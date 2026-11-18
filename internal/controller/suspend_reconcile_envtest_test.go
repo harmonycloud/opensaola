@@ -41,12 +41,6 @@ import (
 )
 
 var _ = Describe("Suspend reconcile", func() {
-	BeforeEach(func() {
-		resolver, err := k8s.NewIntentSchemaResolver(cfg)
-		Expect(err).NotTo(HaveOccurred())
-		k8s.ConfigureResourceIntents(resolver)
-		DeferCleanup(func() { k8s.ConfigureResourceIntents(nil) })
-	})
 	for _, failure := range []string{"missing Secret", "corrupt hash"} {
 		It("keeps merge protected without recapturing a "+failure, func() {
 			name := "pause-secret-failure-" + randomSuffix()

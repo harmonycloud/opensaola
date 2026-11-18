@@ -273,7 +273,7 @@ func (a declaredFieldAssertion) satisfied(m *intentDeclaredMerger, v intentDecla
 		}
 		return next == len(wanted)
 	default:
-		return m.equivalent(a.wanted, v.value, a.typ, a.path)
+		return m.matchesDeclaredValue(a.wanted, v.value, a.typ, a.path)
 	}
 }
 

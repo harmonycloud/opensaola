@@ -116,6 +116,12 @@ jobs:
       - name: Verify field management and Redis persistence on fresh Kind
         run: make test-fields-redis
         timeout-minutes: 25
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.18.3
+      - name: Verify Helm catalog namespace retention on fresh Kind
+        run: make test-helm-data-namespace
+        timeout-minutes: 10
 
   verify:
     name: Verify Generated Code

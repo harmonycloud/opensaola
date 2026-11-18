@@ -11,7 +11,7 @@ Brief description of the changes.
 - [ ] Code compiles without errors (`go build ./...`)
 - [ ] Tests pass (`go test ./...`)
 - [ ] Code is formatted (`go fmt ./...`)
-- [ ] Documentation is updated
+- [ ] Documentation is updated; lifecycle/API changes are reflected in the relevant technical, runbook, troubleshooting, and packaging sections in both English and Chinese
 - [ ] CRD changes include `make manifests generate`
 
 ## Related Issues

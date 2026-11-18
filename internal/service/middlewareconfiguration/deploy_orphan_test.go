@@ -18,6 +18,7 @@ package middlewareconfiguration
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
@@ -114,31 +115,58 @@ func fetchAppliedConfigMap(t *testing.T, cli client.Client) *corev1.ConfigMap {
 	return cm
 }
 
-func TestHandleOrphanPolicySkipsControllerOwnership(t *testing.T) {
-
-	cli := orphanWriteClient(t, testMiddleware())
-	cfg := orphanTestConfig(map[string]string{
-		v1.AnnotationConfigurationDisablePolicy: v1.ConfigurationDisablePolicyOrphan,
-	})
-	if _, err := Handle(context.Background(), cli, testMiddleware(), consts.HandleActionPublish, cfg); err != nil {
-		t.Fatalf("handle orphan configuration: %v", err)
+func TestConfigurationPublishAndDisablePolicies(t *testing.T) {
+	tests := []struct {
+		name                 string
+		deletePolicy         string
+		disablePolicy        string
+		templateDeletePolicy string
+		wantReference        bool
+		wantDisableDeletion  bool
+	}{
+		{name: "default", wantReference: true, wantDisableDeletion: true},
+		{name: "delete orphan with default disable", deletePolicy: "orphan", wantDisableDeletion: true},
+		{name: "both delete", deletePolicy: "delete", disablePolicy: "delete", wantReference: true, wantDisableDeletion: true},
+		{name: "both orphan", deletePolicy: "orphan", disablePolicy: "orphan"},
+		{name: "delete owner and keep on disable", deletePolicy: "delete", disablePolicy: "orphan"},
+		{name: "disable orphan without delete policy", disablePolicy: "orphan"},
+		{name: "template orphan overrides configuration delete", deletePolicy: "delete", templateDeletePolicy: "orphan", wantDisableDeletion: true},
+		{name: "template delete overrides configuration orphan", deletePolicy: "orphan", templateDeletePolicy: "delete", wantReference: true, wantDisableDeletion: true},
 	}
-	cm := fetchAppliedConfigMap(t, cli)
-	if refs := cm.GetOwnerReferences(); len(refs) != 0 {
-		t.Fatalf("orphan resource must stay out of the owner GC domain, got ownerReferences %v", refs)
-	}
-}
-
-func TestHandleDefaultPolicyTakesControllerOwnership(t *testing.T) {
-
-	cli := orphanWriteClient(t, testMiddleware())
-	if _, err := Handle(context.Background(), cli, testMiddleware(), consts.HandleActionPublish, orphanTestConfig(nil)); err != nil {
-		t.Fatalf("handle default configuration: %v", err)
-	}
-	cm := fetchAppliedConfigMap(t, cli)
-	controller := metav1.GetControllerOf(cm)
-	if controller == nil || controller.UID != testMiddleware().UID {
-		t.Fatalf("default policy resource must carry the owner controller reference, got %v", cm.GetOwnerReferences())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			owner := testMiddleware()
+			cli := orphanWriteClient(t, owner)
+			cfg := orphanTestConfig(map[string]string{
+				v1.AnnotationConfigurationDisablePolicy: tt.disablePolicy,
+				v1.AnnotationConfigurationDeletePolicy:  tt.deletePolicy,
+			})
+			cfg.UID = "config-uid"
+			if tt.templateDeletePolicy != "" {
+				annotations := "metadata:\n  annotations:\n    " + v1.AnnotationConfigurationDeletePolicy + ": " + tt.templateDeletePolicy
+				cfg.Spec.Template = strings.Replace(cfg.Spec.Template, "metadata:", annotations, 1)
+			}
+			result, err := Handle(ctx, cli, owner, consts.HandleActionPublish, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cm := fetchAppliedConfigMap(t, cli)
+			controller := metav1.GetControllerOf(cm)
+			if tt.wantReference && (controller == nil || controller.UID != owner.UID) || !tt.wantReference && len(cm.OwnerReferences) != 0 {
+				t.Fatalf("ownerReferences = %v, want this owner's reference: %t", cm.OwnerReferences, tt.wantReference)
+			}
+			if result == nil || result.inventory == nil {
+				t.Fatal("expected published inventory")
+			}
+			if err := DeleteDisabledRenderedConfigurationResources(ctx, cli, owner, []v1.RenderedConfigurationResource{*result.inventory}, nil); err != nil {
+				t.Fatal(err)
+			}
+			err = cli.Get(ctx, client.ObjectKeyFromObject(cm), &corev1.ConfigMap{})
+			if (tt.wantDisableDeletion && !apierrors.IsNotFound(err)) || (!tt.wantDisableDeletion && err != nil) {
+				t.Fatalf("want deletion on disable: %t, get error: %v", tt.wantDisableDeletion, err)
+			}
+		})
 	}
 }
 
@@ -166,7 +194,78 @@ func TestHandleOrphanPolicyStripsPriorControllerOwnership(t *testing.T) {
 	}
 }
 
-func TestRemoveControllerOwnerReference(t *testing.T) {
+func TestUpdateConfigurationDeletePolicyRestoresAndRemovesReference(t *testing.T) {
+	ctx := context.Background()
+	owner := testMiddleware()
+	cli := orphanWriteClient(t, owner)
+	cfg := orphanTestConfig(map[string]string{v1.AnnotationConfigurationDeletePolicy: "orphan"})
+	for _, policy := range []string{"orphan", "delete", "orphan"} {
+		cfg.Annotations[v1.AnnotationConfigurationDeletePolicy] = policy
+		if _, err := Handle(ctx, cli, owner, consts.HandleActionUpdate, cfg); err != nil {
+			t.Fatal(err)
+		}
+		cm := fetchAppliedConfigMap(t, cli)
+		if metav1.IsControlledBy(cm, owner) != (policy == "delete") {
+			t.Fatalf("owner references after switching to %s: %v", policy, cm.OwnerReferences)
+		}
+	}
+}
+
+func TestHandleDeleteUsesPublishedResourcePolicy(t *testing.T) {
+	t.Parallel()
+	for _, livePolicy := range []string{"delete", "orphan"} {
+		t.Run(livePolicy, func(t *testing.T) {
+			t.Parallel()
+			otherPolicy := "orphan"
+			if livePolicy == "orphan" {
+				otherPolicy = "delete"
+			}
+			cfg := orphanTestConfig(map[string]string{v1.AnnotationConfigurationDeletePolicy: otherPolicy})
+			cfg.Spec.Template = strings.Replace(cfg.Spec.Template, "metadata:", "metadata:\n  annotations:\n    "+v1.AnnotationConfigurationDeletePolicy+": "+otherPolicy, 1)
+			owner := testMiddleware()
+			cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Name: "shared-sample", Namespace: owner.Namespace, UID: "live-uid",
+				Labels:          map[string]string{v1.LabelApp: owner.Name},
+				Annotations:     map[string]string{v1.AnnotationConfigurationDeletePolicy: livePolicy, v1.LabelConfigurations: cfg.Name},
+				OwnerReferences: []metav1.OwnerReference{middlewareOwnerRef()},
+			}}
+			cli := orphanTestClient(t, owner, cm)
+			if _, err := Handle(context.Background(), cli, owner, consts.HandleActionDelete, cfg); err != nil {
+				t.Fatal(err)
+			}
+			err := cli.Get(context.Background(), client.ObjectKeyFromObject(cm), cm)
+			if livePolicy == "delete" && !apierrors.IsNotFound(err) || livePolicy == "orphan" && (err != nil || len(cm.OwnerReferences) != 0) {
+				t.Fatalf("live policy %s, get error %v, references %v", livePolicy, err, cm.OwnerReferences)
+			}
+		})
+	}
+}
+
+func TestOrphanPublicationFiltersOnlyThisOwnerFromTemplate(t *testing.T) {
+	ctx := context.Background()
+	owner := testMiddleware()
+	cli := orphanWriteClient(t, owner)
+	cfg := orphanTestConfig(map[string]string{v1.AnnotationConfigurationDeletePolicy: "orphan"})
+	cfg.Spec.Template = strings.Replace(cfg.Spec.Template, "metadata:", `metadata:
+  ownerReferences:
+    - apiVersion: middleware.cn/v1
+      kind: Middleware
+      name: redis-lxt
+      uid: middleware-uid
+    - apiVersion: v1
+      kind: ConfigMap
+      name: other
+      uid: other-uid`, 1)
+	if _, err := Handle(ctx, cli, owner, consts.HandleActionPublish, cfg); err != nil {
+		t.Fatal(err)
+	}
+	cm := fetchAppliedConfigMap(t, cli)
+	if len(cm.OwnerReferences) != 1 || cm.OwnerReferences[0].UID != "other-uid" {
+		t.Fatalf("independent reference should survive: %+v", cm.OwnerReferences)
+	}
+}
+
+func TestWithoutConfigurationOwner(t *testing.T) {
 	t.Parallel()
 	foreign := redisClusterOwnerRef()
 	tests := []struct {
@@ -183,7 +282,7 @@ func TestRemoveControllerOwnerReference(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := removeControllerOwnerReference(tt.refs, tt.owner)
+			got := withoutConfigurationOwner(tt.refs, tt.owner)
 			if len(got) != tt.want {
 				t.Fatalf("expected %d refs, got %d: %v", tt.want, len(got), got)
 			}

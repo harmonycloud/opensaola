@@ -315,6 +315,9 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 			updateErr := k8s.UpdateMiddlewareOperatorStatus(ctx, cli, m)
 			if updateErr != nil {
 				log.FromContext(ctx).Error(updateErr, "update middleware operator status error")
+				if err == nil {
+					err = updateErr
+				}
 			}
 		}
 	}()
@@ -323,20 +326,15 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 
 	switch act {
 	case consts.HandleActionDelete:
-		return middlewareconfiguration.DeleteTemplateRenderedResources(ctx, cli, m, m)
+		return middlewareconfiguration.DeleteTemplateRenderedResources(ctx, cli, m, m, nil)
 
 	case consts.HandleActionPublish, consts.HandleActionUpdate:
 		mcs, err = middlewareconfiguration.GetTemplateParsedMiddlewareConfigurations(ctx, cli, act, m)
 		if err != nil {
 			return err
 		}
-		var inventory []v1.RenderedConfigurationResource
-		inventory, err = middlewareconfiguration.ReconcileRenderedConfigurationResources(ctx, cli, m, act, mcs, m.Status.RenderedConfigurationResources)
-		if err != nil {
-			return err
-		}
-		m.Status.RenderedConfigurationResources = inventory
-		m.Status.RenderedConfigurationResourcesGeneration = m.Generation
+		_, err = middlewareconfiguration.ReconcileRenderedConfigurationResources(ctx, cli, m, act, mcs)
+		return err
 	}
 
 	return nil

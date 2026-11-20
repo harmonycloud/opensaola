@@ -27,10 +27,10 @@ export KAFKA_FIXTURES=/path/to/kafka-test-fixtures
 make test-fields-kafka
 
 # 正式版接续：可执行文件由指定正式 tag 构建。
-export KAFKA_PREVIOUS_MANAGER=/path/to/v1.4.0/manager
+export KAFKA_PREVIOUS_MANAGER=/path/to/v1.5.1/manager
 make test-fields-kafka
 ```
 
-两种模式均等待 MID 的当前 generation 为 Available、broker 为 Ready，并在 `/root/logs` 实际写入、读回和删除文件，并向临时 topic 生产消息。升级模式额外等待旧版写好不可变历史记录、停止旧控制器、启动候选控制器，触发一轮保留挂载声明的正常 MID 更新，检验历史已迁移。随后撤销挂载，验证另一 Ready broker 的内核挂载表和跨滚动的旧消息；MID 与 Kafka CR 的 UID 应保持一致。最后在已卸载的 Ready 实例上重新用 MID 新增同一份挂载，等待新的 Ready Pod 并再次读写文件。有原包和对应镜像的交付环境可在正式发布前运行此流程。
+两种模式均等待 MID 的当前 generation 为 Available、broker 为 Ready，并在 `/root/logs` 实际写入、读回和删除文件，并向临时 topic 生产消息。升级模式在旧版确认历史记录后停止旧控制器，启动候选控制器，并在保留挂载的情况下更新 MID 的 Pod 模板注解。脚本从 Kafka CR 回读这条注解，并检查历史记录已确认。早期不可变 Secret 应迁移到新的字段历史 Secret。v1.5.1 已使用可变的字段历史 Secret，升级后该 Secret 的名称和 UID 应保留，resourceVersion 应更新。随后撤销挂载，验证另一 Ready broker 的内核挂载表和跨滚动的旧消息；MID 与 Kafka CR 的 UID 应保持一致。最后在已卸载的 Ready 实例上重新用 MID 新增同一份挂载，等待新的 Ready Pod 并再次读写文件。有原包和对应镜像的交付环境可在正式发布前运行此流程。
 
 旧 v1 历史按当时的列表规则处理删除。对于旧记录作为整段保存的列表，旧记录无法证明内层某个命名成员归属时，首次迁移会保留该成员。本流程覆盖先正常更新建立新历史、再撤销的顺序。

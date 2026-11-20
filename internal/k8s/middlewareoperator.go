@@ -19,11 +19,11 @@ package k8s
 import (
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/api/equality"
 
 	"github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/cache"
 	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -104,51 +104,59 @@ func ListMiddlewareOperators(ctx context.Context, cli client.Client, namespace s
 	return results, nil
 }
 
-// UpdateMiddlewareOperatorRuntimeStatus updates only the 4 fields owned by the runtime controller:
-// OperatorStatus, OperatorAvailable, Ready, Runtime.
-// Each retry merges based on the latest cluster status, preserving fields written by
-// the main controller (State/Conditions/ObservedGeneration/Reason).
+// OperatorRuntimeSummary describes the primary Deployment reported by its MiddlewareOperator.
+type OperatorRuntimeSummary struct {
+	Available string
+	Ready     bool
+	Runtime   string
+}
+
+// UpdateMiddlewareOperatorRuntimeStatus records one Deployment observation. A nil detail
+// removes that Deployment. Only the primary Deployment can change the optional summary.
 func UpdateMiddlewareOperatorRuntimeStatus(
-	ctx context.Context, cli client.Client,
-	name, namespace string,
-	operatorStatus map[string]appsv1.DeploymentStatus,
-	operatorAvailable string,
-	ready bool,
-	runtime string,
+	ctx context.Context, cli client.Client, owner client.ObjectKey, ownerUID types.UID,
+	deploymentName string, detail *appsv1.DeploymentStatus, summary *OperatorRuntimeSummary,
 ) error {
-	attempt := 0
+	if ownerUID == "" || deploymentName == "" {
+		return fmt.Errorf("runtime update for MiddlewareOperator %s requires an owner UID and deployment name", owner)
+	}
+	if summary != nil && deploymentName != owner.Name {
+		return fmt.Errorf("deployment %q cannot set the runtime summary for MiddlewareOperator %s", deploymentName, owner)
+	}
+
+	reader := client.Reader(cli)
+	if statusAPIReader != nil {
+		reader = statusAPIReader
+	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// First attempt: use cache (fast path).
-		// Retry: use APIReader to bypass stale cache and get latest resourceVersion.
-		// (see English comment above)
-		var (
-			now *v1.MiddlewareOperator
-			err error
-		)
-		if attempt > 0 && statusAPIReader != nil {
-			now = new(v1.MiddlewareOperator)
-			if err = statusAPIReader.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, now); err != nil {
-				return fmt.Errorf("get MiddlewareOperator error: %w", err)
-			}
+		var now v1.MiddlewareOperator
+		if err := reader.Get(ctx, owner, &now); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if now.UID != ownerUID || !now.DeletionTimestamp.IsZero() {
+			return nil
+		}
+
+		base := now.DeepCopy()
+		if detail == nil {
+			delete(now.Status.OperatorStatus, deploymentName)
 		} else {
-			now, err = GetMiddlewareOperator(ctx, cli, name, namespace)
-			if err != nil {
-				return fmt.Errorf("get MiddlewareOperator error: %w", err)
+			if now.Status.OperatorStatus == nil {
+				now.Status.OperatorStatus = make(map[string]appsv1.DeploymentStatus)
 			}
+			now.Status.OperatorStatus[deploymentName] = *detail
 		}
-		attempt++
-
-		// Only merge runtime fields; preserve other fields written by the main controller.
-		now.Status.OperatorStatus = operatorStatus
-		now.Status.OperatorAvailable = operatorAvailable
-		now.Status.Ready = ready
-		now.Status.Runtime = runtime
-
-		err = cli.Status().Update(ctx, now)
-		if err != nil {
-			return fmt.Errorf("update MiddlewareOperator runtime status error: %w", err)
+		if summary != nil {
+			now.Status.OperatorAvailable = summary.Available
+			now.Status.Ready = summary.Ready
+			now.Status.Runtime = summary.Runtime
 		}
-		return nil
+		if equality.Semantic.DeepEqual(base.Status, now.Status) {
+			return nil
+		}
+
+		patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
+		return client.IgnoreNotFound(cli.Status().Patch(ctx, &now, patch))
 	})
 }
 
@@ -175,6 +183,9 @@ func UpdateMiddlewareOperatorStatus(ctx context.Context, cli client.Client, m *v
 			}
 		}
 		attempt++
+		if m.UID != "" && m.UID != now.UID {
+			return fmt.Errorf("MiddlewareOperator %s/%s was replaced before its status update", m.Namespace, m.Name)
+		}
 
 		// ObservedGeneration must be monotonically increasing: avoid overwriting with a smaller value.
 		// Advancing ObservedGeneration is done by the controller upon successful convergence.
@@ -185,10 +196,11 @@ func UpdateMiddlewareOperatorStatus(ctx context.Context, cli client.Client, m *v
 		m.Status.OperatorAvailable = now.Status.OperatorAvailable
 		m.Status.Ready = now.Status.Ready
 		m.Status.Runtime = now.Status.Runtime
-		if m.Status.RenderedConfigurationResourcesGeneration < now.Status.RenderedConfigurationResourcesGeneration {
-			m.Status.RenderedConfigurationResources = now.Status.RenderedConfigurationResources
-			m.Status.RenderedConfigurationResourcesGeneration = now.Status.RenderedConfigurationResourcesGeneration
-		}
+		// Configuration publication owns these fields and updates them between
+		// writes within one generation. A general status write must preserve them.
+		m.Status.RenderedConfigurationResources = now.Status.RenderedConfigurationResources
+		m.Status.RenderedConfigurationResourcesGeneration = now.Status.RenderedConfigurationResourcesGeneration
+		m.Status.PendingConfigurationWrite = now.Status.PendingConfigurationWrite
 
 		log.FromContext(ctx).V(1).Info("Update MiddlewareOperator status", "version", now.ResourceVersion)
 

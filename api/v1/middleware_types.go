@@ -121,6 +121,9 @@ type MiddlewareStatus struct {
 	// Reason provides a human-readable explanation of the current state.
 	Reason string `json:"reason,omitempty"`
 
+	// PendingConfigurationWrite records the target of a single in-flight Configuration publication.
+	// +optional
+	PendingConfigurationWrite *PendingConfigurationWrite `json:"pendingConfigurationWrite,omitempty"`
 	// RenderedConfigurationResources is the lifecycle-managed inventory of resources rendered from MiddlewareConfigurations.
 	// It enables kind-aware cleanup when a configuration template becomes empty after a feature is disabled.
 	RenderedConfigurationResources []RenderedConfigurationResource `json:"renderedConfigurationResources,omitempty"`

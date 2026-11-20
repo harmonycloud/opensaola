@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/yaml"
 )
 
 // Check validates a MiddlewareConfiguration
@@ -113,14 +114,7 @@ func GetTemplateParsedMiddlewareConfigurations(ctx context.Context, cli client.C
 			return nil, fmt.Errorf("get configuration %s error: %w", cfg.Name, err)
 		}
 
-		// Each configuration renders with its own values.
-		templateValues := *baseValues
-		if err := applyConfigurationValues(ctx, cfg, &templateValues); err != nil {
-			return nil, err
-		}
-
-		var template string
-		template, err = handleTemplate(ctx, &templateValues, &mc)
+		template, err := renderConfiguration(ctx, cfg, *baseValues, &mc)
 		if err != nil {
 			return nil, fmt.Errorf("failed to handle template: %s %w", cfg.Name, err)
 		}
@@ -129,4 +123,30 @@ func GetTemplateParsedMiddlewareConfigurations(ctx context.Context, cli client.C
 	}
 
 	return middlewareConfigurations, nil
+}
+
+func renderConfiguration(ctx context.Context, cfg v1.Configuration, values tools.TemplateValues, mc *v1.MiddlewareConfiguration) (string, error) {
+	if err := applyConfigurationValues(ctx, cfg, &values); err != nil {
+		return "", err
+	}
+	return tools.TemplateParse(ctx, mc.Spec.Template, &values)
+}
+
+// RenderConfigurationReferences resolves baseline values before they are passed
+// to an MCF. In particular YAML template expressions can contain quoted Go
+// operands and can produce typed scalars or entire objects.
+func RenderConfigurationReferences(ctx context.Context, configs []v1.Configuration, values *tools.TemplateValues) ([]v1.Configuration, error) {
+	source, err := yaml.Marshal(configs)
+	if err != nil {
+		return nil, err
+	}
+	rendered, err := tools.TemplateParse(ctx, string(tools.ProcessYAMLGoTemp(source)), values)
+	if err != nil {
+		return nil, fmt.Errorf("render configuration references: %w", err)
+	}
+	var refs []v1.Configuration
+	if err := yaml.Unmarshal([]byte(rendered), &refs); err != nil {
+		return nil, fmt.Errorf("decode configuration references: %w", err)
+	}
+	return refs, nil
 }

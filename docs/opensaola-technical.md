@@ -348,7 +348,8 @@ MiddlewareAction (Namespaced) -- 引用 --> MiddlewareActionBaseline
 | state | State | 否 | `""` | 整体状态 | 任何 Condition 为 False 则为 Unavailable |
 | reason | string | 否 | `""` | 状态原因 | 取第一个 False Condition 的 Message |
 | renderedConfigurationResources | []RenderedConfigurationResource | 否 | nil | 已受生命周期治理的 Configuration 资源清单 | 模板变空/引用移除后的 Kind 感知清理依据；控制器维护 |
-| renderedConfigurationResourcesGeneration | int64 | 否 | 0 | 上次成功写入清单的 MID Generation | 防止较旧的状态写入覆盖较新的清单 |
+| pendingConfigurationWrite | PendingConfigurationWrite | 否 | nil | 当前正在发布的一个 Configuration 目标、来源、策略和操作标识 | 控制器在重启或请求结果不明时核对实际对象；不保存资源 spec |
+| renderedConfigurationResourcesGeneration | int64 | 否 | 0 | 上次整批 Configuration 发布与撤回清理均完成时的 MID Generation | 单项成功时先记录实际 UID，后续项失败不推进代际 |
 | reconcilePause | *ReconcilePauseStatus | 否 | nil | Reconcile 暂停会话的持久快照 | 成功恢复后自动清理；用户不应编辑 |
 
 #### ReconcileOverrides 子结构
@@ -507,12 +508,13 @@ Configuration 管理的资源。
 | conditions | []metav1.Condition | 否 | nil | 条件列表 | - |
 | state | State | 否 | `""` | 状态 | - |
 | operators | map[string]appsv1.DeploymentStatus | 否 | nil | 关联 Deployment 状态 | key 为 Deployment 名称 |
-| operatorAvailable | string | 否 | `""` | 可用性（格式 "available/replicas"） | 如 "1/1" |
+| operatorAvailable | string | 否 | `""` | 主控制器 Deployment 的可用副本数/总副本数 | 如 "1/1" |
 | reason | string | 否 | `""` | 原因 | - |
-| ready | bool | 否 | false | 所有关联 Deployment 是否健康 | 用于 kubectl 展示和运行态判断 |
-| runtime | string | 否 | `""` | 运行状态摘要 | 向前兼容的展示字段 |
+| ready | bool | 否 | false | 基线 spec.deployment 创建的主控制器 Deployment 是否就绪 | 用于 kubectl 展示和运行态判断 |
+| runtime | string | 否 | `""` | 主控制器 Deployment 的运行诊断 | 删除后显示 DeploymentMissing，自愈后重新计算 |
 | renderedConfigurationResources | []RenderedConfigurationResource | 否 | nil | 已受生命周期治理的 Configuration 资源清单 | 模板变空/引用移除后的 Kind 感知清理依据；控制器维护 |
-| renderedConfigurationResourcesGeneration | int64 | 否 | 0 | 上次成功写入清单的 MO Generation | 防止较旧的状态写入覆盖较新的清单 |
+| pendingConfigurationWrite | PendingConfigurationWrite | 否 | nil | 当前正在发布的一个 Configuration 目标、来源、策略和操作标识 | 控制器在重启或请求结果不明时核对实际对象；不保存资源 spec |
+| renderedConfigurationResourcesGeneration | int64 | 否 | 0 | 上次整批 Configuration 发布与撤回清理均完成时的 MO Generation | 单项成功时先记录实际 UID，后续项失败不推进代际 |
 
 **接口方法**：
 - `GetConfigurations()` - 返回 Spec.Configurations
@@ -619,7 +621,7 @@ Configuration 管理的资源。
 |--------|------|------|--------|------|----------|
 | observedGeneration | int64 | 否 | 0 | - | - |
 | conditions | []metav1.Condition | 否 | nil | 每个 Step 一个 Condition（类型为 "STEP-{stepName}"） | - |
-| state | State | 否 | `""` | - | 如果 State 非空则跳过 Reconcile（一次性执行） |
+| state | State | 否 | `""` | - | Updating 表示执行中，Available 和 Unavailable 为终态 |
 | reason | metav1.StatusReason | 否 | `""` | 失败原因 | 格式为 "conditionType,message" |
 
 **接口方法**：
@@ -782,28 +784,16 @@ HandleResource 流程:
 #### MiddlewareAction 状态流转
 
 ```
-创建
-    |
-    v
-[State 非空?] -- 是 --> 跳过（一次性执行完毕）
-    |
-    | 否
-    v
-[Check] -- 失败 --> Unavailable
-    |
-    | 成功
-    v
-[获取 ActionBaseline]
-    |
-    v
-[BaselineType == PreAction?]
-    |-- 是 --> 跳过执行（PreAction 在 Middleware/MO 的 HandleResource 中执行）
-    |-- 否 --> [Execute] 逐步执行 Steps
-                  |
-                  | 每步生成 STEP-{name} Condition
-                  v
-              所有步骤完成 --> State=Available
-              任何步骤失败 --> State=Unavailable, Reason="type,message"
+读取 Action
+  ├─ Available 或 Unavailable → 已结束
+  ├─ 上次执行中断 → Unavailable，ExecutionOutcomeUnknown，人工核对
+  └─ 待执行 → 读取 ActionBaseline（临时错误自动重试）
+                 ├─ 基线仅支持 PreAction 或步骤名无效 → Unavailable
+                 ├─ 空步骤列表 → Available
+                 └─ 记录 Updating，按顺序执行
+                      ├─ 步骤失败 → Unavailable，停止后续步骤
+                      ├─ HTTP 请求结果无法确认 → Unavailable，ExecutionOutcomeUnknown
+                      └─ 最后一步成功 → Available
 ```
 
 ### 3.3 Condition 类型
@@ -885,7 +875,9 @@ Condition 初始化时：Status=Unknown, Reason=Initing, Message="初始化中"
 > 无显式策略时，PVC/PV 为 `orphan`，CRD 无论注解为何都为 `orphan`，其他所有 Kind（包含未知/自定义和集群级资源）为 `delete`。显式 `delete` / `orphan` 可覆盖 PVC/PV 的默认；CRD 在解析和删除时均被硬保护。
 > 控制器只会清理状态清单中记录为 `delete`、且实际资源 UID、实例 UID 和 Configuration 来源标记仍匹配的对象。对同命名空间的资源，清单中的 `controllerReferenceRequired: false` 允许按策略省略实例引用，其余情况仍需匹配 controller owner。外部重建、交接或同名复用的资源会被保留。旧的 `orphan` 清单不会在升级后被追溯删除，必须先在资源仍正常渲染时成功 reconcile，后续停用才采用新默认。
 > 直接修改 `MiddlewareConfiguration.spec.template` 不会单独触发 MID/MO reconcile；需要 MID/MO 引用变更或其他 owner 事件触发。这里的“不再引用”只表示 OpenSaola 不再渲染该 Configuration，不表示控制器已分析集群中的其他消费者。该路径与 MID/MO 删除时按 `configurationDeletePolicy` / OwnerReference 清理资源不同。
-> 若同名资源已有其他 controller owner，归属校验默认即拒绝写入；`configurationOwnershipPolicy=managed` 保留兼容。历史 Configuration 缺少 owner UID 或旧 owner 已删除时，仅在 app/Configuration 来源匹配且无冲突归属时允许接管；同名 MCF 重建仍视为同一逻辑来源。接管成功后才建立当前 owner 的清理清单，CRD 始终保留。详见[渲染期望记录](resource-intent_zh.md)。MID/MO 删除路径中的 `configurationDeletePolicy=delete` 是独立且更强的删除语义，不应当作上述停用路径的 UID 严格删除。
+> 若同名资源已有其他 controller owner，归属校验默认即拒绝写入；`configurationOwnershipPolicy=managed` 保留兼容。历史 Configuration 缺少 owner UID 或旧 owner 已删除时，仅在 app/Configuration 来源匹配且无冲突归属时允许接管；同名 MCF 重建仍视为同一逻辑来源。接管成功后才建立当前 owner 的清理清单，CRD 始终保留。详见[渲染期望记录](resource-intent_zh.md)。
+
+> 删除 MID/MO 时，控制器通过以下字段定位资源（`apiVersion`、`kind`、`metadata.name`、`metadata.namespace`）。命名空间级资源缺省使用实例的命名空间；显式命名空间求值失败会保留 finalizer 以便重试。已发布清单用于核对原目标的 UID 和来源，同名重建的对象会保留。缺少发布清单时，先按渲染的名字查找；名称无法解析或目标已不存在时，只在已确定的作用域内按实例和 Configuration 标记查找。若模板动态生成整份资源，或先修改了定位字段依赖的值，导致无法独立还原身份，则使用可信发布清单。此时若缺少清单，控制器按发布时的顺序先求值该配置引用的 `values`，再渲染资源模板。所有 YAML 文档均为空时跳过该项（空白、注释和空文档分隔符均可）。若有实际内容或渲染出错，则报告对应的 Configuration 并保留 finalizer 以便重试。全部由静态 Kubernetes CRD 组成的清单直接保留。
 
 ---
 
@@ -1031,14 +1023,10 @@ HandleResource(Publish)
 **Predicate**：`GenerationChangedPredicate`
 
 **Reconcile 主逻辑**：
-1. 获取 MiddlewareAction
-2. **State 非空检查**：如果 State 不为空，直接返回（一次性执行语义）
-3. defer 状态更新（与 Middleware 类似，但 Unknown 也视为 Unavailable）
-4. Check 校验
-5. 获取 ActionBaseline
-6. 如果 BaselineType != PreAction：调用 `Execute` 执行所有 Steps
-   - 每个 Step 根据类型执行 CUE / CMD / HTTP
-   - 每个 Step 生成独立的 Condition（类型 "STEP-{name}"）
+1. 读取 MiddlewareAction，已进入终态的操作直接返回。
+2. 读取 ActionBaseline，校验步骤名，接受显式的空步骤列表。
+3. 持久化 `Updating` 后才执行 CUE、CMD 或 HTTP 步骤。每一步写入 `STEP-{name}` condition，最后一步与 Action 终态一起写入。
+4. HTTP 以最终的 2xx 响应为成功。执行中断或无法确认请求结果时，写入 `ExecutionOutcomeUnknown`，由操作者核对目标系统。
 
 ### 5.7 MiddlewareActionBaseline Controller
 
@@ -1048,8 +1036,8 @@ HandleResource(Publish)
 **Reconcile 主逻辑**：
 1. 获取 MiddlewareActionBaseline
 2. 调用 `middlewareactionbaseline.Check`
-   - 校验 Steps 不为空
-   - 校验每个 Step 的 name 不为空
+   - 校验 steps 字段存在，允许空数组
+   - 校验步骤名非空且唯一
    - 如果有 CUE 步骤可选编译校验
 
 ### 5.8 MiddlewareConfiguration Controller
@@ -1125,6 +1113,7 @@ HandleResource(Publish)
 - `KubectlGet` - 获取 K8s 资源
 - `KubectlExec` - 在 Pod 容器中执行命令
 - `KubectlEdit` - 编辑/创建 K8s 资源
+  目标不存在时，若 `output` 显式包含业务字段（如 `data`、`stringData`、`spec`），则请求 API Server 创建对象。空输出且无其他修改时跳过；仅修改标签、注解或状态时，需要目标已经存在。
 
 #### middlewareconfiguration（pkg/service/middlewareconfiguration/）
 
@@ -1483,7 +1472,7 @@ type TarInfo struct {
 | MiddlewareBaseline | middlewarebaseline.go | Cluster | 无 | RetryOnConflict |
 | MiddlewareOperatorBaseline | middlewareoperatorbaseline.go | Cluster | 无 | RetryOnConflict |
 | MiddlewarePackage | middlewarepackage.go | Cluster | `MiddlewarePackageCache` | RetryOnConflict |
-| MiddlewareAction | middlewareaction.go | Namespaced | `MiddlewareActionCache` | RetryOnConflict |
+| MiddlewareAction | middlewareaction.go | Namespaced | 无 | RetryOnConflict |
 | MiddlewareActionBaseline | middlewareactionbaseline.go | Cluster | 无 | RetryOnConflict |
 | MiddlewareConfiguration | middlewareconfiguration.go | Cluster | 无 | RetryOnConflict |
 
@@ -1533,7 +1522,7 @@ type TarInfo struct {
 | 使用 sync.Map 缓存 Baseline/Configuration/OperatorBaseline/ActionBaseline | 避免频繁从 Secret 解压读取包内容；配合定时清理（cache_cleanup_interval，默认 1800 秒） |
 | Middleware 删除时从 Cache 获取对象 | 已删除的对象无法从 API Server 获取，需要依赖缓存进行资源清理 |
 | Middleware 和 MiddlewareOperator Controller 使用 Predicate 过滤 Status 更新 | 避免 Status 更新触发无限循环 Reconcile，同时保留 spec、metadata 和 annotation 变更 |
-| MiddlewareAction 的一次性执行语义（State 非空即跳过） | Action 是操作而非声明式状态，执行完毕后不应重复执行 |
+| MiddlewareAction 的一次性执行语义（终态不重放） | Action 是操作而非声明式状态，执行完毕后不应重复执行 |
 | CR 被删除时自动重建 | 保护中间件实例不被意外删除；通过 Watcher DeleteFunc 实现 |
 | MiddlewareOperator 比较 Deployment 差异并恢复 | 防止 Deployment 被外部修改（如 kubectl edit），确保与 Spec 声明一致 |
 | 升级时使用 sync.Mutex 加锁 | 防止并发升级导致的竞态条件 |

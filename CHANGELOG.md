@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-11-20
+
+### Fixed
+- Verify declared fields across native API defaults, including LimitRange requests restored by admission and empty RBAC rules returned as null. The controller still rejects changes to explicitly declared values or permissions.
+- Recover partially published Configuration resources after a controller restart. Deletion uses recorded identities and can finish when an optional template rendered no object.
+- Check package ownership during uninstall and recover interrupted package version switches without deleting definitions belonging to another package version.
+- Report MiddlewareOperator readiness from the primary Deployment selected by its baseline. Auxiliary Deployments remain visible in the resource details.
+- Treat non-2xx HTTP Action responses as failures and propagate cancellation to outbound requests.
+
+### Upgrade notes
+- Upgrade the bundled CRDs along with the controller. Middleware and MiddlewareOperator status now record an in-flight Configuration write. The default Helm CRD hook applies the updated schemas.
+- Enabling `metrics.serviceMonitor.enabled` requires `metrics.enabled=true`. Helm reports an error when those settings conflict.
+
 ## [1.5.1] - 2026-11-18
 
 ### Fixed

@@ -25,7 +25,6 @@ import (
 	"time"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
-	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/status"
 	"github.com/harmonycloud/opensaola/pkg/tools"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,12 +49,6 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 		} else {
 			conditionExecuteHttp.SuccessWithMsg(*ctx, safeActionDiagnosticMessage(msg), m.Generation)
 		}
-		if updateErr := k8s.UpdateMiddlewareActionStatus(*ctx, cli, m); updateErr != nil {
-			log.FromContext(*ctx).Error(updateErr, "update middleware action status error")
-			if err == nil {
-				err = updateErr
-			}
-		}
 	}()
 
 	var templateValues *tools.TemplateValues
@@ -71,7 +64,7 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 
 	if conditionExecuteHttp.Status != metav1.ConditionTrue {
 		var request *http.Request
-		request, err = http.NewRequest(step.HTTP.Method, step.HTTP.URL, strings.NewReader(step.HTTP.Body))
+		request, err = http.NewRequestWithContext(*ctx, step.HTTP.Method, step.HTTP.URL, strings.NewReader(step.HTTP.Body))
 		if err != nil {
 			return httpStepError("request build", step.HTTP.Method, step.HTTP.URL, 0, nil, nil)
 		}
@@ -84,7 +77,7 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 		httpClient.Timeout = 60 * time.Second
 		resp, err = httpClient.Do(request)
 		if err != nil {
-			return httpStepError("request", step.HTTP.Method, step.HTTP.URL, 0, nil, nil)
+			return httpStepError("request", step.HTTP.Method, step.HTTP.URL, 0, nil, errOutcomeUnknown)
 		}
 		defer func() {
 			_ = resp.Body.Close()
@@ -98,6 +91,10 @@ func executeHTTP(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mi
 		}
 		if truncated {
 			return httpStepError("response too large", step.HTTP.Method, step.HTTP.URL, resp.StatusCode, output, fmt.Errorf("response exceeds %d bytes", maxActionOutputBytes))
+		}
+
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			return httpStepError("response", step.HTTP.Method, step.HTTP.URL, resp.StatusCode, output, nil)
 		}
 
 		msg = httpStepSuccessMessage(step.HTTP.Method, step.HTTP.URL, resp.StatusCode, output)

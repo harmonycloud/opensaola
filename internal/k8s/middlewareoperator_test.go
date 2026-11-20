@@ -27,9 +27,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-func newMiddlewareOperatorTestClient(t *testing.T, objects ...client.Object) client.Client {
+func newMiddlewareOperatorTestClient(t *testing.T, objects ...client.Object) client.WithWatch {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
@@ -160,6 +161,7 @@ func TestUpdateMiddlewareOperatorStatus_PreservesRuntimeOwnedFields(t *testing.T
 		Kind:              "ConfigMap",
 		Name:              "new-config",
 	}}
+	update.Status.PendingConfigurationWrite = &v1.PendingConfigurationWrite{ID: "already-confirmed"}
 	update.Status.RenderedConfigurationResourcesGeneration = 12
 
 	if err := UpdateMiddlewareOperatorStatus(ctx, cli, update); err != nil {
@@ -185,10 +187,150 @@ func TestUpdateMiddlewareOperatorStatus_PreservesRuntimeOwnedFields(t *testing.T
 	if got.Status.Runtime == "" || got.Status.Runtime != existing.Status.Runtime {
 		t.Fatalf("expected runtime diagnostic to be preserved, got %q", got.Status.Runtime)
 	}
-	if got.Status.RenderedConfigurationResourcesGeneration != 12 {
-		t.Fatalf("expected rendered configuration inventory generation 12, got %d", got.Status.RenderedConfigurationResourcesGeneration)
+	if got.Status.RenderedConfigurationResourcesGeneration != 11 {
+		t.Fatalf("expected persisted configuration inventory generation 11, got %d", got.Status.RenderedConfigurationResourcesGeneration)
 	}
-	if inventory := got.Status.RenderedConfigurationResources; len(inventory) != 1 || inventory[0].ConfigurationName != "new-config" {
-		t.Fatalf("expected new rendered configuration inventory, got %#v", inventory)
+	if inventory := got.Status.RenderedConfigurationResources; len(inventory) != 1 || inventory[0].ConfigurationName != "old-config" {
+		t.Fatalf("expected persisted rendered configuration inventory, got %#v", inventory)
+	}
+	if got.Status.PendingConfigurationWrite != nil {
+		t.Fatal("stale status restored an already confirmed Configuration write")
+	}
+}
+
+func TestOperatorRuntimeStatusSingleDeploymentAndNoop(t *testing.T) {
+	ctx := t.Context()
+	mo := &v1.MiddlewareOperator{ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: "default", UID: "owner-1"}}
+	key := client.ObjectKeyFromObject(mo)
+	cli := newMiddlewareOperatorTestClient(t, mo)
+	get := func() *v1.MiddlewareOperator {
+		t.Helper()
+		var now v1.MiddlewareOperator
+		if err := cli.Get(ctx, key, &now); err != nil {
+			t.Fatal(err)
+		}
+		return &now
+	}
+	write := func(name string, detail *appsv1.DeploymentStatus, summary *OperatorRuntimeSummary) {
+		t.Helper()
+		if err := UpdateMiddlewareOperatorRuntimeStatus(ctx, cli, key, mo.UID, name, detail, summary); err != nil {
+			t.Fatal(err)
+		}
+	}
+	detail := &appsv1.DeploymentStatus{Replicas: 3, ReadyReplicas: 3}
+	healthy := &OperatorRuntimeSummary{Available: "3/3", Ready: true, Runtime: "Ready"}
+	write("main", detail, healthy)
+	rv := get().ResourceVersion
+	write("main", detail, healthy)
+	write("absent", nil, nil)
+	if got := get(); got.ResourceVersion != rv {
+		t.Fatalf("unchanged observations wrote status: rv %s -> %s", rv, got.ResourceVersion)
+	}
+	if err := UpdateMiddlewareOperatorRuntimeStatus(ctx, cli, key, mo.UID, "helper", detail, healthy); err == nil {
+		t.Fatal("auxiliary Deployment was allowed to set the primary summary")
+	}
+	write("helper", &appsv1.DeploymentStatus{Replicas: 1}, nil)
+	if got := get().Status; !got.Ready || got.OperatorAvailable != "3/3" || got.Runtime != "Ready" || got.OperatorStatus["main"].ReadyReplicas != 3 || got.OperatorStatus["helper"].Replicas != 1 {
+		t.Fatalf("unexpected status after recording helper: %+v", got)
+	}
+	write("main", nil, &OperatorRuntimeSummary{Runtime: "Missing"})
+	if got := get().Status; got.Ready || got.OperatorAvailable != "" || got.Runtime != "Missing" || len(got.OperatorStatus) != 1 || got.OperatorStatus["helper"].Replicas != 1 {
+		t.Fatalf("unexpected status after removing primary: %+v", got)
+	}
+	write("helper", nil, nil)
+	if got := get().Status; len(got.OperatorStatus) != 0 || got.Runtime != "Missing" {
+		t.Fatalf("unexpected status after removing helper: %+v", got)
+	}
+}
+
+// Interleave writes at the exact point where an auxiliary Deployment's status came
+// from a stale read. The API must reject its first patch and retain both other writes.
+func TestOperatorRuntimeStatusRetriesAgainstLatest(t *testing.T) {
+	ctx := t.Context()
+	mo := &v1.MiddlewareOperator{ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: "default", UID: "owner-1"}}
+	key := client.ObjectKeyFromObject(mo)
+	base := newMiddlewareOperatorTestClient(t, mo)
+	attempts := 0
+	cli := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, p client.Patch, opts ...client.SubResourcePatchOption) error {
+			attempts++
+			if attempts == 1 {
+				detail := &appsv1.DeploymentStatus{Replicas: 2}
+				summary := &OperatorRuntimeSummary{Available: "2/2", Ready: true, Runtime: "Ready"}
+				if err := UpdateMiddlewareOperatorRuntimeStatus(ctx, c, key, mo.UID, "main", detail, summary); err != nil {
+					return err
+				}
+				stale := mo.DeepCopy()
+				stale.Status.Reason = "converged"
+				if err := UpdateMiddlewareOperatorStatus(ctx, c, stale); err != nil {
+					return err
+				}
+			}
+			return c.SubResource(sub).Patch(ctx, obj, p, opts...)
+		},
+	})
+	err := UpdateMiddlewareOperatorRuntimeStatus(ctx, cli, key, mo.UID, "helper", &appsv1.DeploymentStatus{Replicas: 1}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var now v1.MiddlewareOperator
+	if err := base.Get(ctx, key, &now); err != nil {
+		t.Fatal(err)
+	}
+	s := now.Status
+	if attempts != 2 || s.OperatorStatus["helper"].Replicas != 1 || s.OperatorStatus["main"].Replicas != 2 ||
+		!s.Ready || s.OperatorAvailable != "2/2" || s.Runtime != "Ready" || s.Reason != "converged" {
+		t.Fatalf("attempts = %d, final status = %+v", attempts, s)
+	}
+}
+
+func TestOperatorRuntimeStatusIgnoresRetiredOwnerDuringWrite(t *testing.T) {
+	for _, action := range []string{"delete", "replace", "terminate"} {
+		t.Run(action, func(t *testing.T) {
+			ctx := t.Context()
+			mo := &v1.MiddlewareOperator{ObjectMeta: metav1.ObjectMeta{Name: "main", Namespace: "default", UID: "old"}}
+			if action == "terminate" {
+				mo.Finalizers = []string{"middleware.cn/finish"}
+			}
+			key := client.ObjectKeyFromObject(mo)
+			base := newMiddlewareOperatorTestClient(t, mo)
+			attempts := 0
+			cli := interceptor.NewClient(base, interceptor.Funcs{
+				SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, p client.Patch, opts ...client.SubResourcePatchOption) error {
+					attempts++
+					if attempts == 1 {
+						if err := c.Delete(ctx, mo); err != nil {
+							return err
+						}
+						if action == "replace" {
+							replacement := &v1.MiddlewareOperator{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace, UID: "new"}}
+							if err := c.Create(ctx, replacement); err != nil {
+								return err
+							}
+						}
+					}
+					return c.SubResource(sub).Patch(ctx, obj, p, opts...)
+				},
+			})
+			if err := UpdateMiddlewareOperatorRuntimeStatus(ctx, cli, key, mo.UID, "main", &appsv1.DeploymentStatus{Replicas: 1}, nil); err != nil {
+				t.Fatal(err)
+			}
+			// A redelivered event for the same old owner is equally harmless.
+			if err := UpdateMiddlewareOperatorRuntimeStatus(ctx, cli, key, mo.UID, "main", &appsv1.DeploymentStatus{Replicas: 1}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if attempts != 1 {
+				t.Fatalf("retired owner's status patch attempted %d times", attempts)
+			}
+			var now v1.MiddlewareOperator
+			err := base.Get(ctx, key, &now)
+			if action == "delete" {
+				if !apiErrors.IsNotFound(err) {
+					t.Fatalf("expected missing owner, got %v", err)
+				}
+			} else if err != nil || len(now.Status.OperatorStatus) != 0 {
+				t.Fatalf("retired/replaced owner received status: %+v, error %v", now.Status, err)
+			}
+		})
 	}
 }

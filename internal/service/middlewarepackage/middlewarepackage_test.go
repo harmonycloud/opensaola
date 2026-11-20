@@ -503,7 +503,7 @@ func TestHandleSecretUninstall_DeletesSecretAfterCleanup(t *testing.T) {
 }
 
 func TestHandleResourceDelete_IgnoresMissingPublishedResources(t *testing.T) {
-	t.Parallel()
+	// This fixture changes the process-wide package data namespace.
 	const (
 		secretName = "pkg-delete-missing"
 		namespace  = "middleware-operator"
@@ -583,3 +583,76 @@ spec:
 // controller-runtime client，与 K8s API 调用紧耦合，
 // 适合用集成测试（envtest）而非纯单元测试。
 // ---------------------------------------------------------------------------
+
+func TestDeletePackageResourceOwnership(t *testing.T) {
+	pkg := &v1.MiddlewarePackage{
+		ObjectMeta: metav1.ObjectMeta{Name: "audit-v1", UID: "package-a"},
+		Spec:       v1.MiddlewarePackageSpec{Version: "v1"},
+	}
+	tests := []struct {
+		name                string
+		change              func(*v1.MiddlewareConfiguration)
+		wantError, wantGone bool
+	}{
+		{name: "current owner", wantGone: true},
+		{name: "already moved to B", change: func(m *v1.MiddlewareConfiguration) {
+			m.OwnerReferences[0].Name, m.OwnerReferences[0].UID = "audit-v2", "package-b"
+			m.Labels[v1.LabelPackageName], m.Labels[v1.LabelPackageVersion] = "audit-v2", "v2"
+		}},
+		{name: "previous UID of same package name", change: func(m *v1.MiddlewareConfiguration) { m.OwnerReferences[0].UID = "old-package" }, wantError: true},
+		{name: "missing controller", change: func(m *v1.MiddlewareConfiguration) { m.OwnerReferences = nil }, wantError: true},
+		{name: "non-controller owner", change: func(m *v1.MiddlewareConfiguration) { m.OwnerReferences[0].Controller = new(false) }, wantError: true},
+		{name: "another owner kind", change: func(m *v1.MiddlewareConfiguration) { m.OwnerReferences[0].Kind = "Middleware" }, wantError: true},
+		{name: "another API group", change: func(m *v1.MiddlewareConfiguration) { m.OwnerReferences[0].APIVersion = "example.org/v1" }, wantError: true},
+		{name: "missing owner UID", change: func(m *v1.MiddlewareConfiguration) { m.OwnerReferences[0].UID = "" }, wantError: true},
+		{name: "missing package name", change: func(m *v1.MiddlewareConfiguration) { delete(m.Labels, v1.LabelPackageName) }, wantError: true},
+		{name: "missing package version", change: func(m *v1.MiddlewareConfiguration) { delete(m.Labels, v1.LabelPackageVersion) }, wantError: true},
+		{name: "mismatched package name", change: func(m *v1.MiddlewareConfiguration) { m.Labels[v1.LabelPackageName] = "audit-v2" }, wantError: true},
+		{name: "mismatched package version", change: func(m *v1.MiddlewareConfiguration) { m.Labels[v1.LabelPackageVersion] = "v2" }, wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			object := &v1.MiddlewareConfiguration{ObjectMeta: metav1.ObjectMeta{
+				Name: "shared", UID: "definition",
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pkg, v1.GroupVersion.WithKind("MiddlewarePackage"))},
+				Labels:          map[string]string{v1.LabelPackageName: pkg.Name, v1.LabelPackageVersion: pkg.Spec.Version},
+			}}
+			if tt.change != nil {
+				tt.change(object)
+			}
+			cli := newMiddlewarePackageTestClient(t, object)
+			err := deletePackageResource(t.Context(), cli, pkg, object.Name, &v1.MiddlewareConfiguration{})
+			if (err != nil) != tt.wantError {
+				t.Fatalf("delete returned %v, want error=%v", err, tt.wantError)
+			}
+			err = cli.Get(t.Context(), client.ObjectKeyFromObject(object), &v1.MiddlewareConfiguration{})
+			if (err != nil && !apiErrors.IsNotFound(err)) || apiErrors.IsNotFound(err) != tt.wantGone {
+				t.Fatalf("GET returned %v, want gone=%v", err, tt.wantGone)
+			}
+		})
+	}
+}
+
+func TestAbsentSecretEventPreservesReplacementOrUsedPackage(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		object  client.Object
+		blocked bool
+	}{
+		{name: "replacement archive", object: &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "active", Namespace: packages.DataNamespace}}},
+		{name: "MID still uses package", object: &v1.Middleware{ObjectMeta: metav1.ObjectMeta{Name: "app", Namespace: "default", Labels: map[string]string{v1.LabelPackageName: "active"}}}, blocked: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mp := &v1.MiddlewarePackage{ObjectMeta: metav1.ObjectMeta{Name: "active", UID: "active-uid"}}
+			cli := newMiddlewarePackageTestClient(t, mp, test.object)
+			event := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: mp.Name, Namespace: packages.DataNamespace}}
+			err := HandleSecret(t.Context(), cli, event, consts.HandleActionDelete)
+			if (err != nil) != test.blocked {
+				t.Fatalf("got %v, want blocked=%v", err, test.blocked)
+			}
+			if err := cli.Get(t.Context(), client.ObjectKeyFromObject(mp), mp); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

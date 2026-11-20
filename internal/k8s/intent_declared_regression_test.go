@@ -150,7 +150,7 @@ func TestEmptyListRecoveryUsesOriginalTopology(t *testing.T) {
 			}
 		})
 	}
-	for _, bad := range []StoredDeletionCheck{{}, {Segments: []string{"unknown"}}, {Segments: []string{"i:2"}}, {Segments: []string{"k:{}"}}, {Segments: []string{"f:map"}, AllowExternalPayload: true}} {
+	for _, bad := range []StoredDeletionCheck{{}, {Segments: []string{"unknown"}}, {Segments: []string{"i:2"}}, {Segments: []string{"f:items", "i:-1"}}, {Segments: []string{"f:items", "i:+1"}}, {Segments: []string{"f:items", "i:18446744073709551616"}}, {Segments: []string{"k:{}"}}, {Segments: []string{"f:map"}, AllowExternalPayload: true}} {
 		if _, err := RestoreDeletionChecks([]StoredDeletionCheck{bad}); err == nil {
 			t.Fatal("invalid stored check accepted")
 		}
@@ -263,4 +263,160 @@ func FuzzDeclaredEditLifecycle(f *testing.F) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// Replacing a retained atomic value must submit the new declaration. Once
+// submitted, admission may default any key now omitted from that value.
+func TestAtomicWithdrawalSurvivesRecovery(t *testing.T) {
+	converter := declaredTestConverter(t)
+	for _, tc := range []struct{ name, before, raw, withExternal, stale string }{
+		{"atomic map", `{"atomicMap":{"keep":"yes","remove":"old"}}`, `{"atomicMap":{"keep":"yes"}}`, `{"atomicMap":{"keep":"yes","added":"external"}}`, `{"atomicMap":{"keep":"yes","remove":"reinserted","added":"external"}}`},
+		{"atomic list", `{"anyItems":[{"nested":{"keep":1,"remove":false}}]}`, `{"anyItems":[{"nested":{"keep":1}}]}`, `{"anyItems":[{"nested":{"keep":1,"added":"external"}}]}`, `{"anyItems":[{"nested":{"keep":1,"remove":true,"added":"external"}}]}`},
+		{"keyed parent", `{"entries":[{"id":"a","options":{"keep":"yes","remove":"old"}},{"id":"b","value":"same"}]}`, `{"entries":[{"id":"a","options":{"keep":"yes"}},{"id":"b","value":"same"}]}`, `{"entries":[{"id":"b","value":"same"},{"id":"a","options":{"keep":"yes","added":"external"}}]}`, `{"entries":[{"id":"b","value":"same"},{"id":"a","options":{"keep":"yes","remove":"again"}}]}`},
+		{"untyped positional list", `{"rules":[{"keep":1,"remove":2}]}`, `{"rules":[{"keep":1}]}`, `{"rules":[{"keep":1,"added":3}]}`, `{"rules":[{"keep":1,"remove":4}]}`},
+		{"nested duplicate names", `{"atomicOpaque":{"rules":[{"name":"a","slot":1,"remove":2},{"name":"a","slot":2}]}}`, `{"atomicOpaque":{"rules":[{"name":"a","slot":1},{"name":"a","slot":2}]}}`, `{"atomicOpaque":{"rules":[{"name":"a","slot":1,"extra":3},{"name":"a","slot":2,"remove":"on other slot"}]}}`, `{"atomicOpaque":{"rules":[{"name":"a","slot":1,"remove":4},{"name":"a","slot":2}]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before, raw := intentTestObject(t, tc.before), intentTestObject(t, tc.raw)
+			fresh, stale := intentTestObject(t, tc.withExternal), intentTestObject(t, tc.stale)
+			write, err := PlanDeclaredResourceIntent(converter, before, before, raw, raw, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := write.DeletionConflictError(); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(write.Object.Object, raw.Object) {
+				t.Fatalf("withdrawal was not applied: %v", write.Object.Object["spec"])
+			}
+			for _, plan := range []*DeclaredIntentMergeResult{write, restoreVerificationPlan(t, converter, raw, write)} {
+				if err := plan.Validate(converter, fresh); err != nil {
+					t.Fatalf("unrelated added field rejected: %v", err)
+				}
+				for _, defaulted := range []*unstructured.Unstructured{before, stale} {
+					if err := plan.Validate(converter, defaulted); err != nil {
+						t.Fatalf("defaulting an omitted atomic key was rejected: %v", err)
+					}
+				}
+			}
+
+			legacy, err := PlanLegacyResourceIntentDeletions(converter, before, before, raw, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := legacy.DeletionConflictError(); err != nil {
+				t.Fatal(err)
+			}
+			upgraded, err := PlanDeclaredResourceIntent(converter, nil, legacy.Object, raw, raw, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			upgraded.DeletionChecks = append(upgraded.DeletionChecks, legacy.DeletionChecks...)
+			if !reflect.DeepEqual(upgraded.Object.Object, raw.Object) {
+				t.Fatalf("v1 migration kept a withdrawn field: %v", upgraded.Object.Object["spec"])
+			}
+			if err := upgraded.Validate(converter, fresh); err != nil {
+				t.Fatal(err)
+			}
+			if err := upgraded.Validate(converter, stale); err != nil {
+				t.Fatalf("defaulting after v1 migration was rejected: %v", err)
+			}
+			next, err := PlanDeclaredResourceIntent(converter, raw, stale, raw, raw, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(next.Object.Object, stale.Object) {
+				t.Fatalf("repeated declaration rewrote API defaults: %v", next.Object.Object["spec"])
+			}
+			conflict, err := PlanLegacyResourceIntentDeletions(converter, before, stale, raw, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := conflict.DeletionConflictError(); err == nil {
+				t.Fatal("v1 migration overwrote a withdrawn field changed by another writer")
+			}
+
+			oldTyped, err := converter.ObjectToTyped(before)
+			if err != nil {
+				t.Fatal(err)
+			}
+			newTyped, err := converter.ObjectToTyped(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			change, err := oldTyped.Compare(newTyped)
+			if err != nil {
+				t.Fatal(err)
+			}
+			protected := change.Modified // SSA ownership of the whole atomic value
+			conflict, err = PlanLegacyResourceIntentDeletions(converter, before, before, raw, protected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := conflict.DeletionConflictError(); err == nil {
+				t.Fatal("v1 migration ignored another manager's ownership of a withdrawn field")
+			}
+
+			// Legacy v2 pending Secrets contain a history and no serialized
+			// deletion checks. The restart path reconstructs those checks.
+			const hash = "atomic-schema"
+			owner := intentUnitOwner()
+			for _, version := range []int{1, currentResourceIntentVersion} {
+				history := newIntentCandidate(owner, before, before, nil, "", hash, nil)
+				if version == 1 {
+					history.Version = 1
+					history.SchemaHash = hash
+				}
+				candidate := newIntentCandidate(owner, before, raw, nil, "", hash, nil)
+				candidate.DeletionBase = history
+				secret, err := buildResourceIntentSecret(owner, *candidate)
+				if err != nil {
+					t.Fatal(err)
+				}
+				base, err := effectiveResourceIntent(candidate, secret)
+				if err != nil || !base.pendingDeletion {
+					t.Fatalf("expected unverified historical base: %v", err)
+				}
+				for _, test := range []struct {
+					name string
+					live *unstructured.Unstructured
+					want *unstructured.Unstructured
+				}{
+					{"confirmed", fresh, raw}, {"unverified", stale, before},
+				} {
+					recovered, _, err := resolveLegacyPending(converter, hash, test.live, raw, base, secret)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !reflect.DeepEqual(recovered.Desired.Object, intentObject(test.want).Object) {
+						t.Fatalf("v%d %s: incorrect historical baseline: %v", version, test.name, recovered.Desired.Object["spec"])
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestOpaqueListIdentityInsideAndOutsideAtomicObject(t *testing.T) {
+	converter := declaredTestConverter(t)
+	for _, tc := range []struct {
+		name                             string
+		desired, reordered, supplemented string
+		ordered                          bool
+	}{
+		{"ordinary opaque list", `{"rules":[{"name":"a","v":1},{"name":"b","v":2}]}`, `{"rules":[{"name":"b","v":2},{"name":"a","v":1}]}`, `{"rules":[{"name":"a","v":1,"extra":true},{"name":"b","v":2}]}`, false},
+		{"atomic parent", `{"atomicOpaque":{"rules":[{"name":"a","v":1},{"name":"b","v":2}]}}`, `{"atomicOpaque":{"rules":[{"name":"b","v":2},{"name":"a","v":1}]}}`, `{"atomicOpaque":{"rules":[{"name":"a","v":1,"extra":true},{"name":"b","v":2}]}}`, true},
+		{"atomic parent and duplicate names", `{"atomicOpaque":{"rules":[{"name":"a","v":1},{"name":"a","v":2}]}}`, `{"atomicOpaque":{"rules":[{"name":"a","v":2},{"name":"a","v":1}]}}`, `{"atomicOpaque":{"rules":[{"name":"a","v":1,"extra":true},{"name":"a","v":2}]}}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			desired := intentTestObject(t, tc.desired)
+			err := ValidateDeclaredResourceIntent(converter, desired, intentTestObject(t, tc.reordered))
+			if (err != nil) != tc.ordered {
+				t.Errorf("reordered receipt error=%v, want ordered=%t", err, tc.ordered)
+			}
+			if err := ValidateDeclaredResourceIntent(converter, desired, intentTestObject(t, tc.supplemented)); err != nil {
+				t.Errorf("supplemented receipt: %v", err)
+			}
+		})
+	}
 }

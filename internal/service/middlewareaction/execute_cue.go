@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"reflect"
 	"runtime"
 
 	"cuelang.org/go/cue"
@@ -62,12 +63,6 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 			conditionExecuteCue.Failed(*ctx, safeActionDiagnosticMessage(err.Error()), m.Generation)
 		} else {
 			conditionExecuteCue.SuccessWithMsg(*ctx, safeActionDiagnosticMessage(msg), m.Generation)
-		}
-		if updateErr := k8s.UpdateMiddlewareActionStatus(*ctx, cli, m); updateErr != nil {
-			log.FromContext(*ctx).Error(updateErr, "update middleware action status error")
-			if err == nil {
-				err = updateErr
-			}
 		}
 	}()
 
@@ -293,6 +288,8 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 			if err := editActionResource(*ctx, cli, target, labels, annotations, outputMap); err != nil {
 				return err
 			}
+		default:
+			return fmt.Errorf("unsupported CUE step type %q", step.Type)
 		}
 	}
 
@@ -301,11 +298,11 @@ func executeCue(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 
 // editActionResource applies a one-off CUE overlay to exactly the object read.
 func editActionResource(ctx context.Context, cli client.Client, target *unstructured.Unstructured, labels, annotations map[string]string, output map[string]any) error {
-	live, err := k8s.GetCustomResource(ctx, cli, target.GetName(), target.GetNamespace(), target.GroupVersionKind())
-	if err != nil && !apiErrors.IsNotFound(err) {
-		return err
+	live, getErr := k8s.GetCustomResource(ctx, cli, target.GetName(), target.GetNamespace(), target.GroupVersionKind())
+	if getErr != nil && !apiErrors.IsNotFound(getErr) {
+		return getErr
 	}
-	create := apiErrors.IsNotFound(err)
+	create := apiErrors.IsNotFound(getErr)
 	after := target.DeepCopy()
 	if !create {
 		after = live.DeepCopy()
@@ -329,10 +326,11 @@ func editActionResource(ctx context.Context, cli client.Client, target *unstruct
 	if create {
 		after.Object = tools.MergeMap(after.Object, output)
 	} else {
-		after, err = mergeActionOutput(ctx, k8s.NewManagedResourceWriter(cli).IntentSchemas, after, output)
+		merged, err := mergeActionOutput(ctx, k8s.NewManagedResourceWriter(cli).IntentSchemas, after, output)
 		if err != nil {
 			return err
 		}
+		after = merged
 	}
 	if after.GroupVersionKind() != target.GroupVersionKind() || client.ObjectKeyFromObject(after) != client.ObjectKeyFromObject(target) {
 		return fmt.Errorf("action output changed the target identity")
@@ -341,13 +339,28 @@ func editActionResource(ctx context.Context, cli client.Client, target *unstruct
 		if err := k8s.ValidateActionMetadata(nil, after); err != nil {
 			return err
 		}
-		spec, _ := after.Object["spec"].(map[string]any)
-		if len(spec) == 0 {
+		for key := range output {
+			if isActionResourceField(key) {
+				return cli.Create(ctx, after, client.FieldOwner("opensaola-action"))
+			}
+		}
+		// An empty edit is a no-op. Metadata and status edits require an existing target.
+		if reflect.DeepEqual(after.Object, target.Object) {
 			return nil
 		}
-		return cli.Create(ctx, after, client.FieldOwner("opensaola-action"))
+		return getErr
 	}
 	return k8s.PatchActionResource(ctx, cli, live, after)
+}
+
+// Resource fields include spec, data, stringData and custom root fields.
+func isActionResourceField(key string) bool {
+	switch key {
+	case "apiVersion", "kind", "metadata", "status":
+		return false
+	default:
+		return true
+	}
 }
 
 // A one-off edit has no deletion history. Use the same list keys as the
@@ -357,11 +370,10 @@ func mergeActionOutput(ctx context.Context, schemas k8s.IntentSchemaResolver, af
 	envelope := make(map[string]any)
 	fields := make(map[string]any)
 	for key, value := range output {
-		switch key {
-		case "apiVersion", "kind", "metadata", "status":
-			envelope[key] = value
-		default:
+		if isActionResourceField(key) {
 			fields[key] = value
+		} else {
+			envelope[key] = value
 		}
 	}
 	targetGVK := after.GroupVersionKind()

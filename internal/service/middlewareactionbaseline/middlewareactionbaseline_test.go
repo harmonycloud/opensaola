@@ -88,9 +88,8 @@ func TestActionBaselineCheck_ValidSteps(t *testing.T) {
 	}
 }
 
-// TestActionBaselineCheck_EmptySteps verifies that Check sets the condition to False
-// when the baseline has no steps.
-func TestActionBaselineCheck_EmptySteps(t *testing.T) {
+// The CRD requires the steps field. An omitted list is distinct from an explicit empty list.
+func TestActionBaselineCheck_OmittedSteps(t *testing.T) {
 	ctx := context.Background()
 	m := newActionBaseline("test-action-empty", nil, nil)
 	s := newScheme()
@@ -110,7 +109,7 @@ func TestActionBaselineCheck_EmptySteps(t *testing.T) {
 		t.Fatal("expected Checked condition to be set")
 	}
 	if cond.Status != metav1.ConditionFalse {
-		t.Errorf("expected ConditionFalse for empty steps, got %v", cond.Status)
+		t.Errorf("expected ConditionFalse for omitted steps, got %v", cond.Status)
 	}
 }
 

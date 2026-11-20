@@ -109,12 +109,12 @@ func restoreUnknownDeclaredNative(original, canonical any, typ reflect.Type) any
 			return canonical
 		}
 		canonicalMap, _ := canonical.(map[string]any)
-		var fields map[string]reflect.Type
+		var fields map[string]declaredNativeField
 		if typ.Kind() == reflect.Struct {
 			fields = declaredNativeFields(typ)
 		}
 		for key, originalValue := range originalMap {
-			childType := fields[key]
+			childType := fields[key].typ
 			if typ.Kind() == reflect.Map {
 				childType = typ.Elem()
 			}
@@ -156,13 +156,18 @@ func restoreUnknownDeclaredNative(original, canonical any, typ reflect.Type) any
 
 var declaredNativeFieldCache sync.Map
 
-func declaredNativeFields(typ reflect.Type) map[string]reflect.Type {
+type declaredNativeField struct {
+	typ          reflect.Type
+	repeatedList bool
+}
+
+func declaredNativeFields(typ reflect.Type) map[string]declaredNativeField {
 	if cached, ok := declaredNativeFieldCache.Load(typ); ok {
-		if fields, valid := cached.(map[string]reflect.Type); valid {
+		if fields, valid := cached.(map[string]declaredNativeField); valid {
 			return fields
 		}
 	}
-	fields := map[string]reflect.Type{}
+	fields := map[string]declaredNativeField{}
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)
 		if field.PkgPath != "" {
@@ -179,8 +184,8 @@ func declaredNativeFields(typ reflect.Type) map[string]reflect.Type {
 				child = child.Elem()
 			}
 			if child.Kind() == reflect.Struct {
-				for key, typ := range declaredNativeFields(child) {
-					fields[key] = typ
+				for key, nested := range declaredNativeFields(child) {
+					fields[key] = nested
 				}
 				continue
 			}
@@ -188,10 +193,14 @@ func declaredNativeFields(typ reflect.Type) map[string]reflect.Type {
 		if name == "" {
 			name = field.Name
 		}
-		fields[name] = field.Type
+		fields[name] = declaredNativeField{
+			typ: field.Type,
+			repeatedList: field.Type.Kind() == reflect.Slice && field.Type.Elem().Kind() != reflect.Uint8 &&
+				strings.Contains(field.Tag.Get("protobuf"), ",rep,"),
+		}
 	}
 	actual, _ := declaredNativeFieldCache.LoadOrStore(typ, fields)
-	if cached, valid := actual.(map[string]reflect.Type); valid {
+	if cached, valid := actual.(map[string]declaredNativeField); valid {
 		return cached
 	}
 	return fields
@@ -208,7 +217,7 @@ func declaredNativePathType(root reflect.Type, path fieldpath.Path) reflect.Type
 		}
 		switch {
 		case element.FieldName != nil && typ.Kind() == reflect.Struct:
-			typ = declaredNativeFields(typ)[*element.FieldName]
+			typ = declaredNativeFields(typ)[*element.FieldName].typ
 		case element.FieldName != nil && typ.Kind() == reflect.Map:
 			typ = typ.Elem()
 		case (element.Key != nil || element.Value != nil || element.Index != nil) && (typ.Kind() == reflect.Slice || typ.Kind() == reflect.Array):
@@ -220,65 +229,93 @@ func declaredNativePathType(root reflect.Type, path fieldpath.Path) reflect.Type
 	return typ
 }
 
-// Pod init containers execute in declaration order. Other name-keyed lists,
-// including schema-free CR fields with the same spelling, retain their usual
-// associative merge semantics.
-func (m *intentDeclaredMerger) ordersInitContainers(path fieldpath.Path) bool {
-	if len(path) == 0 || path[len(path)-1].FieldName == nil || *path[len(path)-1].FieldName != "initContainers" {
+// Repeated protobuf fields encode zero elements identically for nil and empty
+// slices. After a storage round trip a native JSON list can therefore read as
+// null. Only a present null receipt for a declared empty list qualifies.
+func (m *intentDeclaredMerger) acceptsNullList(wanted, observed any, path fieldpath.Path) bool {
+	items, ok := wanted.([]any)
+	if observed != nil || !ok || len(items) != 0 || m.nativeType == nil || len(path) == 0 || path[len(path)-1].FieldName == nil {
 		return false
 	}
 	parent := declaredNativePathType(m.nativeType, path[:len(path)-1])
-	if parent == nil {
+	for parent != nil && parent.Kind() == reflect.Pointer {
+		parent = parent.Elem()
+	}
+	if parent == nil || parent.Kind() != reflect.Struct {
 		return false
 	}
-	return parent == reflect.TypeFor[corev1.PodSpec]() || parent == reflect.TypeFor[*corev1.PodSpec]()
+	return declaredNativeFields(parent)[*path[len(path)-1].FieldName].repeatedList
 }
 
-// NativeInitContainersAt checks an absolute resource path against the actual
-// registered native type. MID rendering can use this before the writer sees
-// the combined baseline and instance declaration.
-func NativeInitContainersAt(gvk schema.GroupVersionKind, fields ...string) bool {
-	m := intentDeclaredMerger{nativeType: declaredNativeType(gvk)}
+// Kubernetes starts init containers and expands container environment variables
+// in list order. Resolve the native parent type before applying either rule.
+func (m *intentDeclaredMerger) ordersNamedMembers(path fieldpath.Path) bool {
+	if len(path) == 0 || path[len(path)-1].FieldName == nil {
+		return false
+	}
+	switch *path[len(path)-1].FieldName {
+	case "initContainers":
+		return isNativePodSpec(m.nativeType, path[:len(path)-1])
+	case "env":
+		parent := declaredNativePathType(m.nativeType, path[:len(path)-1])
+		return parent == reflect.TypeFor[corev1.Container]() || parent == reflect.TypeFor[corev1.EphemeralContainer]()
+	default:
+		return false
+	}
+}
+
+func isNativePodSpec(root reflect.Type, path fieldpath.Path) bool {
+	typ := declaredNativePathType(root, path)
+	return typ == reflect.TypeFor[corev1.PodSpec]() || typ == reflect.TypeFor[*corev1.PodSpec]()
+}
+
+// NativePodSpecAt identifies native PodSpec fields before a package or Action
+// overlay is merged, without interpreting a lookalike custom resource as a Pod.
+func NativePodSpecAt(gvk schema.GroupVersionKind, fields ...string) bool {
 	path := make(fieldpath.Path, len(fields))
 	for i := range fields {
 		path[i].FieldName = &fields[i]
 	}
-	return m.ordersInitContainers(path)
+	return isNativePodSpec(declaredNativeType(gvk), path)
 }
 
-// OrderDeclaredInitContainers places the explicitly ordered names into their
+// OrderDeclaredNamedMembers places the explicitly ordered names into their
 // existing slots after name-based field merging. All other members stay put.
-func OrderDeclaredInitContainers(merged, wanted []any) error {
+func OrderDeclaredNamedMembers(merged, wanted []any) error {
 	if len(wanted) < 2 {
 		return nil
 	}
 	order := make(map[string]int, len(wanted))
 	for i, value := range wanted {
-		item, _ := value.(map[string]any)
-		name, _ := item["name"].(string)
+		name := declaredMemberName(value)
 		if _, duplicate := order[name]; duplicate || name == "" {
-			return fmt.Errorf("declared initContainers require unique nonempty names")
+			return fmt.Errorf("declared members require unique nonempty names")
 		}
 		order[name] = i
 	}
 	members := make([]any, len(wanted))
 	slots := make([]int, 0, len(wanted))
 	for i, value := range merged {
-		item, _ := value.(map[string]any)
-		name, _ := item["name"].(string)
+		name := declaredMemberName(value)
 		if index, declared := order[name]; declared {
 			if members[index] != nil {
-				return fmt.Errorf("merged initContainers contain duplicate declared names")
+				return fmt.Errorf("merged list contains duplicate declared names")
 			}
 			slots = append(slots, i)
 			members[index] = value
 		}
 	}
 	if len(slots) != len(wanted) {
-		return fmt.Errorf("merged initContainers lost a declared member")
+		return fmt.Errorf("merged list lost a declared member")
 	}
 	for i, slot := range slots {
 		merged[slot] = members[i]
 	}
 	return nil
+}
+
+func declaredMemberName(item any) string {
+	obj, _ := item.(map[string]any)
+	name, _ := obj["name"].(string)
+	return name
 }

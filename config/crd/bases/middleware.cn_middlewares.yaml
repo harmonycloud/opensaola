@@ -559,6 +559,73 @@ spec:
                 description: The generation observed by the deployment controller.
                 format: int64
                 type: integer
+              pendingConfigurationWrite:
+                description: PendingConfigurationWrite records the target of a single
+                  in-flight Configuration publication.
+                properties:
+                  id:
+                    description: ID identifies this attempt on the rendered object's
+                      metadata.
+                    type: string
+                  observedUID:
+                    description: ObservedUID is the target incarnation seen before
+                      an update. It is empty for creation.
+                    type: string
+                  resource:
+                    description: Resource records the identity and cleanup policy
+                      to confirm after publication.
+                    properties:
+                      configurationName:
+                        description: ConfigurationName is the MiddlewareConfiguration
+                          name that rendered this resource.
+                        type: string
+                      configurationUID:
+                        description: ConfigurationUID identifies the exact MiddlewareConfiguration
+                          object instance when available.
+                        type: string
+                      controllerReferenceRequired:
+                        description: |-
+                          ControllerReferenceRequired records whether lifecycle cleanup expects this owner's
+                          controller reference. Older same-namespace entries without this field require one.
+                        type: boolean
+                      disablePolicy:
+                        description: |-
+                          DisablePolicy is the resolved lifecycle policy used when this resource stops rendering.
+                          Valid values are delete and orphan; without an explicit policy, PVC and PV
+                          resources default to orphan while all other resource types default to delete.
+                          CustomResourceDefinitions always resolve to orphan.
+                        type: string
+                      group:
+                        description: Group, Version and Kind identify the rendered
+                          Kubernetes resource.
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        description: Namespace and Name identify the rendered Kubernetes
+                          resource instance.
+                        type: string
+                      namespaced:
+                        description: Namespaced records whether the rendered resource
+                          was namespaced when it was applied.
+                        type: boolean
+                      ownerUID:
+                        description: OwnerUID is the UID of the Middleware or MiddlewareOperator
+                          that owns this inventory.
+                        type: string
+                      resourceUID:
+                        description: ResourceUID protects a same-name resource that
+                          was deleted and recreated outside OpenSaola.
+                        type: string
+                      version:
+                        type: string
+                    type: object
+                required:
+                - id
+                - resource
+                type: object
               reason:
                 description: Reason provides a human-readable explanation of the current
                   state.

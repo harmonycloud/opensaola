@@ -84,9 +84,6 @@ func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.R
 		defer retryConfigurationMigration(&result, &retErr)
 	}
 	if err := r.handleMiddlewareOperator(ctx, req, mo); err != nil {
-		if apiErrors.IsNotFound(err) {
-			return ctrl.Result{}, nil
-		}
 		if errors.Is(err, errMiddlewareOperatorFinalizerAdded) {
 			return ctrl.Result{Requeue: true}, nil
 		}
@@ -114,10 +111,6 @@ func (r *MiddlewareOperatorReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Handle deployment
 	if err := r.handleDeployment(ctx, req); err != nil {
-		if apiErrors.IsNotFound(err) {
-			log.FromContext(ctx).V(1).Info("MiddlewareOperator deployment target not found, skipping", "namespace", req.Namespace, "name", req.Name)
-			return ctrl.Result{}, nil
-		}
 		log.FromContext(ctx).Error(err, "failed to handle deployment for MiddlewareOperator", "namespace", req.Namespace, "name", req.Name)
 		return ctrl.Result{}, err
 	}
@@ -164,6 +157,9 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 				latest := &v1.MiddlewareOperator{}
 				if getErr := r.Get(ctx, types.NamespacedName{Name: mo.Name, Namespace: mo.Namespace}, latest); getErr != nil {
 					return getErr
+				}
+				if latest.UID != mo.UID {
+					return nil // The finalizer belonged to the previous owner.
 				}
 				controllerutil.RemoveFinalizer(latest, v1.FinalizerMiddlewareOperator)
 				return r.Update(ctx, latest)
@@ -327,7 +323,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 			clearReconcilePaused(&mo.Status.Conditions)
 		}
 		r.Recorder.Event(mo, "Normal", "Published", "MiddlewareOperator published successfully")
-	} else if generation > observedGeneration || mo.Status.State == v1.StateUpdating || wasReconcilePaused { // actual > observed means update needed
+	} else if generation > observedGeneration || mo.Status.State == v1.StateUpdating || wasReconcilePaused || mo.Status.PendingConfigurationWrite != nil { // actual > observed means update needed
 		if err = middlewareoperator.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionUpdate, mo); err != nil {
 			return fmt.Errorf("failed to update resources: %w", err)
 		}
@@ -344,7 +340,7 @@ func (r *MiddlewareOperatorReconciler) handleMiddlewareOperator(ctx context.Cont
 func (r *MiddlewareOperatorReconciler) handleDeployment(ctx context.Context, req ctrl.Request) error {
 	mo, err := k8s.GetMiddlewareOperator(ctx, r.Client, req.Name, req.Namespace)
 	if err != nil {
-		return err
+		return client.IgnoreNotFound(err)
 	}
 	// Finalization removes the native Deployment before the owner object is gone.
 	// A Deployment event can therefore race with finalization; never treat that

@@ -331,7 +331,7 @@ See the [Reconciliation Suspension and Recovery Runbook](reconcile-suspension.md
 **Symptoms**: A MiddlewareAction was created but nothing happens.
 
 **Causes**:
-1. The MiddlewareAction's `status.state` is already set (non-empty). MiddlewareAction is a one-shot resource -- once it has a state, it will not re-execute
+1. `Available` and `Unavailable` are terminal states for a one-shot Action. The controller retries temporary baseline read failures and records `Updating` before execution.
 2. The `spec.baseline` references a non-existent MiddlewareActionBaseline
 3. The baseline's `baselineType` is `PreAction`, which is only executed within the Middleware/MiddlewareOperator reconcile flow, not independently
 
@@ -352,7 +352,8 @@ kubectl get ma <name> -n <namespace> -o jsonpath='{.status.conditions}' | jq '.'
 ```
 
 **Solution**:
-- If you need to re-execute an action, delete the existing MiddlewareAction and create a new one
+- HTTP steps require a final 2xx response. Other status codes stop subsequent steps. The step condition includes the status code.
+- If a condition has reason `ExecutionOutcomeUnknown`, check whether the target system performed the operation. The controller will not replay the Action. Create a new MiddlewareAction if another execution is needed.
 - Ensure the baseline's `baselineType` is `NormalAction` (or `OpsAction`) for standalone execution
 
 ---

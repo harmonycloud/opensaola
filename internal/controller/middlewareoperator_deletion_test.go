@@ -22,10 +22,15 @@ import (
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	appsv1 "k8s.io/api/apps/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -61,5 +66,27 @@ func TestHandleDeploymentSkipsDeletingMiddlewareOperator(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("deleting MiddlewareOperator deployment reconciliation: %v", err)
+	}
+}
+
+// A failed status request can return NotFound for a missing /status endpoint.
+// Only a missing owner at lookup is terminal. A dependent failure must retry.
+func TestMiddlewareOperatorRetriesDependentNotFound(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	mo := &v1.MiddlewareOperator{ObjectMeta: metav1.ObjectMeta{Name: "publish", Namespace: "test", Generation: 1, Finalizers: []string{v1.FinalizerMiddlewareOperator}}, Spec: v1.MiddlewareOperatorSpec{Baseline: "operator"}}
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(mo).WithObjects(mo).WithInterceptorFuncs(interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, c client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			return apierrors.NewNotFound(schema.GroupResource{Group: v1.GroupVersion.Group, Resource: "middlewareoperators/status"}, obj.GetName())
+		},
+	}).Build()
+	r := &MiddlewareOperatorReconciler{Client: cli, Scheme: scheme, Recorder: record.NewFakeRecorder(10)}
+	if _, err := r.Reconcile(t.Context(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(mo)}); !apierrors.IsNotFound(err) {
+		t.Fatalf("expected a retry for a missing status endpoint, got %v", err)
+	}
+	if result, err := r.Reconcile(t.Context(), reconcile.Request{NamespacedName: types.NamespacedName{Name: "gone", Namespace: mo.Namespace}}); err != nil || !result.IsZero() {
+		t.Fatalf("expected missing owner to finish, got %v, %v", result, err)
 	}
 }

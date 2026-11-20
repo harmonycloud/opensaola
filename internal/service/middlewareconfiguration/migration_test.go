@@ -147,3 +147,28 @@ func TestReferenceMigrationRetriesAfterStatusWriteFailure(t *testing.T) {
 		t.Fatal("retry did not record the intentional omission")
 	}
 }
+
+func TestMigrationLeavesPendingPublicationForRetry(t *testing.T) {
+	mid := inventoryTestOwner()
+	mid.Generation, mid.Status.ObservedGeneration = 4, 4
+	mid.Status.State = v1.StateUnavailable
+	mid.Status.PendingConfigurationWrite = &v1.PendingConfigurationWrite{ID: "in-flight"}
+	mo := &v1.MiddlewareOperator{ObjectMeta: mid.ObjectMeta, Status: v1.MiddlewareOperatorStatus{PendingConfigurationWrite: mid.Status.PendingConfigurationWrite, ObservedGeneration: 4, State: v1.StateUnavailable}}
+	for _, owner := range []client.Object{mid, mo} {
+		base := fake.NewClientBuilder().WithScheme(inventoryTestClient(t).Scheme()).WithStatusSubresource(owner).WithObjects(owner).Build()
+		if err := MigrateConfigurationOwnerReferences(t.Context(), base, owner); err != nil {
+			t.Fatal(err)
+		}
+		saved, ok := owner.DeepCopyObject().(client.Object)
+		if !ok {
+			t.Fatalf("unexpected owner type %T", owner)
+		}
+		if err := base.Get(t.Context(), client.ObjectKeyFromObject(owner), saved); err != nil {
+			t.Fatal(err)
+		}
+		entries, generation := configurationInventory(saved)
+		if len(*entries) != 0 || *generation != 0 || (*pendingConfigurationWrite(saved)).ID != "in-flight" {
+			t.Fatalf("%T classified interrupted publication as completed migration: %#v", saved, saved)
+		}
+	}
+}

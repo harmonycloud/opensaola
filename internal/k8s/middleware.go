@@ -129,6 +129,9 @@ func UpdateMiddlewareStatus(ctx context.Context, cli client.Client, m *v1.Middle
 			}
 		}
 		attempt++
+		if m.UID != "" && m.UID != now.UID {
+			return fmt.Errorf("Middleware %s/%s was replaced before its status update", m.Namespace, m.Name)
+		}
 
 		// ObservedGeneration must be monotonically increasing: avoid overwriting with a smaller value.
 		if m.Status.ObservedGeneration < now.Status.ObservedGeneration {
@@ -143,10 +146,11 @@ func UpdateMiddlewareStatus(ctx context.Context, cli client.Client, m *v1.Middle
 		// A normal controller/service status write may be based on an older
 		// reconcile copy, so always retain the latest durable pause baseline.
 		desiredStatus.ReconcilePause = now.Status.ReconcilePause
-		if desiredStatus.RenderedConfigurationResourcesGeneration < now.Status.RenderedConfigurationResourcesGeneration {
-			desiredStatus.RenderedConfigurationResources = now.Status.RenderedConfigurationResources
-			desiredStatus.RenderedConfigurationResourcesGeneration = now.Status.RenderedConfigurationResourcesGeneration
-		}
+		// Configuration publication owns these fields and updates them between
+		// writes within one generation. A general status write must preserve them.
+		desiredStatus.RenderedConfigurationResources = now.Status.RenderedConfigurationResources
+		desiredStatus.RenderedConfigurationResourcesGeneration = now.Status.RenderedConfigurationResourcesGeneration
+		desiredStatus.PendingConfigurationWrite = now.Status.PendingConfigurationWrite
 
 		// Compare whether status has changed
 		if equality.Semantic.DeepEqual(now.Status, desiredStatus) {

@@ -71,8 +71,9 @@ type resourceIntent struct {
 	// is verified. Legacy immutable records used an annotation for confirmation.
 	DeletionBase *resourceIntent `json:"deletionBase,omitempty"`
 	// Set only while reading an unconfirmed record; never serialized.
-	pendingDeletion bool
-	Attempt         *intentAttempt `json:"attempt,omitempty"`
+	pendingDeletion      bool
+	atomicReleaseReceipt string         // preceding verified business write for a retry of the same declaration
+	Attempt              *intentAttempt `json:"attempt,omitempty"`
 	// Pause distinguishes an observed pause baseline from a rendered intent.
 	Pause *reconcilePauseData `json:"pause,omitempty"`
 }
@@ -140,7 +141,7 @@ func (w *ManagedResourceWriter) preflightResourceIntent(ctx context.Context, own
 	// Defaults may require Desired and Effective; the record has no application
 	// size ceiling, and Kubernetes validates the actual stored Secret payload.
 	preview := cleanApplyObject(desired)
-	if err := w.Client.Create(ctx, preview, client.FieldOwner(v1.FieldOwner), client.DryRunAll); err != nil {
+	if err := w.Client.Create(ctx, preview, w.createFieldOwner(preview), client.DryRunAll); err != nil {
 		return err
 	}
 	input := intentObject(desired)
@@ -429,14 +430,18 @@ func (w *ManagedResourceWriter) reconcileResourceIntent(ctx context.Context, own
 			return err
 		}
 	}
+	mode := declaredUpdate
+	if record != nil && record.atomicReleaseReceipt != "" {
+		mode = retryAfterAtomicRelease
+	}
 	mergeLive := intentObject(live)
 	var preserved []string
-	var legacyChecks []DeclaredDeletionCheck
+	var legacyChecks, legacyReleases []DeclaredDeletionCheck
 	if record != nil && record.Version == 1 {
 		// Old opaque lists were atomic. A policy upgrade must not retrospectively
 		// invent ownership of their individual members or fields. First apply
 		// only deletions justified by the old policy, then overlay declarations.
-		legacy, planErr := PlanLegacyResourceIntentDeletions(converter, before, mergeLive, effectiveInput, protected)
+		legacy, planErr := planLegacyResourceIntentDeletions(converter, before, mergeLive, effectiveInput, protected, mode)
 		if planErr != nil {
 			return planErr
 		}
@@ -446,9 +451,10 @@ func (w *ManagedResourceWriter) reconcileResourceIntent(ctx context.Context, own
 		mergeLive = legacy.Object
 		preserved = append(preserved, legacy.PreservedExternal...)
 		legacyChecks = legacy.DeletionChecks
+		legacyReleases = legacy.atomicReleases
 		before = nil
 	}
-	plan, err := PlanDeclaredResourceIntent(converter, before, mergeLive, effectiveInput, input, protected)
+	plan, err := planDeclaredResourceIntent(converter, before, mergeLive, effectiveInput, input, protected, mode)
 	if err != nil {
 		return err
 	}
@@ -458,6 +464,7 @@ func (w *ManagedResourceWriter) reconcileResourceIntent(ctx context.Context, own
 	merged := plan.Object
 	preserved = append(preserved, plan.PreservedExternal...)
 	plan.DeletionChecks = append(plan.DeletionChecks, legacyChecks...)
+	plan.atomicReleases = append(plan.atomicReleases, legacyReleases...)
 	if err := plan.Validate(converter, merged); err != nil {
 		return err
 	}

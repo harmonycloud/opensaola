@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 
+	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/concurrency"
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	appsv1 "k8s.io/api/apps/v1"
@@ -28,19 +29,21 @@ import (
 	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 // MiddlewareOperatorRuntimeReconciler is solely responsible for syncing Deployment runtime state to MiddlewareOperator.status.
 type MiddlewareOperatorRuntimeReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme    *runtime.Scheme
+	APIReader client.Reader
 }
 
 //+kubebuilder:rbac:groups=middleware.cn,resources=middlewareoperators,verbs=get;list;watch
@@ -48,57 +51,112 @@ type MiddlewareOperatorRuntimeReconciler struct {
 //+kubebuilder:rbac:groups=apps,resources=deployments;replicasets,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=pods;persistentvolumeclaims;events,verbs=get;list;watch
 
-func (r *MiddlewareOperatorRuntimeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	ctx = withReconcileLogger(ctx, "middlewareoperator-runtime", "Deployment", req)
+// Preserve the owner's identity when enqueueing. After a deletion the
+// Deployment no longer exists, and a different MO can have the same name.
+type runtimeDeploymentRequest struct {
+	Deployment client.ObjectKey
+	OwnerName  string
+	OwnerUID   types.UID
+	Primary    bool
+}
 
-	log.FromContext(ctx).V(1).Info("start processing MiddlewareOperator runtime Deployment", "req", req)
+func runtimeDeploymentRequests(_ context.Context, obj client.Object) []runtimeDeploymentRequest {
+	d, ok := obj.(*appsv1.Deployment)
+	if !ok {
+		return nil
+	}
+	ref, err := middlewareOperatorOwnerFromDeployment(d)
+	if err != nil || ref.UID == "" || (metav1.GetControllerOf(d) != nil && (ref.Controller == nil || !*ref.Controller)) {
+		return nil
+	}
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	if err != nil || gv.Group != v1.GroupVersion.Group {
+		return nil
+	}
+	primary := d.Name == ref.Name && ref.Controller != nil && *ref.Controller && d.Annotations[v1.LabelConfigurations] == ""
+	return []runtimeDeploymentRequest{{Deployment: client.ObjectKeyFromObject(d), OwnerName: ref.Name, OwnerUID: ref.UID, Primary: primary}}
+}
 
-	deployment := &appsv1.Deployment{}
-	if err := r.Get(ctx, req.NamespacedName, deployment); err != nil {
+// An initial informer list after an upgrade or restart also repairs status
+// for previously recorded Deployments whose delete event was missed.
+func recordedRuntimeRequests(_ context.Context, obj client.Object) []runtimeDeploymentRequest {
+	mo, ok := obj.(*v1.MiddlewareOperator)
+	if !ok {
+		return nil
+	}
+	requests := make([]runtimeDeploymentRequest, 0, len(mo.Status.OperatorStatus)+1)
+	hasSummary := mo.Status.Runtime != "" || mo.Status.Ready || mo.Status.OperatorAvailable != ""
+	for name := range mo.Status.OperatorStatus {
+		// A same-name MCF may have a detail without ever having had a primary.
+		if name != mo.Name || !hasSummary {
+			requests = append(requests, runtimeDeploymentRequest{Deployment: client.ObjectKey{Namespace: mo.Namespace, Name: name}, OwnerName: mo.Name, OwnerUID: mo.UID})
+		}
+	}
+	if hasSummary {
+		requests = append(requests, runtimeDeploymentRequest{Deployment: client.ObjectKeyFromObject(mo), OwnerName: mo.Name, OwnerUID: mo.UID, Primary: true})
+	}
+	return requests
+}
+
+func (r *MiddlewareOperatorRuntimeReconciler) Reconcile(ctx context.Context, req runtimeDeploymentRequest) (ctrl.Result, error) {
+	ctx = withReconcileLogger(ctx, "middlewareoperator-runtime", "Deployment", ctrl.Request{NamespacedName: req.Deployment})
+	reader := r.APIReader
+	if reader == nil {
+		reader = r.Client
+	}
+	ownerKey := client.ObjectKey{Namespace: req.Deployment.Namespace, Name: req.OwnerName}
+	mo := &v1.MiddlewareOperator{}
+	if err := reader.Get(ctx, ownerKey, mo); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-
-	moName, err := middlewareOperatorNameFromDeployment(deployment)
-	if err != nil {
-		log.FromContext(ctx).Error(err, "Deployment has invalid ownerReferences", "namespace", deployment.Namespace, "name", deployment.Name)
-		return ctrl.Result{}, err
+	if req.OwnerUID == "" || mo.UID != req.OwnerUID || mo.DeletionTimestamp != nil {
+		return ctrl.Result{}, nil
 	}
 
-	mo, err := k8s.GetMiddlewareOperator(ctx, r.Client, moName, deployment.Namespace)
-	if err != nil {
-		if apiErrors.IsNotFound(err) {
-			log.FromContext(ctx).Error(err, "Deployment corresponding MiddlewareOperator not found", "namespace", deployment.Namespace, "deploymentName", deployment.Name, "moName", moName)
+	deployment := &appsv1.Deployment{}
+	err := reader.Get(ctx, req.Deployment, deployment)
+	if err != nil && !apiErrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+	var detail *appsv1.DeploymentStatus
+	var summary *k8s.OperatorRuntimeSummary
+	noOperator := mo.Annotations[v1.LabelNoOperator] == "true"
+	if req.Primary {
+		summary = &k8s.OperatorRuntimeSummary{}
+		if !noOperator {
+			summary.Runtime = "DeploymentMissing"
 		}
-		return ctrl.Result{}, err
 	}
-
-	// Build runtime fields and write via a dedicated merge function to avoid overwriting
-	// State/Conditions/ObservedGeneration/Reason managed by the main controller.
-	operatorStatus := mo.Status.OperatorStatus
-	if operatorStatus == nil {
-		operatorStatus = make(map[string]appsv1.DeploymentStatus)
+	if err == nil {
+		current := runtimeDeploymentRequests(ctx, deployment)
+		if len(current) == 1 && current[0].OwnerUID == mo.UID && current[0].OwnerName == mo.Name {
+			detail = &deployment.Status
+			if current[0].Primary && !noOperator {
+				snapshot := r.collectRuntimeObjects(ctx, deployment)
+				diagnostic := deriveRuntimeDiagnostic(mo.Name, deployment, snapshot.replicaSets, snapshot.pods, snapshot.pvcs, snapshot.events, snapshot.err)
+				summary = &k8s.OperatorRuntimeSummary{Available: fmt.Sprintf("%d/%d", deployment.Status.AvailableReplicas, deployment.Status.Replicas), Ready: deploymentRuntimeReady(deployment) && diagnostic == "Ready", Runtime: diagnostic}
+				if deployment.DeletionTimestamp != nil {
+					summary.Ready = false
+					summary.Runtime = "DeploymentTerminating"
+				}
+			}
+		}
 	}
-	operatorStatus[deployment.Name] = deployment.Status
-
-	snapshot := r.collectRuntimeObjects(ctx, deployment)
-	runtime := deriveRuntimeDiagnostic(moName, deployment, snapshot.replicaSets, snapshot.pods, snapshot.pvcs, snapshot.events, snapshot.err)
-	ready := deploymentRuntimeReady(deployment) && runtime == "Ready"
-
-	if err := k8s.UpdateMiddlewareOperatorRuntimeStatus(
-		ctx, r.Client, moName, deployment.Namespace,
-		operatorStatus,
-		fmt.Sprintf("%d/%d", deployment.Status.AvailableReplicas, deployment.Status.Replicas),
-		ready,
-		runtime,
-	); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
+	err = k8s.UpdateMiddlewareOperatorRuntimeStatus(ctx, r.Client, ownerKey, mo.UID, req.Deployment.Name, detail, summary)
+	return ctrl.Result{}, err
 }
 
 func (r *MiddlewareOperatorRuntimeReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
+	r.APIReader = mgr.GetAPIReader()
+	return builder.TypedControllerManagedBy[runtimeDeploymentRequest](mgr).
+		Watches(&v1.MiddlewareOperator{}, handler.TypedEnqueueRequestsFromMapFunc(recordedRuntimeRequests), builder.WithPredicates(predicate.Funcs{
+			UpdateFunc: func(e event.UpdateEvent) bool {
+				return e.ObjectOld.GetAnnotations()[v1.LabelNoOperator] != e.ObjectNew.GetAnnotations()[v1.LabelNoOperator]
+			},
+			DeleteFunc:  func(event.DeleteEvent) bool { return false },
+			GenericFunc: func(event.GenericEvent) bool { return false },
+		})).
+		Watches(&appsv1.Deployment{}, handler.TypedEnqueueRequestsFromMapFunc(runtimeDeploymentRequests), builder.WithPredicates(predicate.Funcs{
 			CreateFunc: func(e event.CreateEvent) bool {
 				deployment, ok := e.Object.(*appsv1.Deployment)
 				return ok && deployment != nil && hasMiddlewareOperatorOwner(deployment)
@@ -114,12 +172,15 @@ func (r *MiddlewareOperatorRuntimeReconciler) SetupWithManager(mgr ctrl.Manager)
 				}
 				return deploymentRuntimeStatusChanged(oldDeployment, newDeployment)
 			},
-			DeleteFunc:  func(event.DeleteEvent) bool { return false },
+			DeleteFunc: func(e event.DeleteEvent) bool {
+				d, ok := e.Object.(*appsv1.Deployment)
+				return ok && hasMiddlewareOperatorOwner(d)
+			},
 			GenericFunc: func(event.GenericEvent) bool { return false },
 		})).
 		Watches(
 			&corev1.Pod{},
-			handler.EnqueueRequestsFromMapFunc(r.runtimePodToDeploymentRequests),
+			handler.TypedEnqueueRequestsFromMapFunc(r.runtimePodToDeploymentRequests),
 			builder.WithPredicates(predicate.Funcs{
 				CreateFunc: func(e event.CreateEvent) bool {
 					return e.Object != nil
@@ -135,7 +196,7 @@ func (r *MiddlewareOperatorRuntimeReconciler) SetupWithManager(mgr ctrl.Manager)
 		).
 		Watches(
 			&corev1.PersistentVolumeClaim{},
-			handler.EnqueueRequestsFromMapFunc(r.runtimePVCToDeploymentRequests),
+			handler.TypedEnqueueRequestsFromMapFunc(r.runtimePVCToDeploymentRequests),
 			builder.WithPredicates(predicate.Funcs{
 				CreateFunc: func(e event.CreateEvent) bool {
 					return e.Object != nil
@@ -151,7 +212,7 @@ func (r *MiddlewareOperatorRuntimeReconciler) SetupWithManager(mgr ctrl.Manager)
 		).
 		Watches(
 			&corev1.Event{},
-			handler.EnqueueRequestsFromMapFunc(r.runtimeEventToDeploymentRequests),
+			handler.TypedEnqueueRequestsFromMapFunc(r.runtimeEventToDeploymentRequests),
 			builder.WithPredicates(predicate.Funcs{
 				CreateFunc: func(e event.CreateEvent) bool {
 					eventObj, ok := e.Object.(*corev1.Event)
@@ -167,7 +228,7 @@ func (r *MiddlewareOperatorRuntimeReconciler) SetupWithManager(mgr ctrl.Manager)
 			}),
 		).
 		Named("middlewareoperator-runtime").
-		WithOptions(concurrency.ControllerOptions("MIDDLEWAREOPERATOR_RUNTIME", 1)).
+		WithOptions(concurrency.TypedControllerOptions[runtimeDeploymentRequest]("MIDDLEWAREOPERATOR_RUNTIME", 1)).
 		Complete(r)
 }
 
@@ -185,7 +246,7 @@ func hasMiddlewareOperatorOwner(deployment *appsv1.Deployment) bool {
 	return false
 }
 
-func middlewareOperatorNameFromDeployment(deployment *appsv1.Deployment) (string, error) {
+func middlewareOperatorOwnerFromDeployment(deployment *appsv1.Deployment) (*metav1.OwnerReference, error) {
 	ownerReferences := deployment.GetOwnerReferences()
 	var controllerOwners []metav1.OwnerReference
 	var middlewareOperatorOwners []metav1.OwnerReference
@@ -199,28 +260,28 @@ func middlewareOperatorNameFromDeployment(deployment *appsv1.Deployment) (string
 		}
 	}
 	if len(controllerOwners) > 1 {
-		return "", fmt.Errorf("expected at most 1 controller MiddlewareOperator ownerReference, got %d", len(controllerOwners))
+		return nil, fmt.Errorf("expected at most 1 controller MiddlewareOperator ownerReference, got %d", len(controllerOwners))
 	}
 	if len(controllerOwners) == 1 {
 		if controllerOwners[0].Name == "" {
-			return "", fmt.Errorf("controller MiddlewareOperator ownerReference name is empty")
+			return nil, fmt.Errorf("controller MiddlewareOperator ownerReference name is empty")
 		}
-		return controllerOwners[0].Name, nil
+		return &controllerOwners[0], nil
 	}
 	if len(middlewareOperatorOwners) == 0 {
-		return "", fmt.Errorf("missing MiddlewareOperator ownerReference")
+		return nil, fmt.Errorf("missing MiddlewareOperator ownerReference")
 	}
 	if len(middlewareOperatorOwners) > 1 {
-		return "", fmt.Errorf("expected exactly 1 MiddlewareOperator ownerReference when controller owner is absent, got %d", len(middlewareOperatorOwners))
+		return nil, fmt.Errorf("expected exactly 1 MiddlewareOperator ownerReference when controller owner is absent, got %d", len(middlewareOperatorOwners))
 	}
 	if middlewareOperatorOwners[0].Name == "" {
-		return "", fmt.Errorf("MiddlewareOperator ownerReference name is empty")
+		return nil, fmt.Errorf("MiddlewareOperator ownerReference name is empty")
 	}
-	return middlewareOperatorOwners[0].Name, nil
+	return &middlewareOperatorOwners[0], nil
 }
 
 func deploymentRuntimeStatusChanged(oldDeployment, newDeployment *appsv1.Deployment) bool {
-	if !reflect.DeepEqual(oldDeployment.OwnerReferences, newDeployment.OwnerReferences) {
+	if oldDeployment.Generation != newDeployment.Generation || !oldDeployment.DeletionTimestamp.Equal(newDeployment.DeletionTimestamp) || oldDeployment.Annotations[v1.LabelConfigurations] != newDeployment.Annotations[v1.LabelConfigurations] || !reflect.DeepEqual(oldDeployment.OwnerReferences, newDeployment.OwnerReferences) {
 		return true
 	}
 	return !reflect.DeepEqual(oldDeployment.Status, newDeployment.Status)

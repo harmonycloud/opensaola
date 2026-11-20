@@ -56,6 +56,7 @@ func TestMergeDeclaredResourceIntent(t *testing.T) {
 		{name: "typed atomic list of untyped items remains atomic", live: `{"anyItems":[{"name":"owned","extra":"external"},{"name":"sidecar"}]}`, raw: `{"anyItems":[{"name":"owned"}]}`, want: `{"anyItems":[{"name":"owned"}]}`},
 		{name: "atomic map fully replaced", before: `{"atomicMap":{"a":"old"}}`, live: `{"atomicMap":{"a":"drift","external":"keep"}}`, raw: `{"atomicMap":{"a":"new"}}`, want: `{"atomicMap":{"a":"new"}}`},
 		{name: "explicit atomic boundary outranks unknown descendants", live: `{"atomicOpaque":{"containers":[{"name":"broker","external":"keep"},{"name":"sidecar"}]}}`, raw: `{"atomicOpaque":{"containers":[{"name":"broker"}]}}`, want: `{"atomicOpaque":{"containers":[{"name":"broker"}]}}`},
+		{name: "other root field update retains external atomic payload", before: `{"mode":"one","atomicOpaque":{"items":[{"a":"1"}]}}`, live: `{"mode":"one","atomicOpaque":{"items":[{"a":"1","external":{"deep":true}}],"server":false}}`, raw: `{"mode":"two","atomicOpaque":{"items":[{"a":"1"}]}}`, want: `{"mode":"two","atomicOpaque":{"items":[{"a":"1","external":{"deep":true}}],"server":false}}`},
 		{name: "atomic empty list clears full field", live: `{"atomic":[{"name":"external"}]}`, raw: `{"atomic":[]}`, want: `{"atomic":[]}`},
 		{name: "schema set deletes owned and keeps external membership", before: `{"tags":["a","b"]}`, live: `{"tags":["a","b","external"]}`, raw: `{"tags":["b","c"]}`, want: `{"tags":["b","external","c"]}`},
 		{name: "foreign apply atomic parent protects named deletion", before: `{"containers":[{"name":"old"}]}`, live: `{"containers":[{"name":"old"}]}`, raw: `{"containers":[{"name":"new"}]}`, want: `{"containers":[{"name":"old"},{"name":"new"}]}`, protected: fieldpath.NewSet(fieldpath.MakePathOrDie("spec", "containers")), blocked: true},
@@ -149,6 +150,8 @@ func TestDeclaredResourceIntentProjection(t *testing.T) {
 		{"opaque empty string omission is not guessed", `{"opaqueEmpty":""}`, `{}`, false},
 		{"real schema default accepts omitted field", `{"defaultFalse":false}`, `{}`, true},
 		{"explicit null is checked", `{"containers":null}`, `{}`, false},
+		{"custom atomic empty list differs from null", `{"atomic":[]}`, `{"atomic":null}`, false},
+		{"opaque empty list differs from null", `{"futureField":[]}`, `{"futureField":null}`, false},
 		{"atomic external additions are not converged", `{"atomic":[{"name":"owned"}]}`, `{"atomic":[{"name":"owned"},{"name":"external"}]}`, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -160,10 +163,36 @@ func TestDeclaredResourceIntentProjection(t *testing.T) {
 	}
 }
 
+func TestDeclaredIntentKeyedListInsideAtomicMap(t *testing.T) {
+	converter := declaredTestConverter(t)
+	const desired = `{"policy":{"rules":[{"id":"a","limit":1},{"id":"b","limit":2}]}}`
+	for _, test := range []struct {
+		name, observedRules string
+		valid               bool
+	}{
+		{"same keys reordered", `[{"id":"b","limit":2},{"id":"a","limit":1}]`, true},
+		{"same key with changed value", `[{"id":"b","limit":2},{"id":"a","limit":9}]`, false},
+		{"key replaced", `[{"id":"b","limit":2},{"id":"c","limit":1}]`, false},
+		{"member missing", `[{"id":"a","limit":1}]`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			observed := intentTestObject(t, `{"policy":{"rules":`+test.observedRules+`}}`)
+			err := ValidateDeclaredResourceIntent(converter, intentTestObject(t, desired), observed)
+			if test.valid {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), ".spec.policy") {
+				t.Fatalf("expected a conflict at .spec.policy for %s, got %v", test.observedRules, err)
+			}
+		})
+	}
+}
+
 func TestLegacyIntentDeletionMigrationDoesNotInventNamedOwnership(t *testing.T) {
 	converter := declaredTestConverter(t)
-	before := intentTestObject(t, `{"containers":[{"name":"old","image":"one"},{"name":"keep","image":"old"}],"remove":"old"}`)
-	live := intentTestObject(t, `{"containers":[{"name":"old","image":"one"},{"name":"keep","image":"drift"},{"name":"external"}],"remove":"old"}`)
+	before := intentTestObject(t, `{"containers":[{"name":"old","image":"one"},{"name":"keep","image":"old","withdrawn":"v1"}],"remove":"old"}`)
+	live := intentTestObject(t, `{"containers":[{"name":"old","image":"one"},{"name":"keep","image":"drift","withdrawn":"v1"},{"name":"external"}],"remove":"old"}`)
 	desired := intentTestObject(t, `{"containers":[{"name":"keep","image":"new"}]}`)
 	legacy, err := PlanLegacyResourceIntentDeletions(converter, before, live, desired, nil)
 	if err != nil {
@@ -176,7 +205,7 @@ func TestLegacyIntentDeletionMigrationDoesNotInventNamedOwnership(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := intentTestObject(t, `{"containers":[{"name":"old","image":"one"},{"name":"keep","image":"new"},{"name":"external"}]}`)
+	want := intentTestObject(t, `{"containers":[{"name":"old","image":"one"},{"name":"keep","image":"new","withdrawn":"v1"},{"name":"external"}]}`)
 	if !reflect.DeepEqual(got.Object, want.Object) {
 		t.Fatalf("migration expanded legacy deletion rights: got %s want %s", intentTestJSON(got.Object), intentTestJSON(want.Object))
 	}
@@ -210,13 +239,17 @@ func declaredTestConverter(t testing.TB) managedfields.TypeConverter {
     "apiVersion":{"type":"string"},"kind":{"type":"string"},
     "metadata":{"type":"object","properties":{"name":{"type":"string"},"namespace":{"type":"string"},"labels":{"type":"object","additionalProperties":{"type":"string"}},"annotations":{"type":"object","additionalProperties":{"type":"string"}}}},
     "spec":{"type":"object","x-kubernetes-preserve-unknown-fields":true,"properties":{
-      "entries":{"type":"array","x-kubernetes-list-type":"map","x-kubernetes-list-map-keys":["id"],"items":{"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"},"value":{"type":"string"},"note":{"type":"string"},"optional":{"type":"boolean"}}}},
+      "entries":{"type":"array","x-kubernetes-list-type":"map","x-kubernetes-list-map-keys":["id"],"items":{"type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"},"value":{"type":"string"},"note":{"type":"string"},"optional":{"type":"boolean"},"options":{"type":"object","x-kubernetes-map-type":"atomic","additionalProperties":{"type":"string"}}}}},
       "ports":{"type":"array","x-kubernetes-list-type":"map","x-kubernetes-list-map-keys":["port","protocol"],"items":{"type":"object","properties":{"port":{"type":"integer"},"protocol":{"type":"string","default":"TCP"},"target":{"type":"string"}}}},
       "tags":{"type":"array","x-kubernetes-list-type":"set","items":{"type":"string"}},
       "atomic":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"value":{"type":"string"}}}},
       "anyItems":{"type":"array","items":{}},
       "atomicMap":{"type":"object","x-kubernetes-map-type":"atomic","additionalProperties":{"type":"string"}},
       "atomicOpaque":{"type":"object","x-kubernetes-map-type":"atomic","x-kubernetes-preserve-unknown-fields":true},
+      "policy":{"type":"object","x-kubernetes-map-type":"atomic","properties":{
+        "rules":{"type":"array","x-kubernetes-list-type":"map","x-kubernetes-list-map-keys":["id"],
+          "items":{"type":"object","properties":{"id":{"type":"string"},"limit":{"type":"integer"}}}}
+      }},
       "resources":{"type":"object","additionalProperties":{"$ref":"#/definitions/io.k8s.apimachinery.pkg.api.resource.Quantity"}},
       "quantityString":{"type":"string"},"defaultFalse":{"type":"boolean","default":false}
     }}

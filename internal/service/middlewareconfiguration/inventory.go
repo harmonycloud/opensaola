@@ -19,11 +19,11 @@ package middlewareconfiguration
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
-	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,8 +33,8 @@ import (
 )
 
 // ReconcileRenderedConfigurationResources applies the currently rendered MCF
-// resources and, on update, removes prior lifecycle-managed resources that no
-// longer render. Resources are deleted only when their prior snapshot resolved
+// resources and retires confirmed targets that no longer render, including
+// targets left by an interrupted initial publication. Resources are deleted only when their prior snapshot resolved
 // to configurationDisablePolicy=delete.
 func ReconcileRenderedConfigurationResources(
 	ctx context.Context,
@@ -42,18 +42,30 @@ func ReconcileRenderedConfigurationResources(
 	owner metav1.Object,
 	action consts.HandleAction,
 	configurations []*v1.MiddlewareConfiguration,
-	previous []v1.RenderedConfigurationResource,
 ) ([]v1.RenderedConfigurationResource, error) {
-	if action != consts.HandleActionPublish && action != consts.HandleActionUpdate {
-		return previous, nil
-	}
 
+	ownerObj, ok := owner.(client.Object)
+	if !ok {
+		return nil, fmt.Errorf("unsupported configuration owner %T", owner)
+	}
+	records, _ := configurationInventory(ownerObj)
+	if records == nil {
+		return nil, fmt.Errorf("missing configuration inventory for %T", owner)
+	}
+	if action != consts.HandleActionPublish && action != consts.HandleActionUpdate {
+		return *records, nil
+	}
+	if err := recoverConfigurationWrite(ctx, cli, ownerObj); err != nil {
+		return nil, err
+	}
+	previous := slices.Clone(*records)
+	seen := make(map[string]string, len(configurations))
 	current := make([]v1.RenderedConfigurationResource, 0, len(configurations))
 	currentlyRendered := make([]v1.RenderedConfigurationResource, 0, len(configurations))
 	for _, configuration := range configurations {
-		result, err := Handle(ctx, cli, owner, action, configuration)
+		result, err := handleRenderedConfiguration(ctx, cli, owner, action, configuration, seen)
 		if err != nil {
-			return nil, fmt.Errorf("%s middleware configuration %s error: %w", action, configuration.Name, err)
+			return *records, fmt.Errorf("%s middleware configuration %s error: %w", action, configuration.Name, err)
 		}
 		if result != nil {
 			currentlyRendered = append(currentlyRendered, result.identity)
@@ -72,10 +84,13 @@ func ReconcileRenderedConfigurationResources(
 	if err != nil {
 		return nil, err
 	}
-	if action == consts.HandleActionUpdate {
-		if err := DeleteDisabledRenderedConfigurationResources(ctx, cli, owner, previous, currentlyRendered); err != nil {
-			return nil, err
-		}
+	// A retry can still be classified as Publish after a partial first
+	// publication. Its previously confirmed resources also need retirement.
+	if err := DeleteDisabledRenderedConfigurationResources(ctx, cli, owner, previous, currentlyRendered); err != nil {
+		return *records, err
+	}
+	if err := commitConfigurationInventory(ctx, cli, ownerObj, current); err != nil {
+		return *records, err
 	}
 	return current, nil
 }
@@ -149,19 +164,12 @@ func deleteDisabledRenderedConfigurationResource(ctx context.Context, cli client
 		)
 		return nil
 	}
-	obj, err := k8s.GetCustomResource(ctx, cli, resource.Name, resource.Namespace, gvk)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
+	obj, err := getRecordedConfigurationResource(ctx, cli, resource, gvk)
 	if err != nil {
-		if k8s.IsCRDNotInstalled(err) {
-			log.FromContext(ctx).Info("skipping disabled configuration cleanup because its CRD is not installed",
-				"configuration", resource.ConfigurationName,
-				"gvk", gvk.String(),
-			)
-			return nil
-		}
-		return fmt.Errorf("get disabled configuration resource %s %s/%s: %w", gvk.String(), resource.Namespace, resource.Name, err)
+		return fmt.Errorf("get disabled configuration resource %s %s/%s: %w", gvk, resource.Namespace, resource.Name, err)
+	}
+	if obj == nil {
+		return nil
 	}
 	if !shouldDeleteDisabledRenderedResource(owner, obj, resource) {
 		log.FromContext(ctx).Info("skipping disabled configuration cleanup because live identity is not managed by this inventory",
@@ -220,5 +228,6 @@ func renderedConfigurationResourceKey(resource v1.RenderedConfigurationResource)
 	if resource.Version == "" || resource.Kind == "" || resource.Name == "" {
 		return ""
 	}
-	return strings.Join([]string{resource.Group, resource.Version, resource.Kind, resource.Namespace, resource.Name}, "/")
+	// All served versions of one GroupKind address the same object.
+	return strings.Join([]string{resource.Group, resource.Kind, resource.Namespace, resource.Name}, "/")
 }

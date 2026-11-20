@@ -17,16 +17,39 @@ limitations under the License.
 package kubeclient
 
 import (
+	"net/http"
 	"sync"
 
 	apiextclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 )
+
+type managerRESTMapper struct {
+	meta.RESTMapper
+	config     *rest.Config
+	httpClient *http.Client
+}
+
+// NewManagerRESTMapper uses the default controller-runtime mapper for all
+// cached lookups, and keeps the same connection available for fresh discovery.
+func NewManagerRESTMapper(config *rest.Config, httpClient *http.Client) (meta.RESTMapper, error) {
+	mapper, err := apiutil.NewDynamicRESTMapper(config, httpClient)
+	if err != nil {
+		return nil, err
+	}
+	return &managerRESTMapper{RESTMapper: mapper, config: config, httpClient: httpClient}, nil
+}
+
+func (m *managerRESTMapper) FreshRESTMapper() (meta.RESTMapper, error) {
+	return apiutil.NewDynamicRESTMapper(m.config, m.httpClient)
+}
 
 var (
 	cfgOnce sync.Once

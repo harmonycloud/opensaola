@@ -18,8 +18,8 @@ package middlewareactionbaseline
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/cache"
@@ -27,7 +27,7 @@ import (
 	"github.com/harmonycloud/opensaola/internal/service/packages"
 	"github.com/harmonycloud/opensaola/internal/service/status"
 	"github.com/mohae/deepcopy"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -43,25 +43,14 @@ func Check(ctx context.Context, cli client.Client, m *v1.MiddlewareActionBaselin
 	log.FromContext(ctx).Info("validating MiddlewareActionBaseline", "name", m.Name)
 
 	conditionChecked := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeChecked)
-	if conditionChecked.Status != metav1.ConditionTrue || conditionChecked.ObservedGeneration < m.Generation {
-		if len(m.Spec.Steps) > 0 {
-			var checkErrs []string
-			for _, step := range m.Spec.Steps {
-				if err := checkStep(ctx, step, m); err != nil {
-					checkErrs = append(checkErrs, fmt.Sprintf("%s validation failed: %s", step.Name, err.Error()))
-				}
-			}
-			if len(checkErrs) > 0 {
-				msg := strings.Join(checkErrs, ";")
-				conditionChecked.Failed(ctx, msg, m.Generation)
-				m.Status.State = v1.StateUnavailable
-			} else {
-				conditionChecked.Success(ctx, m.Generation)
-				m.Status.State = v1.StateAvailable
-			}
-		} else if len(m.Spec.Steps) == 0 {
-			msg := "steps must not be empty"
-			conditionChecked.Failed(ctx, msg, m.Generation)
+	validationErr := ValidateStepNames(m.Spec.Steps)
+	if conditionChecked.Status != metav1.ConditionTrue || conditionChecked.ObservedGeneration < m.Generation || validationErr != nil {
+		if validationErr != nil {
+			conditionChecked.Failed(ctx, validationErr.Error(), m.Generation)
+			m.Status.State = v1.StateUnavailable
+		} else {
+			conditionChecked.Success(ctx, m.Generation)
+			m.Status.State = v1.StateAvailable
 		}
 		err := k8s.UpdateMiddlewareActionBaselineStatus(ctx, cli, m)
 		if err != nil {
@@ -78,7 +67,7 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 	key := fmt.Sprintf("%s/%s", pkgName, name)
 
 	baseline, err := k8s.GetMiddlewareActionBaseline(ctx, cli, name)
-	if err != nil && !errors.IsNotFound(err) {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return v1.MiddlewareActionBaseline{}, err
 	}
 	if baseline != nil && baseline.GetLabels()[v1.LabelPackageName] == pkgName {
@@ -128,10 +117,20 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 
 }
 
-// checkStep validates a Step
-func checkStep(ctx context.Context, step v1.Step, m *v1.MiddlewareActionBaseline) error {
-	if step.Name == "" {
-		return fmt.Errorf("name must not be empty")
+// ValidateStepNames checks the keys used for step conditions and exposed outputs.
+func ValidateStepNames(steps []v1.Step) error {
+	if steps == nil {
+		return errors.New("steps must be specified")
+	}
+	names := make(map[string]struct{}, len(steps))
+	for i, step := range steps {
+		if step.Name == "" {
+			return fmt.Errorf("steps[%d].name must not be empty", i)
+		}
+		if _, exists := names[step.Name]; exists {
+			return fmt.Errorf("duplicate step name %q", step.Name)
+		}
+		names[step.Name] = struct{}{}
 	}
 	return nil
 }

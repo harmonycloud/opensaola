@@ -17,7 +17,11 @@ limitations under the License.
 package k8s
 
 import (
+	"encoding/json"
 	"fmt"
+	"maps"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -25,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/managedfields"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 	"sigs.k8s.io/structured-merge-diff/v6/schema"
+	"sigs.k8s.io/structured-merge-diff/v6/typed"
 )
 
 type DeclaredIntentMergeResult struct {
@@ -34,6 +39,7 @@ type DeclaredIntentMergeResult struct {
 	PreservedExternal []string
 	BlockedDeletions  []DeclaredDeletionConflict
 	DeletionChecks    []DeclaredDeletionCheck
+	atomicReleases    []DeclaredDeletionCheck // omissions verified on submission, not against defaulted receipts
 }
 
 // Public diagnostics contain only redacted paths and fixed reasons. Actual
@@ -70,12 +76,138 @@ func (m *intentDeclaredMerger) blockDeletion(path fieldpath.Path, reason string)
 	m.blocked = append(m.blocked, DeclaredDeletionConflict{Path: safeDeclaredPath(path), Reason: reason})
 }
 
+func declaredDeletionCheck(path fieldpath.Path) DeclaredDeletionCheck {
+	return DeclaredDeletionCheck{Path: safeDeclaredPath(path), path: append(fieldpath.Path{}, path...)}
+}
+
 func (m *intentDeclaredMerger) checkDeletion(path fieldpath.Path) {
-	m.checks = append(m.checks, DeclaredDeletionCheck{Path: safeDeclaredPath(path), path: append(fieldpath.Path{}, path...)})
+	m.checks = append(m.checks, declaredDeletionCheck(path))
 }
 
 func (m *intentDeclaredMerger) checkMemberDeletion(path fieldpath.Path) {
 	m.checks = append(m.checks, DeclaredDeletionCheck{Path: safeDeclaredPath(path), path: append(fieldpath.Path{}, path...), allowExternalPayload: true})
+}
+
+// Compare immutable declarations to find keys to omit from an atomic write.
+// These paths also allow recovery to verify historical absence when there's no
+// operation receipt. Admission supplements never establish historical authority.
+func (m *intentDeclaredMerger) walkAtomicWithdrawals(previous, desired any, typ intentDeclaredType, path fieldpath.Path, removed func(any, intentDeclaredType, fieldpath.Path) error) error {
+	atom, opaque, err := m.resolve(typ, path)
+	if err != nil {
+		return err
+	}
+	switch old := previous.(type) {
+	case map[string]any:
+		next, ok := desired.(map[string]any)
+		if !ok {
+			return nil
+		}
+		for _, key := range slices.Sorted(maps.Keys(old)) {
+			v := old[key]
+			child, err := declaredMapChildType(atom, opaque, key)
+			if err != nil {
+				return err
+			}
+			childPath := appendDeclaredPath(path, fieldpath.PathElement{FieldName: &key})
+			wanted, kept := next[key]
+			if !kept {
+				err = removed(v, child, childPath)
+			} else if !reflect.DeepEqual(v, wanted) {
+				err = m.walkAtomicWithdrawals(v, wanted, child, childPath, removed)
+			}
+			if err != nil {
+				return err
+			}
+		}
+	case []any:
+		next, ok := desired.([]any)
+		if !ok {
+			return nil
+		}
+		child := intentDeclaredType{ref: opaqueDeclaredRef(), opaque: opaque}
+		if !opaque {
+			child.ref = atom.List.ElementType
+		}
+		if !opaque && atom.List.ElementRelationship == schema.Associative {
+			keys := atom.List.Keys
+			if len(keys) == 0 {
+				return nil // set membership is checked by value
+			}
+			before, err := m.listMembers(intentDeclaredValue{old, true}, atom, opaque, keys, path)
+			if err != nil {
+				return err
+			}
+			lookup := declaredDeletionLookup{merger: m, lists: map[string]map[string]intentDeclaredMember{}}
+			after, err := lookup.indexList(next, atom, opaque, keys, path)
+			if err != nil {
+				return err
+			}
+			for _, member := range before {
+				if wanted, kept := after[member.id]; kept {
+					if err := m.walkAtomicWithdrawals(member.value, wanted.value, child, appendDeclaredPath(path, member.path), removed); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+		positions, err := changedAtomicPositions(old, next)
+		if err != nil {
+			return err
+		}
+		for _, i := range positions {
+			if err := m.walkAtomicWithdrawals(old[i], next[i], child, appendDeclaredPath(path, fieldpath.PathElement{Index: &i}), removed); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// An unchanged item may move when another item is inserted or removed. It
+// carries exactly the same declaration at its new position. Its predecessor's
+// omitted fields must not become deletion checks on that item. Match equal
+// declarations one-to-one, preferring their original positions. For the rest,
+// an atomic list provides positional semantics and no schema identity.
+func changedAtomicPositions(old, next []any) ([]int, error) {
+	common := min(len(old), len(next))
+	oldMatched, newMatched := make([]bool, len(old)), make([]bool, len(next))
+	for i := range common {
+		if reflect.DeepEqual(old[i], next[i]) {
+			oldMatched[i], newMatched[i] = true, true
+		}
+	}
+	available := make(map[string][]int)
+	for i, item := range old {
+		if oldMatched[i] {
+			continue
+		}
+		key, err := json.Marshal(item)
+		if err != nil {
+			return nil, fmt.Errorf("invalid historical atomic list item")
+		}
+		available[string(key)] = append(available[string(key)], i)
+	}
+	for i, item := range next {
+		if newMatched[i] {
+			continue
+		}
+		key, err := json.Marshal(item)
+		if err != nil {
+			return nil, fmt.Errorf("invalid declared atomic list item")
+		}
+		if indexes := available[string(key)]; len(indexes) > 0 {
+			newMatched[i], oldMatched[indexes[0]] = true, true
+			available[string(key)] = indexes[1:]
+		}
+	}
+	var positions []int
+	for i := range common {
+		if !oldMatched[i] && !newMatched[i] {
+			positions = append(positions, i)
+		}
+	}
+	return positions, nil
 }
 
 // A deletion remains an obligation when the field is already absent. This is
@@ -304,6 +436,22 @@ func (l *declaredDeletionLookup) find(root any, rootType intentDeclaredType, pat
 			if !exists {
 				return intentDeclaredValue{}, typ, nil
 			}
+		case element.Index != nil:
+			if current == nil {
+				return intentDeclaredValue{}, typ, nil
+			}
+			items, ok := current.([]any)
+			if !ok || *element.Index < 0 || (!opaque && (atom.List == nil || atom.List.ElementRelationship == schema.Associative)) {
+				return intentDeclaredValue{}, typ, fmt.Errorf("invalid positional deletion path at %s", safeDeclaredPath(path[:i]))
+			}
+			if *element.Index >= len(items) {
+				return intentDeclaredValue{}, typ, nil
+			}
+			current = items[*element.Index]
+			typ = intentDeclaredType{ref: opaqueDeclaredRef(), opaque: opaque}
+			if !opaque {
+				typ.ref = atom.List.ElementType
+			}
 		case element.Key != nil || element.Value != nil:
 			if current == nil {
 				return intentDeclaredValue{}, typ, nil
@@ -363,11 +511,16 @@ func declaredMapChildType(atom schema.Atom, opaque bool, key string) (intentDecl
 	return intentDeclaredType{ref: atom.Map.ElementType}, nil
 }
 
-// PlanLegacyResourceIntentDeletions uses only the old SMD removal paths. It
-// never derives name-level deletion authority inside a legacy atomic array.
+// PlanLegacyResourceIntentDeletions applies removals identified by SMD and
+// checks withdrawals from modified units that still have atomic topology.
+// It never derives name-level deletion authority inside a legacy atomic array.
 // Canonical native/default representations are compared semantically, while
 // genuine external edits and external Apply protection block the transaction.
 func PlanLegacyResourceIntentDeletions(converter managedfields.TypeConverter, before, live, desired *unstructured.Unstructured, protected *fieldpath.Set) (*DeclaredIntentMergeResult, error) {
+	return planLegacyResourceIntentDeletions(converter, before, live, desired, protected, declaredUpdate)
+}
+
+func planLegacyResourceIntentDeletions(converter managedfields.TypeConverter, before, live, desired *unstructured.Unstructured, protected *fieldpath.Set, mode declaredMergeMode) (*DeclaredIntentMergeResult, error) {
 	if converter == nil || live == nil || desired == nil {
 		return nil, fmt.Errorf("legacy deletion planning requires schema and resource inputs")
 	}
@@ -399,7 +552,7 @@ func PlanLegacyResourceIntentDeletions(converter managedfields.TypeConverter, be
 	if err != nil {
 		return nil, fmt.Errorf("cannot compare legacy live resource")
 	}
-	merger := intentDeclaredMerger{topology: b.Schema(), root: b.TypeRef(), nativeType: declaredNativeType(live.GroupVersionKind()), retained: map[string]struct{}{}, protected: protected}
+	merger := intentDeclaredMerger{mode: mode, topology: b.Schema(), root: b.TypeRef(), nativeType: declaredNativeType(live.GroupVersionKind()), retained: map[string]struct{}{}, protected: protected}
 	beforeLookup := declaredDeletionLookup{merger: &merger, lists: map[string]map[string]intentDeclaredMember{}}
 	liveLookup := declaredDeletionLookup{merger: &merger, lists: map[string]map[string]intentDeclaredMember{}}
 	rootType := intentDeclaredType{ref: b.TypeRef()}
@@ -488,10 +641,77 @@ func PlanLegacyResourceIntentDeletions(converter managedfields.TypeConverter, be
 		}
 		merger.blockDeletion(path, reason)
 	}
+	// V1 recorded changes inside an atomic value as a modification of the
+	// whole unit. Only borrow child withdrawal checks if V2 still treats it
+	// as atomic. In particular, never infer old ownership of named CR items.
+	replace := fieldpath.NewSet()
+	desiredLookup := declaredDeletionLookup{merger: &merger, lists: map[string]map[string]intentDeclaredMember{}}
+	desiredScope := intentMergeScope(desired)
+	shouldReplace := func(path fieldpath.Path) (bool, error) {
+		wanted, typ, err := desiredLookup.find(desiredScope.Object, rootType, path)
+		if err != nil {
+			return false, err
+		}
+		atom, opaque, err := merger.resolve(typ, path)
+		if err != nil {
+			return false, err
+		}
+		switch wanted.value.(type) {
+		case map[string]any:
+			if opaque || atom.Map == nil || atom.Map.ElementRelationship != schema.Atomic {
+				return false, nil
+			}
+		case []any:
+			if !opaque && (atom.List == nil || atom.List.ElementRelationship == schema.Associative) {
+				return false, nil
+			}
+		default:
+			return false, nil
+		}
+		old, _, err := beforeLookup.find(beforeScope.Object, rootType, path)
+		if err != nil {
+			return false, err
+		}
+		current, _, err := liveLookup.find(liveScope.Object, rootType, path)
+		if err != nil {
+			return false, err
+		}
+		if opaque {
+			_, named, err := declaredListKeys(atom, true, path, current, wanted)
+			if err != nil || named {
+				return false, err
+			}
+			// A v1 CR could also contain names that were ambiguous under v2.
+			// That old shape grants no authority over individual item fields.
+			if _, named, err := declaredListKeys(atom, true, path, old); named || err != nil {
+				return false, nil
+			}
+		}
+		start := len(merger.atomicReleases)
+		merged, err := merger.mergeAtomic(old, current, wanted, typ, path)
+		return len(merger.atomicReleases) > start && !reflect.DeepEqual(merged, current), err
+	}
+	change.Modified.Iterate(func(path fieldpath.Path) {
+		if lookupErr != nil {
+			return
+		}
+		var needed bool
+		needed, lookupErr = shouldReplace(path)
+		if needed {
+			replace.Insert(path)
+		}
+	})
 	if lookupErr != nil {
 		return nil, lookupErr
 	}
-	object, err := converter.TypedToObject(l.RemoveItems(remove))
+	resultTyped := l.RemoveItems(remove)
+	if !replace.Empty() {
+		resultTyped, err = resultTyped.Merge(d.ExtractItems(replace, typed.WithAppendKeyFields()))
+		if err != nil {
+			return nil, fmt.Errorf("cannot apply legacy atomic withdrawal")
+		}
+	}
+	object, err := converter.TypedToObject(resultTyped)
 	if err != nil {
 		return nil, fmt.Errorf("cannot decode legacy deletion result")
 	}
@@ -506,5 +726,5 @@ func PlanLegacyResourceIntentDeletions(converter managedfields.TypeConverter, be
 		preserved = append(preserved, path)
 	}
 	sort.Strings(preserved)
-	return &DeclaredIntentMergeResult{Object: result, PreservedExternal: preserved, BlockedDeletions: merger.blocked, DeletionChecks: compactDeclaredDeletionChecks(merger.checks)}, nil
+	return &DeclaredIntentMergeResult{Object: result, PreservedExternal: preserved, BlockedDeletions: merger.blocked, DeletionChecks: compactDeclaredDeletionChecks(merger.checks), atomicReleases: merger.atomicReleases}, nil
 }

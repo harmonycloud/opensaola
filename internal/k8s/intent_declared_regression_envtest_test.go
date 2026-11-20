@@ -24,12 +24,74 @@ import (
 	"strings"
 	"testing"
 
+	v1 "github.com/harmonycloud/opensaola/api/v1"
+
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func runDeclaredPlanAPIRegressions(t *testing.T, ctx context.Context, cli client.Client, resolver IntentSchemaResolver, namespace string) {
+	for _, kind := range []string{"Role", "ClusterRole"} {
+		t.Run("empty_rules_"+kind, func(t *testing.T) {
+			gvk := schema.GroupVersionKind{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: kind}
+			f := newDeletionAPIFixture(t, ctx, cli, resolver, gvk, namespace)
+			delete(f.desired.Object, "spec")
+			if kind == "ClusterRole" {
+				f.desired.SetNamespace("")
+				f.desired.SetOwnerReferences(nil)
+			}
+			const configuration = "rbac-permissions"
+			f.desired.SetLabels(map[string]string{v1.LabelApp: f.owner.Name})
+			f.desired.SetAnnotations(map[string]string{v1.LabelConfigurations: configuration, v1.AnnotationConfigurationOwnerUID: string(f.owner.UID)})
+			publish := func() {
+				t.Helper()
+				if err := f.writer.Reconcile(ctx, f.owner, f.desired, configuration); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.desired.Object["rules"] = []any{}
+			publish()
+			empty := f.get()
+			if rules, present := empty.Object["rules"]; !present || rules != nil {
+				t.Fatalf("expected a present null from the API, got rules=%#v present=%t", rules, present)
+			}
+			publish()
+			if f.get().GetResourceVersion() != empty.GetResourceVersion() {
+				t.Fatal("reconciling an empty grant caused another write")
+			}
+
+			converter, _, err := resolver.Resolve(ctx, gvk)
+			if err != nil {
+				t.Fatal(err)
+			}
+			denyAll := f.desired.DeepCopy()
+			rule := map[string]any{"apiGroups": []any{""}, "resources": []any{"configmaps"}, "verbs": []any{"get"}}
+			f.desired.Object["rules"] = []any{rule}
+			publish()
+			granted := f.get()
+			if err := ValidateDeclaredResourceIntent(converter, denyAll, granted); err == nil {
+				t.Fatal("accepted an extra permission")
+			}
+			if err := ValidateDeclaredResourceIntent(converter, f.desired, empty); err == nil {
+				t.Fatal("accepted a missing permission")
+			}
+			rule["verbs"] = []any{"list"}
+			if err := ValidateDeclaredResourceIntent(converter, f.desired, granted); err == nil {
+				t.Fatal("accepted a different verb")
+			}
+			f.desired = denyAll
+			publish()
+			cleared := f.get()
+			if rules, present := cleared.Object["rules"]; !present || rules != nil {
+				t.Fatalf("permission was not cleared: %#v", rules)
+			}
+			publish()
+			if f.get().GetResourceVersion() != cleared.GetResourceVersion() {
+				t.Fatal("reconciling after permission removal caused another write")
+			}
+		})
+	}
 	newDeployment := func(t *testing.T, pod map[string]any) *deletionAPIFixture {
 		f := newDeletionAPIFixture(t, ctx, cli, resolver, schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "Deployment"}, namespace)
 		f.desired.Object["spec"] = map[string]any{"selector": map[string]any{"matchLabels": map[string]any{"app": "fixture"}}, "template": map[string]any{"metadata": map[string]any{"labels": map[string]any{"app": "fixture"}}, "spec": pod}}

@@ -19,59 +19,108 @@ package middlewareaction
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/middlewareactionbaseline"
 	"github.com/harmonycloud/opensaola/internal/service/status"
 	"github.com/harmonycloud/opensaola/pkg/tools"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Check validates a MiddlewareAction
-func Check(ctx context.Context, cli client.Client, m *v1.MiddlewareAction) error {
-	conditionChecked := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeChecked)
-	if conditionChecked.Status != metav1.ConditionTrue {
-		conditionChecked.Success(ctx, m.Generation)
-		if err := k8s.UpdateMiddlewareActionStatus(ctx, cli, m); err != nil {
-			return fmt.Errorf("update middleware operator status error: %w", err)
+var errOutcomeUnknown = errors.New("execution outcome unknown; verify the target before retrying")
+
+// Execute runs one standalone Action. The status write before the first step
+// prevents retries from replaying external effects after an interrupted run.
+func Execute(ctx context.Context, cli client.Client, m *v1.MiddlewareAction) error {
+	switch m.Status.State {
+	case v1.StateUpdating:
+		return failAction(ctx, cli, m, m.Status.DeepCopy(), v1.CondTypeExecuteAction, errOutcomeUnknown)
+	case "":
+		// Older controllers wrote step receipts without marking the Action in progress.
+		for _, c := range m.Status.Conditions {
+			if strings.HasPrefix(c.Type, "STEP-") {
+				return failAction(ctx, cli, m, m.Status.DeepCopy(), v1.CondTypeExecuteAction, errOutcomeUnknown)
+			}
+		}
+	default:
+		return nil
+	}
+
+	baseline, err := middlewareactionbaseline.Get(ctx, cli, m.Spec.Baseline, m.Labels[v1.LabelPackageName])
+	if err != nil {
+		return fmt.Errorf("read action baseline %q: %w", m.Spec.Baseline, err)
+	}
+	steps := baseline.Spec.Steps
+	if baseline.Spec.BaselineType == v1.WorkflowPreAction {
+		err = errors.New("PreAction baselines run during Middleware or MiddlewareOperator reconciliation")
+	} else {
+		err = middlewareactionbaseline.ValidateStepNames(steps)
+	}
+	if err != nil {
+		return failAction(ctx, cli, m, nil, v1.CondTypeChecked, err)
+	}
+	status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeChecked).Success(ctx, m.Generation)
+	m.Status.Reason = ""
+	if len(steps) == 0 {
+		m.Status.State = v1.StateAvailable
+		return k8s.UpdateMiddlewareActionStatus(ctx, cli, m, nil)
+	}
+	m.Status.State = v1.StateUpdating
+	if err := k8s.UpdateMiddlewareActionStatus(ctx, cli, m, nil); err != nil {
+		return err
+	}
+
+	return executeSteps(ctx, cli, m, steps)
+}
+
+func executeSteps(ctx context.Context, cli client.Client, m *v1.MiddlewareAction, steps []v1.Step) error {
+	for i := range steps {
+		step := *steps[i].DeepCopy()
+		previous := m.Status.DeepCopy()
+		var err error
+		switch {
+		case step.CUE != "":
+			err = executeCue(&ctx, cli, step, m)
+		case len(step.CMD.Command) != 0:
+			err = executeCmd(&ctx, cli, step, m)
+		case step.HTTP.URL != "":
+			err = executeHTTP(&ctx, cli, step, m)
+		default:
+			err = errors.New("step requires a CUE expression, command or HTTP URL")
+		}
+		if err != nil {
+			return failAction(ctx, cli, m, previous, "STEP-"+step.Name, err)
+		}
+		if i == len(steps)-1 {
+			m.Status.State = v1.StateAvailable
+		}
+		// Record the last step and the final result in the same API write.
+		if err := k8s.UpdateMiddlewareActionStatus(ctx, cli, m, previous); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// Execute executes the action
-func Execute(ctx context.Context, cli client.Client, m *v1.MiddlewareAction) (err error) {
-	var actionBaseline v1.MiddlewareActionBaseline
-	actionBaseline, err = middlewareactionbaseline.Get(ctx, cli, m.Spec.Baseline, m.Labels[v1.LabelPackageName])
-	if err != nil {
-		return fmt.Errorf("get baseline error: %w", err)
+func failAction(ctx context.Context, cli client.Client, m *v1.MiddlewareAction, previous *v1.MiddlewareActionStatus, condition string, cause error) error {
+	message := safeActionDiagnosticMessage(cause.Error())
+	if errors.Is(cause, errOutcomeUnknown) {
+		meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+			Type: condition, Status: metav1.ConditionUnknown, Reason: "ExecutionOutcomeUnknown",
+			Message: message, ObservedGeneration: m.Generation,
+		})
+	} else {
+		status.GetCondition(ctx, &m.Status.Conditions, condition).Failed(ctx, message, m.Generation)
 	}
-
-	// Execute steps
-	for _, step := range actionBaseline.Spec.Steps {
-		// Execute CUE
-		if step.CUE != "" {
-			if err = executeCue(&ctx, cli, step, m); err != nil {
-				return fmt.Errorf("execute cue error: %w", err)
-			}
-		} else if len(step.CMD.Command) != 0 {
-			err = executeCmd(&ctx, cli, step, m)
-			if err != nil {
-				return fmt.Errorf("execute cmd error: %w", err)
-			}
-		} else if step.HTTP.URL != "" {
-			err = executeHTTP(&ctx, cli, step, m)
-			if err != nil {
-				return fmt.Errorf("execute http error: %w", err)
-			}
-		}
-
-	}
-
-	return nil
+	m.Status.State = v1.StateUnavailable
+	m.Status.Reason = metav1.StatusReason(condition + ": " + message)
+	return errors.Join(errors.New(string(m.Status.Reason)), k8s.UpdateMiddlewareActionStatus(ctx, cli, m, previous))
 }
 
 // TemplateParseWithBaseline parses and merges the template with baseline

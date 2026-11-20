@@ -83,6 +83,17 @@ type RenderedConfigurationResource struct {
 	DisablePolicy string `json:"disablePolicy,omitempty"`
 }
 
+// PendingConfigurationWrite binds a publication attempt to its intended target.
+// It carries no rendered values and grants no deletion authority on its own.
+type PendingConfigurationWrite struct {
+	// ID identifies this attempt on the rendered object's metadata.
+	ID string `json:"id"`
+	// Resource records the identity and cleanup policy to confirm after publication.
+	Resource RenderedConfigurationResource `json:"resource"`
+	// ObservedUID is the target incarnation seen before an update. It is empty for creation.
+	ObservedUID types.UID `json:"observedUID,omitempty"`
+}
+
 // PermissionScope defines the scope of a permission.
 // Valid values: Unknown, Cluster, Namespace.
 type PermissionScope string

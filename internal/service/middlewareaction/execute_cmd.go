@@ -26,7 +26,6 @@ import (
 	"strings"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
-	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/status"
 	"github.com/harmonycloud/opensaola/pkg/tools"
 	"github.com/harmonycloud/opensaola/pkg/tools/ctxkeys"
@@ -48,6 +47,11 @@ func executeCmd(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 			log.FromContext(*ctx).Error(fmt.Errorf("panic: %v", r), "panic recovered in action execution", "stack", string(buf[:n]))
 			err = fmt.Errorf("panic: %v", r)
 		}
+		if err != nil {
+			conditionExecuteCmd.Failed(*ctx, safeActionDiagnosticMessage(err.Error()), m.Generation)
+		} else {
+			conditionExecuteCmd.SuccessWithMsg(*ctx, safeActionDiagnosticMessage(msg), m.Generation)
+		}
 	}()
 
 	var templateValues *tools.TemplateValues
@@ -62,21 +66,6 @@ func executeCmd(ctx *context.Context, cli client.Client, step v1.Step, m *v1.Mid
 	}
 
 	if conditionExecuteCmd.Status != metav1.ConditionTrue {
-		defer func() {
-			if err != nil {
-				conditionExecuteCmd.Failed(*ctx, safeActionDiagnosticMessage(err.Error()), m.Generation)
-			} else {
-				conditionExecuteCmd.SuccessWithMsg(*ctx, safeActionDiagnosticMessage(msg), m.Generation)
-			}
-			if m.Name != "" {
-				if updateErr := k8s.UpdateMiddlewareActionStatus(*ctx, cli, m); updateErr != nil {
-					log.FromContext(*ctx).Error(updateErr, "update middleware action status error")
-					if err == nil {
-						err = updateErr
-					}
-				}
-			}
-		}()
 		var cmd *exec.Cmd
 
 		if len(step.CMD.Command) == 0 {

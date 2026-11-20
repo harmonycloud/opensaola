@@ -18,17 +18,13 @@ package k8s
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/harmonycloud/opensaola/api/v1"
-	"github.com/harmonycloud/opensaola/internal/cache"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func MiddlewareActionGroupVersionKind() schema.GroupVersionKind {
@@ -71,8 +67,6 @@ func UpdateMiddlewareAction(ctx context.Context, cli client.Client, m *v1.Middle
 	})
 }
 
-var MiddlewareActionCache = cache.New[string, v1.MiddlewareAction](0)
-
 func GetMiddlewareAction(ctx context.Context, cli client.Client, name, namespace string) (*v1.MiddlewareAction, error) {
 	m := new(v1.MiddlewareAction)
 	err := cli.Get(ctx, client.ObjectKey{
@@ -82,8 +76,6 @@ func GetMiddlewareAction(ctx context.Context, cli client.Client, name, namespace
 	if err != nil {
 		return nil, err
 	}
-	// TODO: evaluate whether this cache is still needed
-	MiddlewareActionCache.Set(types.NamespacedName{Name: name, Namespace: namespace}.String(), *m.DeepCopy())
 	return m, nil
 }
 
@@ -101,44 +93,30 @@ func ListMiddlewareActions(ctx context.Context, cli client.Client, namespace str
 	return results, nil
 }
 
-// UpdateMiddlewareActionStatus updates the MiddlewareAction status.
-func UpdateMiddlewareActionStatus(ctx context.Context, cli client.Client, m *v1.MiddlewareAction) error {
-	attempt := 0
+// UpdateMiddlewareActionStatus claims a new execution with the resourceVersion
+// read during preparation. After dispatch, an unrelated metadata edit is safe
+// to retry only while the same Action still has our previous receipt.
+func UpdateMiddlewareActionStatus(ctx context.Context, cli client.Client, m *v1.MiddlewareAction, previous *v1.MiddlewareActionStatus) error {
+	m.Status.ObservedGeneration = m.Generation
+	if previous == nil {
+		return cli.Status().Update(ctx, m)
+	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// First attempt: use cache (fast path).
-		// Retry: use APIReader to bypass stale cache and get latest resourceVersion.
-		// (see English comment above)
-		m.Status.ObservedGeneration = m.Generation
-		var (
-			now *v1.MiddlewareAction
-			err error
-		)
-		if attempt > 0 && statusAPIReader != nil {
-			now = new(v1.MiddlewareAction)
-			if err = statusAPIReader.Get(ctx, client.ObjectKey{Name: m.Name, Namespace: m.Namespace}, now); err != nil {
-				return fmt.Errorf("get MiddlewareAction error: %w", err)
-			}
-		} else {
-			now, err = GetMiddlewareAction(ctx, cli, m.Name, m.Namespace)
-			if err != nil {
-				return fmt.Errorf("get MiddlewareAction error: %w", err)
-			}
+		err := cli.Status().Update(ctx, m)
+		if !errors.IsConflict(err) {
+			return err
 		}
-		attempt++
-
-		log.FromContext(ctx).V(1).Info("Update MiddlewareAction status", "version", now.ResourceVersion)
-
-		// Skip status write if no change
-		if equality.Semantic.DeepEqual(now.Status, m.Status) {
-			return nil
+		var now v1.MiddlewareAction
+		reader := client.Reader(cli)
+		if statusAPIReader != nil {
+			reader = statusAPIReader
 		}
-		now.Status = m.Status
-
-		// Retry updating the CR
-		err = cli.Status().Update(ctx, now)
-		if err != nil {
-			return fmt.Errorf("update MiddlewareAction status error: %w", err)
+		if readErr := reader.Get(ctx, client.ObjectKeyFromObject(m), &now); readErr != nil {
+			return readErr
 		}
-		return nil
+		if now.UID == m.UID && now.Generation == m.Generation && equality.Semantic.DeepEqual(now.Status, *previous) {
+			m.ResourceVersion = now.ResourceVersion
+		}
+		return err
 	})
 }

@@ -68,24 +68,24 @@ spec:
   validations: [{expression: 'true'}]
 `
 	for _, tc := range []struct {
-		name, manifest, change string
+		name, manifest, change, declaredChange string
 	}{
 		{"rbac_subjects", binding, `[
 			{"op":"test","path":"/subjects/0/apiGroup","value":"rbac.authorization.k8s.io"},
 			{"op":"test","path":"/subjects/1/apiGroup","value":"rbac.authorization.k8s.io"},
-			{"op":"add","path":"/subjects/2/apiGroup","value":"rbac.authorization.k8s.io"}]`},
+			{"op":"add","path":"/subjects/2/apiGroup","value":"rbac.authorization.k8s.io"}]`, `[{"op":"replace","path":"/subjects/0/name","value":"other"}]`},
 		{"webhook_rules", webhook, `[
 			{"op":"test","path":"/webhooks/0/rules/0/scope","value":"*"},
-			{"op":"replace","path":"/webhooks/0/rules/0/scope","value":"Namespaced"}]`},
+			{"op":"replace","path":"/webhooks/0/rules/0/scope","value":"Namespaced"}]`, `[{"op":"replace","path":"/webhooks/0/rules/0/operations/0","value":"DELETE"}]`},
 		{"admission_policy_rules", policy, `[
 			{"op":"test","path":"/spec/matchConstraints/resourceRules/0/scope","value":"*"},
 			{"op":"test","path":"/spec/matchConstraints/matchPolicy","value":"Equivalent"},
 			{"op":"test","path":"/spec/matchConstraints/namespaceSelector","value":{}},
 			{"op":"test","path":"/spec/matchConstraints/objectSelector","value":{}},
-			{"op":"replace","path":"/spec/matchConstraints/resourceRules/0/scope","value":"Namespaced"}]`},
+			{"op":"replace","path":"/spec/matchConstraints/resourceRules/0/scope","value":"Namespaced"}]`, `[{"op":"replace","path":"/spec/matchConstraints/resourceRules/0/operations/0","value":"DELETE"}]`},
 		{"admission_policy_nonempty_selector", policy, `[
 			{"op":"test","path":"/spec/matchConstraints/namespaceSelector","value":{}},
-			{"op":"add","path":"/spec/matchConstraints/namespaceSelector/matchLabels","value":{"team":"external"}}]`},
+			{"op":"add","path":"/spec/matchConstraints/namespaceSelector/matchLabels","value":{"team":"external"}}]`, `[{"op":"replace","path":"/spec/matchConstraints/resourceRules/0/apiGroups/0","value":"other.invalid"}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var desired unstructured.Unstructured
@@ -135,8 +135,25 @@ spec:
 			if err := changed.UnmarshalJSON(modified); err != nil {
 				t.Fatal(err)
 			}
-			if err := write.Validate(converter, &changed); err == nil {
-				t.Fatal("accepted an incorrect default")
+			declaredPatch, err := jsonpatch.DecodePatch([]byte(tc.declaredChange))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rewritten, err := declaredPatch.Apply(modified)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var changedDeclaration unstructured.Unstructured
+			if err := changedDeclaration.UnmarshalJSON(rewritten); err != nil {
+				t.Fatal(err)
+			}
+			for _, plan := range []*DeclaredIntentMergeResult{write, restoreVerificationPlan(t, converter, &desired, write)} {
+				if err := plan.Validate(converter, &changed); err != nil {
+					t.Fatalf("rejected an undeclared field: %v", err)
+				}
+				if err := plan.Validate(converter, &changedDeclaration); err == nil {
+					t.Fatal("accepted a rewritten declared field")
+				}
 			}
 
 		})

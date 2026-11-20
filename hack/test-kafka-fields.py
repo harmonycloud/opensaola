@@ -156,10 +156,19 @@ def main():
         cr = get(ns, "kafkacluster", name)
         history = cr["metadata"]["annotations"]["middleware.cn/resource-intent"]
         record = get(ns, "secret", history)
-        if os.environ.get("KAFKA_PREVIOUS_MANAGER") and record.get("immutable") is not True:
-            raise RuntimeError("Expected immutable history on the old controller")
+        meta = record["metadata"]
+        immutable = record.get("immutable") is True
+        if os.environ.get("KAFKA_PREVIOUS_MANAGER"):
+            if not immutable and meta.get("labels", {}).get("middleware.cn/field-history") != "v1":
+                raise RuntimeError("Unrecognized history format on the previous controller")
+            if meta.get("annotations", {}).get("middleware.cn/resource-intent-operation"):
+                raise RuntimeError("Expected confirmed history before switching controllers")
+            print(f"Previous writer confirmed {'immutable' if immutable else 'ledger v1'} "
+                  f"history {meta['uid']} at resourceVersion {meta['resourceVersion']}", flush=True)
         checkpoint.write_text(json.dumps({"topic": topic, "podUID": before["metadata"]["uid"],
-            "crUID": cr["metadata"]["uid"], "record": history, "midUID": get(ns, "mid", name)["metadata"]["uid"]}))
+            "crUID": cr["metadata"]["uid"], "record": history, "immutable": immutable,
+            "recordUID": meta["uid"], "recordRV": meta["resourceVersion"],
+            "midUID": get(ns, "mid", name)["metadata"]["uid"]}))
         print("Created a topic and produced a message on the ready broker", flush=True)
         return
     if phase != "withdraw":
@@ -173,11 +182,28 @@ def main():
         args = obj["spec"]["parameters"]
         args["statefulsetComponent"]["broker"]["spec"]["template"].setdefault("metadata", {}).setdefault("annotations", {})["field-test-revision"] = "upgrade"
         update_parameters(ns, name, args)
-        def migrated():
+        def confirmed_upgrade():
             cr = get(ns, "kafkacluster", name)
-            record = cr.get("metadata", {}).get("annotations", {}).get("middleware.cn/resource-intent")
-            return record and record != saved["record"] and get(ns, "secret", record).get("metadata", {}).get("labels", {}).get("middleware.cn/field-history") == "v1"
-        wait_for("New writer migrated prior history for the same Kafka CR", migrated)
+            if cr.get("metadata", {}).get("uid") != saved["crUID"]:
+                raise RuntimeError("Kafka CR was replaced during the controller switch")
+            template = cr["spec"]["statefulsetComponent"]["broker"]["spec"]["template"]
+            if template.get("metadata", {}).get("annotations", {}).get("field-test-revision") != "upgrade":
+                return
+            name_on_cr = cr["metadata"]["annotations"]["middleware.cn/resource-intent"]
+            meta = get(ns, "secret", name_on_cr).get("metadata", {})
+            if (meta.get("labels", {}).get("middleware.cn/field-history") != "v1"
+                    or meta.get("annotations", {}).get("middleware.cn/resource-intent-operation")
+                    or not available(get(ns, "mid", name))):
+                return
+            if saved["immutable"]:
+                if name_on_cr != saved["record"] and meta["uid"] != saved["recordUID"]:
+                    return meta
+            elif (name_on_cr == saved["record"] and meta["uid"] == saved["recordUID"]
+                  and meta["resourceVersion"] != saved["recordRV"]):
+                return meta
+        meta = wait_for("New writer confirmed the updated declaration for the same Kafka CR", confirmed_upgrade)
+        print(f"Candidate writer confirmed ledger v1 history {meta['uid']} "
+              f"at resourceVersion {meta['resourceVersion']}", flush=True)
     update_parameters(ns, name, original)
     after = wait_for("Ready broker after mount withdrawal", lambda: ready_broker(ns, name, False))
     if saved["podUID"] == after["metadata"]["uid"]:

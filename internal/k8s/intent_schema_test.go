@@ -18,8 +18,10 @@ package k8s
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,6 +102,16 @@ func intentSchemaTestMap(t *testing.T, value any, path ...string) map[string]any
 	return current
 }
 
+// An empty hash exercises servers exposing an unversioned document URL.
+func serveIntentSchemaIndex(w http.ResponseWriter, key, hash string) {
+	url := "/openapi/v3/" + key
+	if hash != "" {
+		url += "?hash=" + hash
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"paths":{%q:{"serverRelativeURL":%q}}}`, key, url)
+}
+
 func TestIntentSchemaResolverRefreshesMergeTopology(t *testing.T) {
 	gvk := schema.GroupVersionKind{Group: "example.test", Version: "v1", Kind: "Example"}
 	var document atomic.Pointer[[]byte]
@@ -107,7 +119,15 @@ func TestIntentSchemaResolverRefreshesMergeTopology(t *testing.T) {
 	document.Store(&initial)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/openapi/v3/apis/example.test/v1" || r.Header.Get("Accept") != "application/json" {
+		if r.UserAgent() != rest.DefaultKubernetesUserAgent() {
+			http.Error(w, "unexpected discovery client identity", http.StatusBadRequest)
+			return
+		}
+		if r.URL.Path == "/openapi/v3" {
+			serveIntentSchemaIndex(w, "apis/example.test/v1", fmt.Sprintf("%x", sha256.Sum256(*document.Load())))
+			return
+		}
+		if r.URL.Query().Get("hash") == "" || r.URL.Path != "/openapi/v3/apis/example.test/v1" || r.Header.Get("Accept") != "application/json" {
 			http.Error(w, "unexpected schema request", http.StatusBadRequest)
 			return
 		}
@@ -157,8 +177,8 @@ func TestIntentSchemaResolverRefreshesMergeTopology(t *testing.T) {
 	if err != nil || !fields.Has(fieldpath.MakePathOrDie("spec", "settings")) || fields.Has(fieldpath.MakePathOrDie("spec", "settings", "one")) {
 		t.Fatalf("new atomic map topology not used: fields=%v err=%v", fields, err)
 	}
-	if requests.Load() != 3 {
-		t.Fatalf("wanted one fresh schema fetch per resolution, got %d", requests.Load())
+	if requests.Load() != 2 {
+		t.Fatalf("wanted one schema fetch per revision, got %d", requests.Load())
 	}
 	// A previously cached schema is not permission to continue after discovery
 	// becomes incomplete or malformed.
@@ -173,6 +193,10 @@ func TestIntentSchemaResolverCorePathAndMissingGVK(t *testing.T) {
 	gvk := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
 	document := intentSchemaDocument(t, gvk, false)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/openapi/v3" {
+			serveIntentSchemaIndex(w, "api/v1", "revision1")
+			return
+		}
 		if r.URL.Path != "/openapi/v3/api/v1" {
 			http.Error(w, "unexpected core schema request", http.StatusBadRequest)
 			return
@@ -238,6 +262,10 @@ func TestIntentSchemaResolverHashesOnlyReachableMergeTopology(t *testing.T) {
 	publish()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/openapi/v3" {
+			serveIntentSchemaIndex(w, "apis/example.test/v1", "")
+			return
+		}
 		_, _ = w.Write(*served.Load())
 	}))
 	defer server.Close()
@@ -355,7 +383,11 @@ func TestIntentSchemaResolverOpenAPIV2Compatibility(t *testing.T) {
 			_, _ = w.Write(v2)
 		case "/openapi/v3":
 			rootRequests.Add(1)
-			http.NotFound(w, r)
+			if responseStatus.Load() == http.StatusNotFound {
+				http.NotFound(w, r)
+			} else {
+				serveIntentSchemaIndex(w, "apis/example.test/v1", "")
+			}
 		default:
 			http.NotFound(w, r)
 		}
@@ -374,7 +406,7 @@ func TestIntentSchemaResolverOpenAPIV2Compatibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v3Hash != v2Hash || v2Requests.Load() != 1 || rootRequests.Load() != 1 {
+	if v3Hash != v2Hash || v2Requests.Load() != 1 || rootRequests.Load() != 2 {
 		t.Fatal("equivalent v2 and v3 documents did not produce the same merge topology")
 	}
 	_, err = converter.ObjectToTyped(&unstructured.Unstructured{Object: map[string]any{
@@ -388,7 +420,7 @@ func TestIntentSchemaResolverOpenAPIV2Compatibility(t *testing.T) {
 	if _, _, err := resolver.Resolve(context.Background(), gvk); err == nil {
 		t.Fatal("forbidden v3 discovery should not permit fallback")
 	}
-	if v2Requests.Load() != 1 || rootRequests.Load() != 1 {
+	if v2Requests.Load() != 1 || rootRequests.Load() != 3 {
 		t.Fatal("a v3 authorization failure was hidden by v2 fallback")
 	}
 }
@@ -410,7 +442,11 @@ func TestIntentSchemaResolverWaitsForNewCRDDiscovery(t *testing.T) {
 			_, _ = w.Write(document)
 		case "/openapi/v3":
 			rootRequests.Add(1)
-			_, _ = w.Write([]byte(`{"paths":{}}`))
+			if published.Load() {
+				serveIntentSchemaIndex(w, "apis/example.test/v1", "revision1")
+			} else {
+				_, _ = w.Write([]byte(`{"paths":{}}`))
+			}
 		case "/openapi/v2":
 			v2Requests.Add(1)
 			http.Error(w, "unexpected v2 fallback", http.StatusInternalServerError)
@@ -435,5 +471,187 @@ func TestIntentSchemaResolverWaitsForNewCRDDiscovery(t *testing.T) {
 	}
 	if v2Requests.Load() != 0 {
 		t.Fatal("CRD discovery recovery should never consult v2")
+	}
+}
+
+func TestIntentSchemaPreloadSharesInflightDocument(t *testing.T) {
+	core := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+	apps := schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "StatefulSet"}
+	coreDoc, appsDoc := intentSchemaDocument(t, core, false), intentSchemaDocument(t, apps, false)
+	started, proceed := make(chan struct{}), make(chan struct{})
+	var coreReads, appsReads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/proxy/openapi/v3":
+			_, _ = w.Write([]byte(`{"paths":{"api/v1":{"serverRelativeURL":"/proxy/openapi/v3/api/v1?hash=core"},"apis/apps/v1":{"serverRelativeURL":"/openapi/v3/apis/apps/v1?hash=apps"}}}`))
+		case "/proxy/openapi/v3/api/v1":
+			if coreReads.Add(1) == 1 {
+				close(started)
+			}
+			select {
+			case <-proceed:
+			case <-r.Context().Done():
+				return
+			}
+			_, _ = w.Write(coreDoc)
+		case "/proxy/openapi/v3/apis/apps/v1":
+			appsReads.Add(1)
+			_, _ = w.Write(appsDoc)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	defer func() {
+		select {
+		case <-proceed:
+		default:
+			close(proceed)
+		}
+	}()
+	r, err := NewIntentSchemaResolver(&rest.Config{Host: server.URL + "/proxy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preloaded := make(chan error, 1)
+	go func() { preloaded <- r.Start(t.Context()) }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("preload did not fetch core/v1")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if _, _, err := r.Resolve(ctx, core); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waiting lookup ignored deadline: %v", err)
+	}
+	const writers = 8
+	results := make(chan error, writers)
+	for range writers {
+		go func() { _, _, err := r.Resolve(t.Context(), core); results <- err }()
+	}
+	close(proceed)
+	if err := <-preloaded; err != nil {
+		t.Fatal(err)
+	}
+	for range writers {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if coreReads.Load() != 1 || appsReads.Load() != 1 {
+		t.Fatalf("preload and concurrent lookups downloaded core=%d apps=%d", coreReads.Load(), appsReads.Load())
+	}
+}
+
+func TestIntentSchemaPreloadFailureAndStaleRedirect(t *testing.T) {
+	core := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+	apps := schema.GroupVersionKind{Group: "apps", Version: "v1", Kind: "StatefulSet"}
+	coreDoc, appsDoc := intentSchemaDocument(t, core, false), intentSchemaDocument(t, apps, false)
+	var revision, appsReads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/openapi/v3":
+			if revision.Load() == 3 {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			fmt.Fprintf(w, `{"paths":{"api/v1":{"serverRelativeURL":"/openapi/v3/api/v1?hash=%d"},"apis/apps/v1":{"serverRelativeURL":"/openapi/v3/apis/apps/v1?hash=apps"}}}`, revision.Load())
+		case "/openapi/v3/api/v1":
+			switch r.URL.Query().Get("hash") {
+			case "0":
+				http.NotFound(w, r)
+			case "1":
+				revision.Store(2)
+				http.Redirect(w, r, "/openapi/v3/api/v1?hash=2", http.StatusMovedPermanently)
+			case "2":
+				_, _ = w.Write(coreDoc)
+			}
+		case "/openapi/v3/apis/apps/v1":
+			appsReads.Add(1)
+			_, _ = w.Write(appsDoc)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	r, err := NewIntentSchemaResolver(&rest.Config{Host: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Start(t.Context()); err != nil || appsReads.Load() != 1 {
+		t.Fatalf("core preload failure blocked apps: %v", err)
+	}
+	if _, _, err := r.Resolve(t.Context(), core); !apierrors.IsServiceUnavailable(err) {
+		t.Fatalf("advertised missing schema: %v", err)
+	}
+	revision.Store(1)
+	if _, _, err := r.Resolve(t.Context(), core); err == nil {
+		t.Fatal("redirected schema was accepted under its obsolete hash")
+	}
+	if _, _, err := r.Resolve(t.Context(), core); err != nil {
+		t.Fatal(err)
+	}
+	revision.Store(3)
+	if _, _, err := r.Resolve(t.Context(), core); !apierrors.IsForbidden(err) {
+		t.Fatalf("cached schema concealed an index error: %v", err)
+	}
+}
+
+func TestIntentSchemaConcurrentRevisionChange(t *testing.T) {
+	gvk := schema.GroupVersionKind{Group: "example.test", Version: "v1", Kind: "Example"}
+	oldDoc, newDoc := intentSchemaDocument(t, gvk, false), intentSchemaDocument(t, gvk, true)
+	releaseOld := make(chan struct{})
+	started := make(chan struct{})
+	var revision, downloads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/openapi/v3" {
+			serveIntentSchemaIndex(w, "apis/example.test/v1", fmt.Sprint(revision.Load()))
+			return
+		}
+		downloads.Add(1)
+		if r.URL.Query().Get("hash") == "0" {
+			close(started)
+			select {
+			case <-releaseOld:
+			case <-r.Context().Done():
+				return
+			}
+			_, _ = w.Write(oldDoc)
+			return
+		}
+		_, _ = w.Write(newDoc)
+	}))
+	defer server.Close()
+	r, err := NewIntentSchemaResolver(&rest.Config{Host: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolve := func() <-chan string {
+		done := make(chan string, 1)
+		go func() {
+			_, hash, err := r.Resolve(t.Context(), gvk)
+			if err != nil {
+				t.Errorf("resolve schema: %v", err)
+			}
+			done <- hash
+		}()
+		return done
+	}
+	first := resolve()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		close(releaseOld)
+		<-first
+		t.Fatal("old fetch did not start")
+	}
+	revision.Store(1)
+	second := resolve()
+	close(releaseOld)
+	oldHash, newHash := <-first, <-second
+	_, latest, err := r.Resolve(t.Context(), gvk)
+	if err != nil || latest != newHash || oldHash == newHash || downloads.Load() != 2 {
+		t.Fatalf("revision change: old=%q new=%q cached=%q downloads=%d err=%v", oldHash, newHash, latest, downloads.Load(), err)
 	}
 }

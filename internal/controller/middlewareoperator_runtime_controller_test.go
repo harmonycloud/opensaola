@@ -29,7 +29,7 @@ func TestMiddlewareOperatorNameFromDeployment(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "demo", Namespace: "default"},
 		}
 
-		_, err := middlewareOperatorNameFromDeployment(deployment)
+		_, err := middlewareOperatorOwnerFromDeployment(deployment)
 		if err == nil {
 			t.Fatal("expected error when ownerReferences are missing")
 		}
@@ -47,12 +47,12 @@ func TestMiddlewareOperatorNameFromDeployment(t *testing.T) {
 			},
 		}
 
-		got, err := middlewareOperatorNameFromDeployment(deployment)
+		got, err := middlewareOperatorOwnerFromDeployment(deployment)
 		if err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
-		if got != "demo-mo" {
-			t.Fatalf("middlewareOperatorNameFromDeployment() = %q, want %q", got, "demo-mo")
+		if got.Name != "demo-mo" {
+			t.Fatalf("middlewareOperatorOwnerFromDeployment() = %q, want %q", got.Name, "demo-mo")
 		}
 	})
 
@@ -68,12 +68,12 @@ func TestMiddlewareOperatorNameFromDeployment(t *testing.T) {
 				},
 			},
 		}
-		got, err := middlewareOperatorNameFromDeployment(deployment)
+		got, err := middlewareOperatorOwnerFromDeployment(deployment)
 		if err != nil {
 			t.Fatalf("expected extra non-controller owner to be tolerated, got %v", err)
 		}
-		if got != "demo-mo" {
-			t.Fatalf("middlewareOperatorNameFromDeployment() = %q, want %q", got, "demo-mo")
+		if got.Name != "demo-mo" {
+			t.Fatalf("middlewareOperatorOwnerFromDeployment() = %q, want %q", got.Name, "demo-mo")
 		}
 	})
 
@@ -89,7 +89,7 @@ func TestMiddlewareOperatorNameFromDeployment(t *testing.T) {
 				},
 			},
 		}
-		_, err := middlewareOperatorNameFromDeployment(deployment)
+		_, err := middlewareOperatorOwnerFromDeployment(deployment)
 		if err == nil {
 			t.Fatal("expected error when multiple controller owners are present")
 		}
@@ -172,7 +172,7 @@ func TestHasMiddlewareOperatorOwner(t *testing.T) {
 	})
 
 	// Multiple owners with one being MiddlewareOperator: predicate lets it through,
-	// Reconcile will log the anomaly via middlewareOperatorNameFromDeployment.
+	// Reconcile will log the anomaly via middlewareOperatorOwnerFromDeployment.
 	t.Run("returns true when one of multiple owners is MiddlewareOperator", func(t *testing.T) {
 		d := &appsv1.Deployment{
 			ObjectMeta: metav1.ObjectMeta{

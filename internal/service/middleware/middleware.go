@@ -23,10 +23,10 @@ import (
 	"fmt"
 	"sync"
 
-	kjson "sigs.k8s.io/json"
 	"sigs.k8s.io/yaml"
 
 	"github.com/harmonycloud/opensaola/internal/service/middlewarebaseline"
+	"github.com/harmonycloud/opensaola/internal/service/middlewareconfiguration"
 	"github.com/harmonycloud/opensaola/internal/service/packages"
 	"github.com/harmonycloud/opensaola/pkg/tools"
 
@@ -390,30 +390,14 @@ func renderMiddlewareWithBaseline(ctx context.Context, cli client.Client, m *v1.
 		return missingNecessaryDiagnostic(m, baseline, fieldPath, expected, actual)
 	}
 
-	var parametersYamlBytes []byte
-
-	parametersYamlBytes, err = yaml.Marshal(m.Spec.Parameters)
-	if err != nil {
-		return err
-	}
-
-	parametersYamlBytes = tools.ProcessYAMLGoTemp(parametersYamlBytes)
-
-	var templateValues *tools.TemplateValues
-	templateValues, err = tools.GetTemplateValues(ctx, m)
+	templateValues, err := tools.GetTemplateValues(ctx, m)
 	if err != nil {
 		return fmt.Errorf("get template values error: %w", err)
 	}
 
-	var parametersParse string
-	parametersParse, err = tools.TemplateParse(ctx, string(parametersYamlBytes), templateValues)
+	parameters, err := renderMiddlewareParameters(ctx, &m.Spec.Parameters, templateValues)
 	if err != nil {
-		return fmt.Errorf("template parse error: %w", err)
-	}
-
-	err = yaml.Unmarshal([]byte(parametersParse), &m.Spec.Parameters)
-	if err != nil {
-		return fmt.Errorf("unmarshal mid error: %w", err)
+		return err
 	}
 
 	var preActionsYamlBytes []byte
@@ -433,32 +417,12 @@ func renderMiddlewareWithBaseline(ctx context.Context, cli client.Client, m *v1.
 		return fmt.Errorf("unmarshal pre actions error: %w", err)
 	}
 
-	// Then process configurations
-	var configurationsYamlBytes []byte
-	configurationsYamlBytes, err = yaml.Marshal(m.Spec.Configurations)
-	if err != nil {
-		return err
-	}
-
-	configurationsYamlBytes = tools.ProcessYAMLGoTemp(configurationsYamlBytes)
-
-	parameters := make(map[string]any)
-	err = kjson.UnmarshalCaseSensitivePreserveInts(m.Spec.Parameters.Raw, &parameters)
-	if err != nil {
-		return err
-	}
 	templateValues.Parameters = parameters
-
-	var configurationsParse string
-	configurationsParse, err = tools.TemplateParse(ctx, string(configurationsYamlBytes), templateValues)
+	configurations, err := middlewareconfiguration.RenderConfigurationReferences(ctx, m.Spec.Configurations, templateValues)
 	if err != nil {
-		return fmt.Errorf("template parse error: %w", err)
+		return err
 	}
-
-	err = yaml.Unmarshal([]byte(configurationsParse), &m.Spec.Configurations)
-	if err != nil {
-		return fmt.Errorf("unmarshal mid error: %w", err)
-	}
+	m.Spec.Configurations = configurations
 
 	// Process metadata
 	var metadataYamlBytes []byte

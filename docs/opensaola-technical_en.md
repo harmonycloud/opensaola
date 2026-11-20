@@ -348,7 +348,8 @@ MiddlewareAction (Namespaced) -- references --> MiddlewareActionBaseline
 | state | State | No | `""` | Overall state | Set to Unavailable if any Condition is False |
 | reason | string | No | `""` | State reason | Takes the Message from the first False Condition |
 | renderedConfigurationResources | []RenderedConfigurationResource | No | nil | Lifecycle-managed Configuration resource inventory | Used for kind-aware cleanup after a template becomes empty or a reference is removed; controller-managed |
-| renderedConfigurationResourcesGeneration | int64 | No | 0 | MID Generation that last wrote the inventory | Prevents an older status writer from replacing a newer inventory |
+| pendingConfigurationWrite | PendingConfigurationWrite | No | nil | Target, source, policy and operation ID for one Configuration publication | Used for recovery across restarts and uncertain responses. Contains no resource spec. |
+| renderedConfigurationResourcesGeneration | int64 | No | 0 | Last MID generation whose Configuration batch and withdrawal cleanup completed | Individual successes record the resource UID immediately. A later failure leaves this generation unchanged. |
 | reconcilePause | *ReconcilePauseStatus | No | nil | Durable snapshot for a reconciliation-pause session | Cleared automatically after a successful resume; users must not edit it |
 
 #### ReconcileOverrides Sub-structure
@@ -506,12 +507,13 @@ This inventory is shared by Middleware and MiddlewareOperator status and records
 | conditions | []metav1.Condition | No | nil | Condition list | - |
 | state | State | No | `""` | State | - |
 | operators | map[string]appsv1.DeploymentStatus | No | nil | Associated Deployment status | Key is the Deployment name |
-| operatorAvailable | string | No | `""` | Availability (format "available/replicas") | e.g., "1/1" |
+| operatorAvailable | string | No | `""` | Available/total replicas of the primary operator Deployment | e.g., "1/1" |
 | reason | string | No | `""` | Reason | - |
-| ready | bool | No | false | Whether all associated Deployments are healthy | Used for kubectl display and runtime assessment |
-| runtime | string | No | `""` | Runtime status summary | Forward-compatible display field |
+| ready | bool | No | false | Whether the primary Deployment created from spec.deployment is ready | Used for kubectl display and runtime assessment |
+| runtime | string | No | `""` | Runtime diagnostics for the primary operator Deployment | Reports DeploymentMissing after deletion and updates after recreation |
 | renderedConfigurationResources | []RenderedConfigurationResource | No | nil | Lifecycle-managed Configuration resource inventory | Used for kind-aware cleanup after a template becomes empty or a reference is removed; controller-managed |
-| renderedConfigurationResourcesGeneration | int64 | No | 0 | MO Generation that last wrote the inventory | Prevents an older status writer from replacing a newer inventory |
+| pendingConfigurationWrite | PendingConfigurationWrite | No | nil | Target, source, policy and operation ID for one Configuration publication | Used for recovery across restarts and uncertain responses. Contains no resource spec. |
+| renderedConfigurationResourcesGeneration | int64 | No | 0 | Last MO generation whose Configuration batch and withdrawal cleanup completed | Individual successes record the resource UID immediately. A later failure leaves this generation unchanged. |
 
 **Interface Methods**:
 - `GetConfigurations()` - Returns Spec.Configurations
@@ -618,7 +620,7 @@ This inventory is shared by Middleware and MiddlewareOperator status and records
 |-------|------|----------|---------|-------------|-------------------|
 | observedGeneration | int64 | No | 0 | - | - |
 | conditions | []metav1.Condition | No | nil | One Condition per Step (type is "STEP-{stepName}") | - |
-| state | State | No | `""` | - | Reconcile is skipped if State is non-empty (one-time execution) |
+| state | State | No | `""` | - | Updating during execution, Available or Unavailable at completion |
 | reason | metav1.StatusReason | No | `""` | Failure reason | Format is "conditionType,message" |
 
 **Interface Methods**:
@@ -781,28 +783,16 @@ HandleResource flow:
 #### MiddlewareAction State Transitions
 
 ```
-Create
-    |
-    v
-[State non-empty?] -- yes --> skip (one-time execution completed)
-    |
-    | no
-    v
-[Check] -- failure --> Unavailable
-    |
-    | success
-    v
-[Get ActionBaseline]
-    |
-    v
-[BaselineType == PreAction?]
-    |-- yes --> skip execution (PreActions are executed during Middleware/MO HandleResource)
-    |-- no --> [Execute] execute Steps sequentially
-                  |
-                  | generates STEP-{name} Condition for each step
-                  v
-              All steps completed --> State=Available
-              Any step failed --> State=Unavailable, Reason="type,message"
+Read Action
+  ├─ Available or Unavailable → finished
+  ├─ Interrupted execution → Unavailable, ExecutionOutcomeUnknown, verify target
+  └─ Pending → read ActionBaseline (retry transient errors)
+                 ├─ PreAction baseline or invalid step names → Unavailable
+                 ├─ Empty step list → Available
+                 └─ Record Updating and execute steps in order
+                      ├─ Step fails → Unavailable, stop
+                      ├─ HTTP request outcome is uncertain → Unavailable, ExecutionOutcomeUnknown
+                      └─ Last step succeeds → Available
 ```
 
 ### 3.3 Condition Types
@@ -886,7 +876,9 @@ Condition initialization: Status=Unknown, Reason=Initing, Message="initializing"
 > Without an explicit policy, PVC/PV use `orphan`, CRDs use `orphan` regardless of annotation, and every other Kind—including unknown/custom and cluster-scoped resources—uses `delete`. Explicit `delete` / `orphan` can override the PVC/PV default; CRDs are hard-protected during both policy resolution and deletion.
 > The controller removes only an inventory entry recorded as `delete` whose resource UID, instance UID and Configuration source markers still match. A same-namespace target must also match the controller owner unless its inventory explicitly records `controllerReferenceRequired: false`. OpenSaola retains resources that have been recreated or transferred to another controller. An older `orphan` entry is not retroactively deleted after upgrade: it must successfully reconcile while still rendering before a later disable can use the new default.
 > Editing `MiddlewareConfiguration.spec.template` alone does not trigger MID/MO reconciliation; a MID/MO reference change or another owner event must do so. “No longer referenced” means only that OpenSaola no longer renders the Configuration, not that the controller has analyzed other cluster consumers. This feature-disable path differs from cleanup during MID/MO deletion, which follows `configurationDeletePolicy` / OwnerReference behavior.
-> Identity validation rejects writes when a same-name resource has another controller owner; `configurationOwnershipPolicy=managed` remains compatible. A legacy Configuration with a missing owner UID, or a deleted previous owner, can be adopted only when its app/Configuration source matches and there is no ownership conflict. A recreated MCF with the same name remains the same logical source. Current-owner cleanup inventory is established only after a successful adoption; CRDs are always retained. See the [resource intent rules](resource-intent_zh.md). `configurationDeletePolicy=delete` on the MID/MO deletion path is an independent, stronger deletion semantic and must not be presented as the UID-safe disable path.
+> Identity validation rejects writes when a same-name resource has another controller owner; `configurationOwnershipPolicy=managed` remains compatible. A legacy Configuration with a missing owner UID, or a deleted previous owner, can be adopted only when its app/Configuration source matches and there is no ownership conflict. A recreated MCF with the same name remains the same logical source. Current-owner cleanup inventory is established only after a successful adoption; CRDs are always retained. See the [resource intent rules](resource-intent_zh.md).
+
+> When deleting a MID or MO, the controller identifies resources by rendering the identity fields (`apiVersion`, `kind`, `metadata.name`, and `metadata.namespace`). Namespaced resources default to the instance namespace when the field is absent. An explicit namespace that fails to render keeps the finalizer pending for retry. Published inventory identifies the original resource by UID and source, protecting same-name replacements. Without published inventory, cleanup first tries the rendered name. If the name cannot be resolved or the object is absent, it looks for instance and Configuration markers within the resolved scope. A trusted publication record is required when a template generates the entire resource or mutates the inputs to an identity field before that field is rendered and its value cannot be resolved independently. If that record is missing, the controller evaluates the Configuration reference’s `values` and then renders the resource template, in publication order. It skips the Configuration when every YAML document is empty (including whitespace, comments, and empty document separators). If the output contains content or rendering fails, it reports the affected Configuration and keeps the finalizer for retry. A manifest containing only statically identified Kubernetes CRDs is retained.
 
 ---
 
@@ -1034,14 +1026,10 @@ HandleResource(Publish)
 **Predicate**: `GenerationChangedPredicate`
 
 **Reconcile Main Logic**:
-1. Get MiddlewareAction
-2. **Non-empty State check**: If State is non-empty, return immediately (one-time execution semantics)
-3. Deferred status update (similar to Middleware, but Unknown is also treated as Unavailable)
-4. Check validation
-5. Get ActionBaseline
-6. If BaselineType != PreAction: Call `Execute` to run all Steps
-   - Each Step executes CUE / CMD / HTTP based on type
-   - Each Step generates an independent Condition (type "STEP-{name}")
+1. Read the MiddlewareAction and return if it has reached a terminal state.
+2. Read the ActionBaseline and validate step names. An explicit empty list completes successfully.
+3. Persist `Updating` before dispatching CUE, CMD or HTTP steps. Record each `STEP-{name}` condition and write the final step together with the terminal Action state.
+4. HTTP steps require a final 2xx response. An interrupted execution or unconfirmed HTTP outcome yields `ExecutionOutcomeUnknown` for the operator to verify against the target.
 
 ### 5.7 MiddlewareActionBaseline Controller
 
@@ -1051,8 +1039,8 @@ HandleResource(Publish)
 **Reconcile Main Logic**:
 1. Get MiddlewareActionBaseline
 2. Call `middlewareactionbaseline.Check`
-   - Validate Steps is not empty
-   - Validate each Step's name is not empty
+   - Require the steps field and accept an empty list
+   - Require unique, non-empty step names
    - Optional compile validation for CUE steps
 
 ### 5.8 MiddlewareConfiguration Controller
@@ -1128,6 +1116,7 @@ HandleResource(Publish)
 - `KubectlGet` - Get K8s resource
 - `KubectlExec` - Execute command in a Pod container
 - `KubectlEdit` - Edit/create K8s resource
+  For a missing target, an explicit resource field in `output`, such as `data`, `stringData`, or `spec`, triggers a create request. Empty output with no other changes is a no-op. Edits limited to labels, annotations, or status require an existing target.
 
 #### middlewareconfiguration (pkg/service/middlewareconfiguration/)
 
@@ -1486,7 +1475,7 @@ Each CRD resource has a corresponding k8s operations file providing a unified CR
 | MiddlewareBaseline | middlewarebaseline.go | Cluster | None | RetryOnConflict |
 | MiddlewareOperatorBaseline | middlewareoperatorbaseline.go | Cluster | None | RetryOnConflict |
 | MiddlewarePackage | middlewarepackage.go | Cluster | `MiddlewarePackageCache` | RetryOnConflict |
-| MiddlewareAction | middlewareaction.go | Namespaced | `MiddlewareActionCache` | RetryOnConflict |
+| MiddlewareAction | middlewareaction.go | Namespaced | None | RetryOnConflict |
 | MiddlewareActionBaseline | middlewareactionbaseline.go | Cluster | None | RetryOnConflict |
 | MiddlewareConfiguration | middlewareconfiguration.go | Cluster | None | RetryOnConflict |
 
@@ -1536,7 +1525,7 @@ Provides `CreatePatch`, `ApplyPatch`, `ValidatePatch` methods
 | Use sync.Map to cache Baseline/Configuration/OperatorBaseline/ActionBaseline | Avoid frequent decompression reads from Secrets; paired with periodic cleanup (cache_cleanup_interval, default 1800 seconds) |
 | Get object from Cache when Middleware is deleted | Deleted objects cannot be retrieved from the API Server; cache is needed for resource cleanup |
 | Middleware and MiddlewareOperator controllers use Predicate to filter Status updates | Prevents Status updates from triggering infinite Reconcile loops while preserving spec, metadata, and annotation changes |
-| One-time execution semantics for MiddlewareAction (skip if State is non-empty) | Actions are operations, not declarative state; they should not be re-executed after completion |
+| One-time execution semantics for MiddlewareAction (terminal Actions are never replayed) | Actions are operations, not declarative state; they should not be re-executed after completion |
 | Automatically rebuild CR when deleted | Protects middleware instances from accidental deletion; implemented via Watcher DeleteFunc |
 | MiddlewareOperator compares Deployment differences and restores | Prevents Deployments from being externally modified (e.g., kubectl edit); ensures consistency with the declared Spec |
 | Use sync.Mutex locking during upgrades | Prevents race conditions from concurrent upgrades |

@@ -29,6 +29,10 @@ import (
 
 // ControllerOptions returns controller.Options configured with concurrency and rate limiting.
 func ControllerOptions(envPrefix string, defaultMaxConcurrent int) controller.Options {
+	return TypedControllerOptions[reconcile.Request](envPrefix, defaultMaxConcurrent)
+}
+
+func TypedControllerOptions[T comparable](envPrefix string, defaultMaxConcurrent int) controller.TypedOptions[T] {
 	maxConcurrent := defaultMaxConcurrent
 	if v := os.Getenv(envPrefix + "_MAX_CONCURRENT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
@@ -36,13 +40,13 @@ func ControllerOptions(envPrefix string, defaultMaxConcurrent int) controller.Op
 		}
 	}
 
-	return controller.Options{
+	return controller.TypedOptions[T]{
 		MaxConcurrentReconciles: maxConcurrent,
 		RateLimiter: workqueue.NewTypedMaxOfRateLimiter(
-			workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](
+			workqueue.NewTypedItemExponentialFailureRateLimiter[T](
 				5*time.Millisecond, 1000*time.Second,
 			),
-			&workqueue.TypedBucketRateLimiter[reconcile.Request]{
+			&workqueue.TypedBucketRateLimiter[T]{
 				Limiter: rate.NewLimiter(rate.Limit(10), 100),
 			},
 		),

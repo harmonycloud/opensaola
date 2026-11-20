@@ -32,7 +32,8 @@ check_rejected() {
   if output="$(render "$@" 2>&1)"; then
     echo "Unexpected successful render for: $*" >&2; exit 1
   fi
-  [[ "${output}" == *"${diagnostic}"* ]] || { echo "${output}" >&2; exit 1; }
+  # Helm 3 uses dotted schema paths and Helm 4 uses JSON pointers.
+  [[ "${output//\//.}" == *"${diagnostic}"* ]] || { echo "${output}" >&2; exit 1; }
 }
 
 check_render :8081 0

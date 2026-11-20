@@ -331,7 +331,7 @@ kubectl get mid <mid-name> -n <namespace> -o json | jq '{
 **症状**：已创建 MiddlewareAction，但没有任何反应。
 
 **原因**：
-1. MiddlewareAction 的 `status.state` 已设置（非空）。MiddlewareAction 是一次性资源 -- 一旦有了 state，就不会重新执行
+1. `Available` 和 `Unavailable` 是一次性 Action 的终态。控制器读取基线暂时失败时会自动重试，开始执行后状态为 `Updating`。
 2. `spec.baseline` 引用了不存在的 MiddlewareActionBaseline
 3. Baseline 的 `baselineType` 为 `PreAction`，这种类型只在 Middleware/MiddlewareOperator reconcile 流程中执行，不会独立执行
 
@@ -352,7 +352,8 @@ kubectl get ma <name> -n <namespace> -o jsonpath='{.status.conditions}' | jq '.'
 ```
 
 **解决方案**：
-- 如果需要重新执行 action，删除现有的 MiddlewareAction 并创建新的
+- HTTP 步骤以最终响应的 2xx 状态码为成功。其他状态码会终止后续步骤，状态中可查看失败的步骤名和状态码。
+- 若 condition 的 reason 为 `ExecutionOutcomeUnknown`，请先检查目标系统是否已经执行该操作。控制器不会自动重放该 Action。确认需要再次执行时，创建一个新的 MiddlewareAction。
 - 确保 baseline 的 `baselineType` 为 `NormalAction`（或 `OpsAction`）以支持独立执行
 
 ---

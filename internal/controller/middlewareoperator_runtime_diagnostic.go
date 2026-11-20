@@ -33,7 +33,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 type runtimeObjectSnapshot struct {
@@ -661,7 +660,7 @@ func eventObjectRef(event *corev1.Event) status.ObjectRef {
 	return status.ObjectRef{APIVersion: event.InvolvedObject.APIVersion, Kind: event.InvolvedObject.Kind, Namespace: event.Namespace, Name: event.InvolvedObject.Name}
 }
 
-func (r *MiddlewareOperatorRuntimeReconciler) runtimePodToDeploymentRequests(ctx context.Context, object client.Object) []reconcile.Request {
+func (r *MiddlewareOperatorRuntimeReconciler) runtimePodToDeploymentRequests(ctx context.Context, object client.Object) []runtimeDeploymentRequest {
 	pod, ok := object.(*corev1.Pod)
 	if !ok || pod == nil {
 		return nil
@@ -669,7 +668,7 @@ func (r *MiddlewareOperatorRuntimeReconciler) runtimePodToDeploymentRequests(ctx
 	return r.podToDeploymentRequests(ctx, pod)
 }
 
-func (r *MiddlewareOperatorRuntimeReconciler) runtimePVCToDeploymentRequests(ctx context.Context, object client.Object) []reconcile.Request {
+func (r *MiddlewareOperatorRuntimeReconciler) runtimePVCToDeploymentRequests(ctx context.Context, object client.Object) []runtimeDeploymentRequest {
 	pvc, ok := object.(*corev1.PersistentVolumeClaim)
 	if !ok || pvc == nil {
 		return nil
@@ -681,14 +680,14 @@ func (r *MiddlewareOperatorRuntimeReconciler) runtimePVCToDeploymentRequests(ctx
 		return r.middlewareOperatorDeploymentRequestsForNamespace(ctx, pvc.Namespace)
 	}
 
-	requestsByName := make(map[types.NamespacedName]reconcile.Request)
+	requestsByName := make(map[types.NamespacedName]runtimeDeploymentRequest)
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		if !podUsesPVC(pod, pvc.Name) {
 			continue
 		}
 		for _, request := range r.podToDeploymentRequests(ctx, pod) {
-			requestsByName[request.NamespacedName] = request
+			requestsByName[request.Deployment] = request
 		}
 	}
 	if len(requestsByName) == 0 {
@@ -697,7 +696,7 @@ func (r *MiddlewareOperatorRuntimeReconciler) runtimePVCToDeploymentRequests(ctx
 	return requestsFromMap(requestsByName)
 }
 
-func (r *MiddlewareOperatorRuntimeReconciler) runtimeEventToDeploymentRequests(ctx context.Context, object client.Object) []reconcile.Request {
+func (r *MiddlewareOperatorRuntimeReconciler) runtimeEventToDeploymentRequests(ctx context.Context, object client.Object) []runtimeDeploymentRequest {
 	event, ok := object.(*corev1.Event)
 	if !ok || event == nil || !isInterestingEvent(*event) {
 		return nil
@@ -723,7 +722,7 @@ func (r *MiddlewareOperatorRuntimeReconciler) runtimeEventToDeploymentRequests(c
 	}
 }
 
-func (r *MiddlewareOperatorRuntimeReconciler) podToDeploymentRequests(ctx context.Context, pod *corev1.Pod) []reconcile.Request {
+func (r *MiddlewareOperatorRuntimeReconciler) podToDeploymentRequests(ctx context.Context, pod *corev1.Pod) []runtimeDeploymentRequest {
 	for _, ownerReference := range pod.OwnerReferences {
 		switch ownerReference.Kind {
 		case "Deployment":
@@ -738,19 +737,21 @@ func (r *MiddlewareOperatorRuntimeReconciler) podToDeploymentRequests(ctx contex
 		log.FromContext(ctx).Error(err, "list Deployments for Pod runtime event failed", "podNamespace", pod.Namespace, "podName", pod.Name)
 		return nil
 	}
-	requests := make(map[types.NamespacedName]reconcile.Request)
+	requests := make(map[types.NamespacedName]runtimeDeploymentRequest)
 	for i := range deployments.Items {
 		deployment := &deployments.Items[i]
 		if !hasMiddlewareOperatorOwner(deployment) || !podMatchesDeploymentSelector(deployment, *pod) {
 			continue
 		}
 		key := types.NamespacedName{Namespace: deployment.Namespace, Name: deployment.Name}
-		requests[key] = reconcile.Request{NamespacedName: key}
+		for _, req := range runtimeDeploymentRequests(ctx, deployment) {
+			requests[key] = req
+		}
 	}
 	return requestsFromMap(requests)
 }
 
-func (r *MiddlewareOperatorRuntimeReconciler) replicaSetNameToDeploymentRequests(ctx context.Context, namespace, name string) []reconcile.Request {
+func (r *MiddlewareOperatorRuntimeReconciler) replicaSetNameToDeploymentRequests(ctx context.Context, namespace, name string) []runtimeDeploymentRequest {
 	var replicaSet appsv1.ReplicaSet
 	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &replicaSet); err != nil {
 		log.FromContext(ctx).Error(err, "get ReplicaSet for runtime event failed", "replicaSetNamespace", namespace, "replicaSetName", name)
@@ -764,7 +765,7 @@ func (r *MiddlewareOperatorRuntimeReconciler) replicaSetNameToDeploymentRequests
 	return nil
 }
 
-func (r *MiddlewareOperatorRuntimeReconciler) deploymentNameToRuntimeRequest(ctx context.Context, namespace, name string) []reconcile.Request {
+func (r *MiddlewareOperatorRuntimeReconciler) deploymentNameToRuntimeRequest(ctx context.Context, namespace, name string) []runtimeDeploymentRequest {
 	var deployment appsv1.Deployment
 	if err := r.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &deployment); err != nil {
 		log.FromContext(ctx).Error(err, "get Deployment for runtime event failed", "deploymentNamespace", namespace, "deploymentName", name)
@@ -773,23 +774,25 @@ func (r *MiddlewareOperatorRuntimeReconciler) deploymentNameToRuntimeRequest(ctx
 	if !hasMiddlewareOperatorOwner(&deployment) {
 		return nil
 	}
-	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}}}
+	return runtimeDeploymentRequests(ctx, &deployment)
 }
 
-func (r *MiddlewareOperatorRuntimeReconciler) middlewareOperatorDeploymentRequestsForNamespace(ctx context.Context, namespace string) []reconcile.Request {
+func (r *MiddlewareOperatorRuntimeReconciler) middlewareOperatorDeploymentRequestsForNamespace(ctx context.Context, namespace string) []runtimeDeploymentRequest {
 	var deployments appsv1.DeploymentList
 	if err := r.List(ctx, &deployments, client.InNamespace(namespace)); err != nil {
 		log.FromContext(ctx).Error(err, "list MiddlewareOperator Deployments for runtime event failed", "namespace", namespace)
 		return nil
 	}
-	requests := make(map[types.NamespacedName]reconcile.Request)
+	requests := make(map[types.NamespacedName]runtimeDeploymentRequest)
 	for i := range deployments.Items {
 		deployment := &deployments.Items[i]
 		if !hasMiddlewareOperatorOwner(deployment) {
 			continue
 		}
 		key := types.NamespacedName{Namespace: deployment.Namespace, Name: deployment.Name}
-		requests[key] = reconcile.Request{NamespacedName: key}
+		for _, req := range runtimeDeploymentRequests(ctx, deployment) {
+			requests[key] = req
+		}
 	}
 	return requestsFromMap(requests)
 }
@@ -803,13 +806,13 @@ func podUsesPVC(pod *corev1.Pod, claimName string) bool {
 	return false
 }
 
-func requestsFromMap(requests map[types.NamespacedName]reconcile.Request) []reconcile.Request {
-	result := make([]reconcile.Request, 0, len(requests))
+func requestsFromMap(requests map[types.NamespacedName]runtimeDeploymentRequest) []runtimeDeploymentRequest {
+	result := make([]runtimeDeploymentRequest, 0, len(requests))
 	for _, request := range requests {
 		result = append(result, request)
 	}
 	sort.Slice(result, func(i, j int) bool {
-		return result[i].NamespacedName.String() < result[j].NamespacedName.String()
+		return result[i].Deployment.String() < result[j].Deployment.String()
 	})
 	return result
 }

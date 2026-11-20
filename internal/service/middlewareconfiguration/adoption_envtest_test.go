@@ -130,6 +130,60 @@ func TestConfigurationAdoptionAPI(t *testing.T) {
 	t.Cleanup(func() { k8s.ConfigureManagedResources(nil); k8s.ConfigureResourceIntents(nil) })
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
+	t.Run("recovery_completes_reference_transition_before_confirming", func(t *testing.T) {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "reference-recovery-"}}
+		if err := cli.Create(ctx, ns); err != nil {
+			t.Fatal(err)
+		}
+		mo := &v1.MiddlewareOperator{ObjectMeta: metav1.ObjectMeta{Name: "operator", Namespace: ns.Name}}
+		if err := cli.Create(ctx, mo); err != nil {
+			t.Fatal(err)
+		}
+		other := metav1.OwnerReference{APIVersion: "v1", Kind: "Secret", Name: "external", UID: "external-uid"}
+		target := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "target", Namespace: ns.Name, Labels: map[string]string{v1.LabelApp: mo.Name}, Annotations: map[string]string{v1.AnnotationConfigurationOwnerUID: string(mo.UID), v1.LabelConfigurations: "source"},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(mo, v1.GroupVersion.WithKind("MiddlewareOperator")), other}}}
+		if err := cli.Create(ctx, target); err != nil {
+			t.Fatal(err)
+		}
+		for _, require := range []bool{false, true} {
+			entry := v1.RenderedConfigurationResource{OwnerUID: mo.UID, ConfigurationName: "source", Namespace: ns.Name, Name: target.Name, Kind: "ConfigMap", Version: "v1", Namespaced: true, ControllerReferenceRequired: &require, DisablePolicy: v1.ConfigurationDisablePolicyDelete}
+			if !require {
+				entry.DisablePolicy = v1.ConfigurationDisablePolicyOrphan
+			}
+			id, err := beginConfigurationWrite(ctx, cli, mo, entry, target.UID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// This is the committed business response at the crash window.
+			// ownerReferences still describe the previous publication.
+			base := target.DeepCopy()
+			target.Annotations[v1.AnnotationConfigurationWriteID] = id
+			if err := cli.Patch(ctx, target, client.MergeFrom(base)); err != nil {
+				t.Fatal(err)
+			}
+			if err := recoverConfigurationWrite(ctx, cli, mo); err != nil {
+				t.Fatal(err)
+			}
+			if err := cli.Get(ctx, client.ObjectKeyFromObject(target), target); err != nil {
+				t.Fatal(err)
+			}
+			if metav1.IsControlledBy(target, mo) != require || mo.Status.PendingConfigurationWrite != nil || len(mo.Status.RenderedConfigurationResources) != 1 || mo.Status.RenderedConfigurationResources[0].ResourceUID != target.UID {
+				t.Fatal("receipt confirmed without completing the requested owner reference transition")
+			}
+			externalPreserved := false
+			for _, ref := range target.OwnerReferences {
+				if ref.UID == other.UID {
+					externalPreserved = true
+				}
+				if !require && ref.UID == mo.UID {
+					t.Fatal("orphan still references its old owner")
+				}
+			}
+			if !externalPreserved {
+				t.Fatal("recovery removed independent owner reference")
+			}
+		}
+	})
 	type fixture struct {
 		owner  *v1.MiddlewareOperator
 		config *v1.MiddlewareConfiguration
@@ -224,6 +278,12 @@ spec:
 		}
 		return live
 	}
+	t.Run("PartialInventory", func(t *testing.T) {
+		testPartialConfigurationInventory(t, ctx, cli, &writes)
+	})
+	t.Run("EnvironmentOrder", func(t *testing.T) {
+		testEnvironmentOrder(t, ctx, cli, &writes)
+	})
 	t.Run("AtomicDefaults", func(t *testing.T) {
 		testAtomicDefaults(t, ctx, cli, resolver, &writes)
 	})
@@ -736,6 +796,16 @@ spec:
 // for its dynamic webhook cache before testing the actual publication path.
 func installConfigurationMutationWebhook(t *testing.T, ctx context.Context, cli client.Client, namespace, template, patch string) *atomic.Int32 {
 	t.Helper()
+	return installConfigurationWebhook(t, ctx, cli, namespace, template, func(req *admissionv1.AdmissionRequest) string {
+		if req.Operation == admissionv1.Create {
+			return patch
+		}
+		return ""
+	})
+}
+
+func installConfigurationWebhook(t *testing.T, ctx context.Context, cli client.Client, namespace, template string, patchFor func(*admissionv1.AdmissionRequest) string) *atomic.Int32 {
+	t.Helper()
 	var dryRuns atomic.Int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var review admissionv1.AdmissionReview
@@ -743,13 +813,18 @@ func installConfigurationMutationWebhook(t *testing.T, ctx context.Context, cli 
 			http.Error(w, "invalid admission review", http.StatusBadRequest)
 			return
 		}
-		if review.Request.DryRun != nil && *review.Request.DryRun {
+		dryRun := review.Request.DryRun != nil && *review.Request.DryRun
+		if dryRun {
 			dryRuns.Add(1)
 		}
-		patchType := admissionv1.PatchTypeJSONPatch
 		response := admissionv1.AdmissionReview{TypeMeta: review.TypeMeta, Response: &admissionv1.AdmissionResponse{
-			UID: review.Request.UID, Allowed: true, PatchType: &patchType, Patch: []byte(patch),
+			UID: review.Request.UID, Allowed: true,
 		}}
+		if patch := patchFor(review.Request); patch != "" {
+			patchType := admissionv1.PatchTypeJSONPatch
+			response.Response.PatchType = &patchType
+			response.Response.Patch = []byte(patch)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(response); err != nil {
 			t.Errorf("write admission response: %v", err)
@@ -771,7 +846,7 @@ func installConfigurationMutationWebhook(t *testing.T, ctx context.Context, cli 
 		Name: "configuration.test.opensaola.io", SideEffects: &sideEffects, AdmissionReviewVersions: []string{"v1"},
 		NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{corev1.LabelMetadataName: namespace}},
 		ClientConfig:      registrationv1.WebhookClientConfig{URL: &server.URL, CABundle: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})},
-		Rules: []registrationv1.RuleWithOperations{{Operations: []registrationv1.OperationType{registrationv1.Create}, Rule: registrationv1.Rule{
+		Rules: []registrationv1.RuleWithOperations{{Operations: []registrationv1.OperationType{registrationv1.Create, registrationv1.Update}, Rule: registrationv1.Rule{
 			APIGroups: []string{gvk.Group}, APIVersions: []string{gvk.Version}, Resources: []string{resource.Resource.Resource},
 		}}},
 	}}}

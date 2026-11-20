@@ -20,14 +20,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/harmonycloud/opensaola/internal/service/middlewareactionbaseline"
-	"github.com/harmonycloud/opensaola/internal/service/middlewarebaseline"
-	"github.com/harmonycloud/opensaola/internal/service/middlewareconfiguration"
-	"github.com/harmonycloud/opensaola/internal/service/middlewareoperatorbaseline"
 	corev1 "k8s.io/api/core/v1"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
@@ -97,11 +94,12 @@ func findPackageUsages(ctx context.Context, cli client.Client, packageName strin
 	selector := client.MatchingLabels{v1.LabelPackageName: packageName}
 	var usages []packageUsage
 
-	middlewares, err := k8s.ListMiddlewares(ctx, cli, "", selector)
-	if err != nil {
+	reader := k8s.NewManagedResourceWriter(cli).Reader
+	var middlewares v1.MiddlewareList
+	if err := reader.List(ctx, &middlewares, selector); err != nil {
 		return nil, fmt.Errorf("list Middleware by package %q: %w", packageName, err)
 	}
-	for _, item := range middlewares {
+	for _, item := range middlewares.Items {
 		usages = append(usages, packageUsage{
 			Kind:      "middleware",
 			Namespace: item.Namespace,
@@ -111,11 +109,11 @@ func findPackageUsages(ctx context.Context, cli client.Client, packageName strin
 		})
 	}
 
-	operators, err := k8s.ListMiddlewareOperators(ctx, cli, "", selector)
-	if err != nil {
+	var operators v1.MiddlewareOperatorList
+	if err := reader.List(ctx, &operators, selector); err != nil {
 		return nil, fmt.Errorf("list MiddlewareOperator by package %q: %w", packageName, err)
 	}
-	for _, item := range operators {
+	for _, item := range operators.Items {
 		usages = append(usages, packageUsage{
 			Kind:      "middlewareoperator",
 			Namespace: item.Namespace,
@@ -176,16 +174,17 @@ func finalizePackageSecret(ctx context.Context, cli client.Client, secret *corev
 		return fmt.Errorf("%s", message)
 	}
 
-	if err := HandleResource(ctx, cli, consts.HandleActionDelete, secret.Name); err != nil {
-		return err
-	}
+	// A retry may observe the package already gone after a successful cleanup.
 	if mp != nil {
+		if err := handlePackageResources(ctx, cli, consts.HandleActionDelete, mp); err != nil {
+			return err
+		}
 		if err := k8s.DeleteMiddlewarePackage(ctx, cli, mp); err != nil && !apiErrors.IsNotFound(err) {
 			return err
 		}
 	}
 
-	patch := client.MergeFrom(secret.DeepCopy())
+	patch := client.MergeFromWithOptions(secret.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	if secret.Labels == nil {
 		secret.Labels = map[string]string{}
 	}
@@ -222,8 +221,33 @@ func Check(ctx context.Context, cli client.Client, mp *v1.MiddlewarePackage) err
 }
 
 func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret, act consts.HandleAction) error {
+	if act != consts.HandleActionDelete && (secret.DeletionTimestamp != nil || hasPackageRequest(secret)) {
+		component := packageComponent(secret)
+		unlock := lockPackageComponent(component)
+		defer unlock()
+		if secret.DeletionTimestamp == nil {
+			fresh := new(corev1.Secret)
+			if err := k8s.NewManagedResourceWriter(cli).Reader.Get(ctx, client.ObjectKeyFromObject(secret), fresh); err != nil {
+				return client.IgnoreNotFound(err)
+			}
+			if fresh.UID != secret.UID || packageComponent(fresh) != component {
+				return fmt.Errorf("package %s changed during reconciliation", secret.Name)
+			}
+			secret = fresh
+		}
+		if secret.DeletionTimestamp != nil || (secret.Annotations[v1.LabelUnInstall] != "" && secret.Annotations[v1.LabelInstall] == "") {
+			if err := settleBeforeUninstall(ctx, cli, secret); err != nil {
+				return err
+			}
+		}
+	}
 	// 1. Get MiddlewarePackage
-	mp, err := k8s.GetMiddlewarePackage(ctx, cli, secret.Name)
+	reader := client.Reader(cli)
+	if secret.DeletionTimestamp != nil || act == consts.HandleActionDelete {
+		reader = k8s.NewManagedResourceWriter(cli).Reader
+	}
+	mp := new(v1.MiddlewarePackage)
+	err := reader.Get(ctx, client.ObjectKey{Name: secret.Name}, mp)
 	if apiErrors.IsNotFound(err) {
 		mp = nil
 	} else if err != nil {
@@ -240,14 +264,29 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 		// loading all 600+ packages into memory on every pod restart.
 		_, hasInstall := secret.Annotations[v1.LabelInstall]
 		_, hasUnInstall := secret.Annotations[v1.LabelUnInstall]
-		if mp != nil && !hasInstall && !hasUnInstall {
+		if mp != nil && !hasInstall && !hasUnInstall && secret.Annotations[pendingSwitch] == "" {
+			return nil
+		}
+
+		// Recovery uses the recorded preimages, including when the archive no
+		// longer parses. Registration was completed before pendingSwitch was set.
+		if secret.Annotations[pendingSwitch] != "" && (hasInstall || !hasUnInstall) {
+			return activatePackage(ctx, cli, secret)
+		}
+		if hasInstall && secret.Annotations[v1.AnnotationInstallError] != "" && secret.Annotations[v1.AnnotationInstallDigest] == packageReleaseDigest(secret) {
 			return nil
 		}
 
 		// Get package
 		var pkg *packages.Package
 		pkg, err = packages.Get(ctx, cli, secret.Name)
+		if err == nil && (pkg.Metadata.Name == "" || pkg.Metadata.Version == "") {
+			err = fmt.Errorf("%w: metadata.yaml requires name and version", packages.ErrInvalidArchive)
+		}
 		if err != nil {
+			if hasInstall && errors.Is(err, packages.ErrInvalidArchive) {
+				return recordInstallError(ctx, cli, secret, packageReleaseDigest(secret), err.Error())
+			}
 			return err
 		}
 
@@ -258,20 +297,26 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 			configurations []string
 		)
 
-		for k := range pkg.Files {
-			if strings.HasPrefix(k, "crds") {
-				crds = append(crds, strings.Split(k, "/")[1])
+		for path := range pkg.Files {
+			dir, file, ok := strings.Cut(path, "/")
+			if !ok || file == "" {
+				continue
 			}
-			if strings.HasPrefix(k, "configurations") {
-				configurations = append(configurations, strings.Split(k, "/")[1])
-			}
-			if strings.HasPrefix(k, "actions") {
-				actions = append(actions, strings.Split(k, "/")[1])
-			}
-			if strings.HasPrefix(k, "baselines") {
-				baselines = append(baselines, strings.Split(k, "/")[1])
+			switch dir {
+			case "crds":
+				crds = append(crds, file)
+			case "baselines":
+				baselines = append(baselines, file)
+			case "actions":
+				actions = append(actions, file)
+			case "configurations":
+				configurations = append(configurations, file)
 			}
 		}
+		sort.Strings(crds)
+		sort.Strings(baselines)
+		sort.Strings(actions)
+		sort.Strings(configurations)
 
 		mp = &v1.MiddlewarePackage{
 			TypeMeta: metav1.TypeMeta{
@@ -308,72 +353,10 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 			}
 		}
 
-		if _, ok := secret.Annotations[v1.LabelInstall]; ok {
-			digest := packageReleaseDigest(secret)
-			if digest != "" && secret.Annotations[v1.AnnotationInstallDigest] == digest && secret.Annotations[v1.AnnotationInstallError] != "" {
-				// Previous install failed with same package content: stop tight-loop retry; wait for Secret.Data change
-				return nil
-			}
-
-			var enabledSecrets *corev1.SecretList
-			enabledSecrets, err = k8s.GetSecrets(ctx, cli, packages.DataNamespace, client.MatchingLabelsSelector{
-				Selector: consts.OpenSaolaProjectSelector(v1.LabelProject),
-			}, client.MatchingLabels{
-				v1.LabelEnabled:   "true",
-				v1.LabelComponent: secret.Labels[v1.LabelComponent],
-			})
-			if err != nil {
-				return err
-			}
-
-			for _, item := range enabledSecrets.Items {
-				err = HandleResource(ctx, cli, consts.HandleActionDelete, item.Name)
-				if err != nil {
-					log.FromContext(ctx).Error(err, "failed to delete package resource", "name", item.Name)
-					continue
-				}
-				delete(item.Labels, v1.LabelEnabled)
-				if item.Labels == nil {
-					item.Labels = map[string]string{}
-				}
-				item.Labels[v1.LabelProject] = consts.ProjectOpenSaola
-				err = k8s.UpdateSecret(ctx, cli, &item)
-			}
-
-			err = HandleResource(ctx, cli, consts.HandleActionPublish, secret.Name)
-			if err != nil {
-				if isTerminalInstallError(err) {
-					if secret.Annotations == nil {
-						secret.Annotations = map[string]string{}
-					}
-					secret.Annotations[v1.AnnotationInstallDigest] = digest
-					secret.Annotations[v1.AnnotationInstallError] = truncateBytes(err.Error(), 1024)
-					if updateErr := k8s.UpdateSecret(ctx, cli, secret); updateErr != nil {
-						// Unable to persist the install error; return the original error so the queue retries (prevents silent failure)
-						log.FromContext(ctx).Error(updateErr, "failed to persist install error to Secret", "name", secret.Name)
-						return err
-					}
-					// Terminate this retry chain: wait for package content change (Secret.Data) before the next watch-triggered attempt
-					return nil
-				}
-				log.FromContext(ctx).Error(err, "failed to publish package resources", "name", secret.Name)
-				return err
-			}
-
-			if secret.Labels == nil {
-				secret.Labels = map[string]string{}
-			}
-			secret.Labels[v1.LabelEnabled] = "true"
-			secret.Labels[v1.LabelProject] = consts.ProjectOpenSaola
-			delete(secret.Annotations, v1.LabelInstall)
-			delete(secret.Annotations, v1.AnnotationInstallDigest)
-			delete(secret.Annotations, v1.AnnotationInstallError)
-			err = k8s.UpdateSecret(ctx, cli, secret)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "failed to update package resource", "name", secret.Name)
-				return err
-			}
-		} else if _, ok = secret.Annotations[v1.LabelUnInstall]; ok {
+		if hasInstall || secret.Annotations[pendingSwitch] != "" {
+			return activatePackage(ctx, cli, secret)
+		}
+		if hasUnInstall {
 			usages, usageErr := findPackageUsages(ctx, cli, secret.Name)
 			if usageErr != nil {
 				return usageErr
@@ -416,283 +399,112 @@ func HandleSecret(ctx context.Context, cli client.Client, secret *corev1.Secret,
 		}
 
 	case consts.HandleActionDelete:
-		if mp != nil {
-			err = k8s.DeleteMiddlewarePackage(ctx, cli, mp)
-			if err != nil {
-				return err
-			}
-			// if mp.Labels[v1.LabelEnabled] == "true" {
-			// 	err = HandleResource(ctx, cli, consts.HandleActionDelete, mp.Name)
-			// 	if err != nil {
-			// 		return err
-			// 	}
-			//
-			// }
-		}
-	}
-
-	return nil
-}
-
-// func HandlePackage(ctx context.Context, cli client.Client, mp *v1.MiddlewarePackage) error {
-//	var err error
-//	defer func() {
-//		if err != nil {
-//			logger.Log.Errorj(map[string]interface{}{
-//				"amsg": "failed to handle MiddlewarePackage",
-//				"name": mp.Name,
-//				"err":  err.Error(),
-//			})
-//			return
-//		} else {
-//			logger.Log.Infoj(map[string]interface{}{
-//				"amsg": "successfully handled MiddlewarePackage",
-//				"name": mp.Name,
-//			})
-//		}
-//	}()
-//	logger.Log.Infoj(map[string]interface{}{
-//		"amsg": "handling MiddlewarePackage",
-//		"name": mp.Name,
-//	})
-//	//conditionChecked := status.GetCondition(ctx, &mp.Status.Conditions, v1.CondTypeChecked)
-//	//if conditionChecked.Status == metav1.ConditionTrue {
-//	//	err = HandleResource(ctx, cli, mp)
-//	//	if err != nil {
-//	//		return err
-//	//	}
-//	//}
-//	return nil
-// }
-
-func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAction, secretName string) error {
-	var err error
-	defer func() {
-		if err != nil && !apiErrors.IsAlreadyExists(err) {
-			log.FromContext(ctx).Error(err, "failed to handle MiddlewarePackage resources", "name", secretName)
-			return
-		} else {
-			log.FromContext(ctx).Info("successfully handled MiddlewarePackage resources", "name", secretName)
-		}
-	}()
-
-	log.FromContext(ctx).Info("handling MiddlewarePackage resources")
-
-	// Get MiddlewarePackage
-	var mp *v1.MiddlewarePackage
-	mp, err = k8s.GetMiddlewarePackage(ctx, cli, secretName)
-	if err != nil {
-		return err
-	}
-
-	var pkg *packages.Package
-	pkg, err = packages.Get(ctx, cli, secretName)
-	if err != nil {
-		return err
-	}
-
-	// Get the middleware baseline list from the package
-	var middlewareBaseline []*v1.MiddlewareBaseline
-	middlewareBaseline, err = packages.GetMiddlewareBaselines(ctx, cli, pkg.Name)
-	if err != nil {
-		return err
-	}
-
-	// Get the middleware operator baseline list from the package
-	var middlewareOperatorBaseline []*v1.MiddlewareOperatorBaseline
-	middlewareOperatorBaseline, err = packages.GetMiddlewareOperatorBaselines(ctx, cli, pkg.Name)
-	if err != nil {
-		return err
-	}
-
-	// Get the action baseline list from the package
-	var middlewareActionBaselines []*v1.MiddlewareActionBaseline
-	middlewareActionBaselines, err = packages.GetMiddlewareActionBaselines(ctx, cli, pkg.Name)
-	if err != nil {
-		return err
-	}
-
-	// Get the configurations list from the package
-	var configurations map[string]*v1.MiddlewareConfiguration
-	configurations, err = packages.GetConfigurations(ctx, cli, pkg.Name)
-	if err != nil {
-		return err
-	}
-
-	switch act {
-	case consts.HandleActionPublish:
-
-		// Publish middleware baselines
-		var deployedMiddlewareBaseline []*v1.MiddlewareBaseline
-		for _, baseline := range middlewareBaseline {
-			log.FromContext(ctx).Info("start publishing MiddlewareBaseline", "name", baseline.Name)
-			err = middlewarebaseline.Deploy(ctx, cli, pkg.Metadata.Name, pkg.Metadata.Version, pkg.Name, false, baseline, mp)
-			if err != nil && !apiErrors.IsAlreadyExists(err) {
-				log.FromContext(ctx).Error(err, "failed to publish MiddlewareBaseline", "name", baseline.Name)
-				// Rollback
-				for _, baselineDelete := range deployedMiddlewareBaseline {
-					log.FromContext(ctx).Info("start rolling back MiddlewareBaseline", "name", baselineDelete.Name)
-					if rbErr := k8s.DeleteMiddlewareBaseline(ctx, cli, baselineDelete); rbErr != nil {
-						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareBaseline", "warning", true, "name", baselineDelete.Name, "err", rbErr)
-					}
-					log.FromContext(ctx).Info("finished rolling back MiddlewareBaseline", "name", baselineDelete.Name)
-				}
-				return err
-			}
-			log.FromContext(ctx).Info("finished publishing MiddlewareBaseline", "name", baseline.Name)
-		}
-
-		defer func() {
-			if err != nil && !apiErrors.IsAlreadyExists(err) {
-				for _, baseline := range middlewareBaseline {
-					log.FromContext(ctx).Info("start rolling back MiddlewareBaseline", "name", baseline.Name)
-					if rbErr := k8s.DeleteMiddlewareBaseline(ctx, cli, baseline); rbErr != nil {
-						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareBaseline", "warning", true, "name", baseline.Name, "err", rbErr)
-					}
-					log.FromContext(ctx).Info("finished rolling back MiddlewareBaseline", "name", baseline.Name)
-				}
-			}
-		}()
-
-		// Publish middleware operator baselines
-		var deployedMiddlewareOperatorBaseline []*v1.MiddlewareOperatorBaseline
-		for _, operatorBaseline := range middlewareOperatorBaseline {
-			log.FromContext(ctx).Info("start publishing MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
-			err = middlewareoperatorbaseline.Deploy(ctx, cli, pkg.Metadata.Name, pkg.Metadata.Version, pkg.Name, false, operatorBaseline, mp)
-			if err != nil && !apiErrors.IsAlreadyExists(err) {
-				log.FromContext(ctx).Error(err, "failed to publish MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
-				// Rollback
-				for _, operatorBaselineDelete := range deployedMiddlewareOperatorBaseline {
-					log.FromContext(ctx).Info("start rolling back MiddlewareOperatorBaseline", "name", operatorBaselineDelete.Name)
-					if rbErr := k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaselineDelete); rbErr != nil {
-						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareOperatorBaseline", "warning", true, "name", operatorBaselineDelete.Name, "err", rbErr)
-					}
-					log.FromContext(ctx).Info("finished rolling back MiddlewareOperatorBaseline", "name", operatorBaselineDelete.Name)
-				}
-				return err
-			}
-			log.FromContext(ctx).Info("finished publishing MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
-		}
-
-		defer func() {
-			if err != nil && !apiErrors.IsAlreadyExists(err) {
-				for _, operatorBaseline := range middlewareOperatorBaseline {
-					log.FromContext(ctx).Info("start rolling back MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
-					if rbErr := k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaseline); rbErr != nil {
-						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareOperatorBaseline", "warning", true, "name", operatorBaseline.Name, "err", rbErr)
-					}
-					log.FromContext(ctx).Info("finished rolling back MiddlewareOperatorBaseline", "name", operatorBaseline.Name)
-				}
-			}
-		}()
-
-		// Publish action baselines
-		var deployedMiddlewareActionBaseline []*v1.MiddlewareActionBaseline
-		for _, actionBaseline := range middlewareActionBaselines {
-			log.FromContext(ctx).Info("start publishing MiddlewareActionBaseline", "name", actionBaseline.Name)
-			err = middlewareactionbaseline.Deploy(ctx, cli, pkg.Metadata.Name, pkg.Metadata.Version, pkg.Name, false, actionBaseline, mp)
-			if err != nil && !apiErrors.IsAlreadyExists(err) {
-				log.FromContext(ctx).Error(err, "failed to publish MiddlewareActionBaseline", "name", actionBaseline.Name)
-				// Rollback
-				for _, actionBaselineDelete := range deployedMiddlewareActionBaseline {
-					log.FromContext(ctx).Info("start rolling back MiddlewareActionBaseline", "name", actionBaselineDelete.Name)
-					if rbErr := k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaselineDelete); rbErr != nil {
-						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareActionBaseline", "warning", true, "name", actionBaselineDelete.Name, "err", rbErr)
-					}
-					log.FromContext(ctx).Info("finished rolling back MiddlewareActionBaseline", "name", actionBaselineDelete.Name)
-				}
-				return err
-			}
-			log.FromContext(ctx).Info("finished publishing MiddlewareActionBaseline", "name", actionBaseline.Name)
-		}
-
-		defer func() {
-			if err != nil && !apiErrors.IsAlreadyExists(err) {
-				for _, actionBaseline := range middlewareActionBaselines {
-					log.FromContext(ctx).Info("start rolling back MiddlewareActionBaseline", "name", actionBaseline.Name)
-					if rbErr := k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaseline); rbErr != nil {
-						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareActionBaseline", "warning", true, "name", actionBaseline.Name, "err", rbErr)
-					}
-					log.FromContext(ctx).Info("finished rolling back MiddlewareActionBaseline", "name", actionBaseline.Name)
-				}
-			}
-		}()
-
-		// Publish configurations
-		var deployedConfigurations []*v1.MiddlewareConfiguration
-		for _, configuration := range configurations {
-			err = middlewareconfiguration.Deploy(ctx, cli, pkg.Metadata.Name, pkg.Metadata.Version, pkg.Name, false, configuration, mp)
-			if err != nil && !apiErrors.IsAlreadyExists(err) {
-				log.FromContext(ctx).Error(err, "failed to publish MiddlewareConfiguration", "name", configuration.Name)
-				// Rollback
-				for _, configurationDelete := range deployedConfigurations {
-					log.FromContext(ctx).Info("start rolling back MiddlewareConfiguration", "name", configurationDelete.Name)
-					if rbErr := k8s.DeleteMiddlewareConfiguration(ctx, cli, configurationDelete); rbErr != nil {
-						log.FromContext(ctx).Info("rollback: failed to delete MiddlewareConfiguration", "warning", true, "name", configurationDelete.Name, "err", rbErr)
-					}
-					log.FromContext(ctx).Info("finished rolling back MiddlewareConfiguration", "name", configurationDelete.Name)
-				}
-				return err
-			}
-			log.FromContext(ctx).Info("finished publishing MiddlewareConfiguration", "name", configuration.Name)
-			deployedConfigurations = append(deployedConfigurations, configuration)
-		}
-	case consts.HandleActionDelete:
-		// Delete middleware baselines
-		var deleteErr error
-		for _, baseline := range middlewareBaseline {
-			if itemErr := deletePackageResource(ctx, "MiddlewareBaseline", baseline.Name, func() error {
-				return k8s.DeleteMiddlewareBaseline(ctx, cli, baseline)
-			}); itemErr != nil && deleteErr == nil {
-				deleteErr = itemErr
-			}
-		}
-
-		// Delete middleware operator baselines
-		for _, operatorBaseline := range middlewareOperatorBaseline {
-			if itemErr := deletePackageResource(ctx, "MiddlewareOperatorBaseline", operatorBaseline.Name, func() error {
-				return k8s.DeleteMiddlewareOperatorBaseline(ctx, cli, operatorBaseline)
-			}); itemErr != nil && deleteErr == nil {
-				deleteErr = itemErr
-			}
-		}
-
-		// Delete action baselines
-		for _, actionBaseline := range middlewareActionBaselines {
-			if itemErr := deletePackageResource(ctx, "MiddlewareActionBaseline", actionBaseline.Name, func() error {
-				return k8s.DeleteMiddlewareActionBaseline(ctx, cli, actionBaseline)
-			}); itemErr != nil && deleteErr == nil {
-				deleteErr = itemErr
-			}
-		}
-
-		// Delete configurations
-		for _, configuration := range configurations {
-			if itemErr := deletePackageResource(ctx, "MiddlewareConfiguration", configuration.Name, func() error {
-				return k8s.DeleteMiddlewareConfiguration(ctx, cli, configuration)
-			}); itemErr != nil && deleteErr == nil {
-				deleteErr = itemErr
-			}
-		}
-		if deleteErr != nil {
-			err = deleteErr
-			return err
-		}
-
-	}
-	return nil
-}
-
-func deletePackageResource(ctx context.Context, kind, name string, deleteFn func() error) error {
-	log.FromContext(ctx).Info("start deleting "+kind, "name", name)
-	if err := deleteFn(); err != nil {
-		if apiErrors.IsNotFound(err) {
-			log.FromContext(ctx).Info(kind+" already absent", "name", name)
+		if mp == nil {
 			return nil
 		}
-		log.FromContext(ctx).Error(err, "failed to delete "+kind, "name", name)
+		// An informer miss can also be a late event for a replaced Secret.
+		// Confirm the package archive is gone before deleting its catalog entry.
+		current := &metav1.PartialObjectMetadata{}
+		current.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Secret"))
+		err = reader.Get(ctx, client.ObjectKey{Namespace: packages.DataNamespace, Name: secret.Name}, current)
+		if !apiErrors.IsNotFound(err) {
+			return err
+		}
+		usages, err := findPackageUsages(ctx, cli, mp.Name)
+		if err != nil {
+			return err
+		}
+		if len(usages) != 0 {
+			return fmt.Errorf("%s", formatPackageUsageMessage(mp.Name, usages))
+		}
+		return client.IgnoreNotFound(k8s.DeleteMiddlewarePackage(ctx, cli, mp))
+	}
+
+	return nil
+}
+
+func HandleResource(ctx context.Context, cli client.Client, act consts.HandleAction, secretName string) error {
+	if act == consts.HandleActionPublish {
+		secret := new(corev1.Secret)
+		if err := k8s.NewManagedResourceWriter(cli).Reader.Get(ctx, client.ObjectKey{Namespace: packages.DataNamespace, Name: secretName}, secret); err != nil {
+			return err
+		}
+		before := secret.DeepCopy()
+		if secret.Annotations == nil {
+			secret.Annotations = map[string]string{}
+		}
+		secret.Annotations[v1.LabelInstall] = "true"
+		if err := cli.Patch(ctx, secret, client.MergeFromWithOptions(before, client.MergeFromWithOptimisticLock{})); err != nil {
+			return err
+		}
+		return HandleSecret(ctx, cli, secret, act)
+	}
+	mp := new(v1.MiddlewarePackage)
+	if err := k8s.NewManagedResourceWriter(cli).Reader.Get(ctx, client.ObjectKey{Name: secretName}, mp); err != nil {
 		return err
 	}
-	log.FromContext(ctx).Info("finished deleting "+kind, "name", name)
+	return handlePackageResources(ctx, cli, act, mp)
+}
+
+// The archive supplies the name only. Ownership and delete preconditions must
+// come from the current API object, which may have been replaced by a newer package.
+func deletePackageResource(ctx context.Context, cli client.Client, mp *v1.MiddlewarePackage, name string, live client.Object) error {
+	if err := k8s.NewManagedResourceWriter(cli).Reader.Get(ctx, client.ObjectKey{Name: name}, live); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	return retireDefinition(ctx, cli, mp, live, false)
+}
+
+func retireDefinition(ctx context.Context, cli client.Client, mp *v1.MiddlewarePackage, live client.Object, dry bool) error {
+	name := live.GetName()
+	owned, err := packageOwnsDefinition(mp, live)
+	if err != nil || !owned {
+		return err
+	}
+	uid, rv := live.GetUID(), live.GetResourceVersion()
+	if uid == "" || rv == "" {
+		return fmt.Errorf("cannot verify identity of %T %q for deletion", live, name)
+	}
+	opts := []client.DeleteOption{client.Preconditions{UID: &uid, ResourceVersion: &rv}}
+	if dry {
+		opts = append(opts, client.DryRunAll)
+	}
+	if err := cli.Delete(ctx, live, opts...); err != nil && !apiErrors.IsNotFound(err) {
+		return fmt.Errorf("delete %T %q owned by package %s: %w", live, name, mp.Name, err)
+	}
+	if !dry && len(live.GetFinalizers()) > 0 {
+		// DELETE can be accepted while a finalizer still holds the old
+		// definition. Keep the cleanup record until this UID is gone.
+		gvk, err := cli.GroupVersionKindFor(live)
+		if err != nil {
+			return err
+		}
+		current := new(metav1.PartialObjectMetadata)
+		current.SetGroupVersionKind(gvk)
+		if err := k8s.NewManagedResourceWriter(cli).Reader.Get(ctx, client.ObjectKeyFromObject(live), current); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if current.UID == uid {
+			return fmt.Errorf("waiting for finalizers on %s %s owned by package %s", gvk.Kind, name, mp.Name)
+		}
+	}
 	return nil
+}
+
+func packageOwnsDefinition(mp *v1.MiddlewarePackage, live client.Object) (bool, error) {
+	name := live.GetName()
+	owner := metav1.GetControllerOfNoCopy(live)
+	labels := live.GetLabels()
+	pkgName, version := labels[v1.LabelPackageName], labels[v1.LabelPackageVersion]
+	gvk := k8s.MiddlewarePackageGroupVersionKind()
+	if owner == nil || owner.Kind != gvk.Kind || owner.APIVersion != gvk.GroupVersion().String() || owner.UID == "" || owner.Name == "" || owner.Name != pkgName || version == "" {
+		return false, fmt.Errorf("cannot verify package ownership of %T %q: controller=%v, package=%q, version=%q", live, name, owner, pkgName, version)
+	}
+	if owner.Name != mp.Name && owner.UID != mp.UID {
+		return false, nil
+	}
+	if owner.Name != mp.Name || owner.UID != mp.UID || version != mp.Spec.Version {
+		return false, fmt.Errorf("package ownership conflict for %T %q: observed %s (UID %s, version %s), uninstalling %s (UID %s, version %s)", live, name, pkgName, owner.UID, version, mp.Name, mp.UID, mp.Spec.Version)
+	}
+	return true, nil
 }

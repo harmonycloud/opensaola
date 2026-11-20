@@ -17,72 +17,29 @@ limitations under the License.
 package middlewareconfiguration
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
-
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
-	"github.com/harmonycloud/opensaola/internal/k8s"
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sync"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
+	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/pkg/tools"
+	"github.com/mohae/deepcopy"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	kjson "sigs.k8s.io/json"
 )
-
-func deleteTemplateLineValues(template string) (apiVersion string, kind string, nameExpr string, namespaceExpr string) {
-	lines := strings.Split(template, "\n")
-	metadataIndent := -1
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		if apiVersion == "" && strings.HasPrefix(trimmed, "apiVersion:") {
-			apiVersion = strings.TrimSpace(strings.TrimPrefix(trimmed, "apiVersion:"))
-			continue
-		}
-		if kind == "" && strings.HasPrefix(trimmed, "kind:") {
-			kind = strings.TrimSpace(strings.TrimPrefix(trimmed, "kind:"))
-			continue
-		}
-
-		indent := len(line) - len(strings.TrimLeft(line, " "))
-		if trimmed == "metadata:" {
-			metadataIndent = indent
-			continue
-		}
-		if metadataIndent >= 0 {
-			if indent <= metadataIndent {
-				metadataIndent = -1
-				continue
-			}
-			if nameExpr == "" && strings.HasPrefix(trimmed, "name:") {
-				nameExpr = strings.TrimSpace(strings.TrimPrefix(trimmed, "name:"))
-				continue
-			}
-			if namespaceExpr == "" && strings.HasPrefix(trimmed, "namespace:") {
-				namespaceExpr = strings.TrimSpace(strings.TrimPrefix(trimmed, "namespace:"))
-				continue
-			}
-		}
-	}
-	return apiVersion, kind, nameExpr, namespaceExpr
-}
-
-func normalizeRenderedName(s string) string {
-	name := strings.TrimSpace(s)
-	name = strings.Trim(name, "\"'")
-	return strings.TrimSpace(name)
-}
 
 func applyConfigurationValues(ctx context.Context, cfg v1.Configuration, templateValues *tools.TemplateValues) error {
 	if len(cfg.Values.Raw) == 0 {
@@ -110,7 +67,7 @@ const (
 func deleteByGVKAndName(ctx context.Context, cli client.Client, owner metav1.Object, gvk schema.GroupVersionKind, namespace string, name string, configuration *v1.MiddlewareConfiguration) (deleteByNameResult, error) {
 	log.FromContext(ctx).Info("deleting configuration rendered resource by name", "gvk", gvk.String(), "namespace", namespace, "name", name)
 	obj, err := k8s.GetCustomResource(ctx, cli, name, namespace, gvk)
-	if errors.IsNotFound(err) {
+	if apierrors.IsNotFound(err) {
 		log.FromContext(ctx).Info("configuration rendered resource not found by name", "warning", true, "gvk", gvk.String(), "namespace", namespace, "name", name)
 		return deleteByNameNotFound, nil
 	}
@@ -124,10 +81,13 @@ func deleteByGVKAndName(ctx context.Context, cli client.Client, owner metav1.Obj
 // retireConfigurationResource uses the same observation for the policy decision
 // and mutation. A modified or recreated object must be evaluated again.
 func retireConfigurationResource(ctx context.Context, cli client.Client, owner metav1.Object, live *unstructured.Unstructured, configuration *v1.MiddlewareConfiguration) (deleteByNameResult, error) {
+	if recordedConfigurationConflict(owner, live, configuration.Name) {
+		return deleteByNameSkipped, nil
+	}
 	policy := resolveConfigurationDeletePolicy(configuration, live)
 	if !shouldDeleteRenderedResource(owner, live, configuration.Name, policy) {
 		if policy == v1.ConfigurationDeletePolicyOrphan && canDetachConfigurationOwner(owner, live, configuration.Name) {
-			if err := stripLiveConfigurationOwnerReference(ctx, cli, live, owner); err != nil && !errors.IsNotFound(err) {
+			if err := stripLiveConfigurationOwnerReference(ctx, cli, live, owner); err != nil && !apierrors.IsNotFound(err) {
 				return "", err
 			}
 		}
@@ -135,7 +95,7 @@ func retireConfigurationResource(ctx context.Context, cli client.Client, owner m
 	}
 	uid, rv := live.GetUID(), live.GetResourceVersion()
 	if err := cli.Delete(ctx, live, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			// The observed target is already gone. Do not broaden this into a list cleanup.
 			return deleteByNameDeleted, nil
 		}
@@ -170,150 +130,241 @@ func canDetachConfigurationOwner(owner metav1.Object, live *unstructured.Unstruc
 	default:
 		return false
 	}
-	gvk := live.GroupVersionKind()
+	found := false
 	for _, prior := range inventory {
-		if prior.Group == gvk.Group && prior.Kind == gvk.Kind && prior.Namespace == live.GetNamespace() && prior.Name == live.GetName() {
-			return prior.ConfigurationName == configurationName && prior.OwnerUID == owner.GetUID() &&
-				prior.ResourceUID != "" && prior.ResourceUID == live.GetUID() &&
-				hasConfigurationLifecycleMarkers(owner, live, configurationName, prior.ConfigurationUID)
+		if atRecordedAddress(prior, live) {
+			found = true
+			if matchesRecordedConfiguration(prior, owner, live, configurationName) {
+				return true
+			}
 		}
 	}
-	return true
+	return !found
 }
 
-// DeleteTemplateRenderedResources cleans up extra resources in the delete path without relying on full template rendering.
-// Strategy:
-// 1) Extract apiVersion/kind from the template (no rendering); only render metadata.name;
-// 2) If name rendering fails, fall back to listing and deleting by label middleware.cn/app=<owner.Name> (same GVK dimension).
-func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, owner metav1.Object, quoter tools.Quoter) error {
+// Resolve only the identity when cleaning up an object. Re-rendering can
+// confirm that a configuration has no output, but cannot identify an old target.
+func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, owner metav1.Object, quoter tools.Quoter, prepareParameters func(context.Context, *tools.TemplateValues) error) error {
 	configurations := quoter.GetConfigurations()
-	pkgName := quoter.GetLabels()[v1.LabelPackageName]
-	log.FromContext(ctx).Info("starting cleanup of configuration rendered resources", "ownerName", owner.GetName(), "ownerNamespace", owner.GetNamespace(), "packageName", pkgName, "configurationsCount", len(configurations))
+	if resourceOwner, ok := owner.(client.Object); ok {
+		if err := recoverConfigurationWrite(ctx, cli, resourceOwner); err != nil {
+			return err
+		}
+		// A reference can be withdrawn immediately before owner deletion, before
+		// the new generation has ever been reconciled. Complete that withdrawal
+		// using the published policy and identity, including on an empty spec.
+		if entries, _ := configurationInventory(resourceOwner); entries != nil {
+			referenced := make(map[string]bool, len(configurations))
+			for _, cfg := range configurations {
+				referenced[cfg.Name] = true
+			}
+			var withdrawn []v1.RenderedConfigurationResource
+			for _, entry := range *entries {
+				if !referenced[entry.ConfigurationName] {
+					withdrawn = append(withdrawn, entry)
+				}
+			}
+			if err := DeleteDisabledRenderedConfigurationResources(ctx, cli, owner, withdrawn, nil); err != nil {
+				return err
+			}
+		}
+	}
 	if len(configurations) == 0 {
-		log.FromContext(ctx).Info("no configuration rendered resources to clean up", "ownerName", owner.GetName(), "ownerNamespace", owner.GetNamespace())
 		return nil
 	}
+	pkgName := quoter.GetLabels()[v1.LabelPackageName]
 	if pkgName == "" {
 		return fmt.Errorf("package name is empty")
 	}
-
-	templateValuesBase, err := tools.GetTemplateValues(ctx, quoter)
+	baseValues, err := tools.GetTemplateValues(ctx, quoter)
 	if err != nil {
 		return fmt.Errorf("failed to get template values: %w", err)
 	}
-
-	var errList []string
+	var problems []error
 	for _, cfg := range configurations {
-		log.FromContext(ctx).Info("processing configuration delete cleanup", "ownerName", owner.GetName(), "ownerNamespace", owner.GetNamespace(), "packageName", pkgName, "cfgName", cfg.Name)
-		mc, getErr := Get(ctx, cli, cfg.Name, pkgName)
-		if getErr != nil {
-			log.FromContext(ctx).Error(getErr, "failed to get configuration", "ownerName", owner.GetName(), "packageName", pkgName, "cfgName", cfg.Name)
-			errList = append(errList, fmt.Sprintf("get configuration %s error: %v", cfg.Name, getErr))
-			continue
-		}
-
-		apiVersion, kind, nameExpr, namespaceExpr := deleteTemplateLineValues(mc.Spec.Template)
-		log.FromContext(ctx).Info("extracted delete info from configuration template", "cfgName", cfg.Name, "apiVersion", apiVersion, "kind", kind, "nameExpr", nameExpr, "namespaceExpr", namespaceExpr)
-		if apiVersion == "" || kind == "" {
-			errList = append(errList, fmt.Sprintf("configuration %s missing apiVersion/kind", cfg.Name))
-			continue
-		}
-		gvk := schema.FromAPIVersionAndKind(apiVersion, kind)
-
-		// CRDs are cluster-wide shared resources, must not be deleted with Middleware
-		if gvk.Kind == "CustomResourceDefinition" {
-			continue
-		}
-
-		templateValues := *templateValuesBase
-		// Avoid nil pointer from missing values in template .Values.xxx: ensure map exists (missing keys may still be nil)
-		if templateValues.Values == nil {
-			templateValues.Values = make(map[string]interface{})
-		}
-
-		// Try to apply cfg.Values (failure does not block deletion, fallback follows)
-		_ = applyConfigurationValues(ctx, cfg, &templateValues)
-
-		renderedName := ""
-		if nameExpr != "" {
-			if n, renderErr := tools.TemplateParse(ctx, nameExpr, &templateValues); renderErr == nil {
-				renderedName = normalizeRenderedName(n)
-			} else {
-				log.FromContext(ctx).Info("failed to render configuration delete name, proceeding to fallback", "warning", true, "cfgName", cfg.Name, "nameExpr", nameExpr, "err", renderErr)
+		mc, err := Get(ctx, cli, cfg.Name, pkgName)
+		if err == nil {
+			err = deleteConfigurationTargets(ctx, cli, owner, &mc, cfg, baseValues)
+			// Generated objects and fields that depend on earlier mutations
+			// can only be identified by their original publication.
+			if errors.Is(err, errOpaqueDeleteIdentity) || errors.Is(err, errMutableDeleteIdentity) {
+				if handled, recordErr := retireRecordedConfiguration(ctx, cli, owner, &mc); handled || recordErr != nil {
+					err = recordErr
+				} else {
+					err = verifyEmptyConfiguration(ctx, cfg, baseValues, &mc, err, prepareParameters)
+				}
 			}
 		}
+		if err != nil {
+			problems = append(problems, fmt.Errorf("configuration %s: %w", cfg.Name, err))
+		}
+	}
+	return errors.Join(problems...)
+}
 
-		// Mirror the apply-time namespace semantics: an explicit template namespace
-		// wins; otherwise the resource lives in the owner's namespace.
-		renderedNS := ""
-		if namespaceExpr != "" {
-			if n, renderErr := tools.TemplateParse(ctx, namespaceExpr, &templateValues); renderErr == nil {
-				renderedNS = normalizeRenderedName(n)
-			} else {
-				log.FromContext(ctx).Info("failed to render configuration delete namespace, falling back to owner namespace", "warning", true, "cfgName", cfg.Name, "namespaceExpr", namespaceExpr, "err", renderErr)
+func copyConfigurationRenderInputs(base *tools.TemplateValues) (*tools.TemplateValues, error) {
+	// Sprig's set and merge can mutate nested inputs used by later cleanups.
+	values, ok := deepcopy.Copy(*base).(tools.TemplateValues)
+	if !ok {
+		return nil, errors.New("cannot copy configuration render inputs")
+	}
+	// API discovery is read-only. Its private maps are not reflect-copyable.
+	values.Capabilities = base.Capabilities
+	return &values, nil
+}
+
+func verifyEmptyConfiguration(ctx context.Context, cfg v1.Configuration, base *tools.TemplateValues, mc *v1.MiddlewareConfiguration, identityErr error, prepareParameters func(context.Context, *tools.TemplateValues) error) error {
+	if bytes.Contains(cfg.Values.Raw, []byte("{{")) {
+		refValues, err := copyConfigurationRenderInputs(base)
+		if err != nil {
+			return err
+		}
+		if prepareParameters != nil {
+			if err := prepareParameters(ctx, refValues); err != nil {
+				return fmt.Errorf("prepare configuration reference parameters: %w", err)
 			}
 		}
-
-		// Determine if the resource is namespaced: a template-specified namespace
-		// wins (same rule as apply); otherwise default to the owner's namespace.
-		ns := ""
-		mapping, isNSErr := cli.RESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
-		if isNSErr != nil {
-			if meta.IsNoMatchError(isNSErr) || k8s.IsCRDNotInstalled(isNSErr) {
-				log.FromContext(ctx).Info("CRD not installed in cluster, skipping cleanup (resource cannot exist)",
-					"configuration", cfg.Name,
-				)
-				continue
-			}
-			errList = append(errList, fmt.Sprintf("configuration %s isNamespaced error: %v", cfg.Name, isNSErr))
-			continue
+		refs, err := RenderConfigurationReferences(ctx, []v1.Configuration{cfg}, refValues)
+		if err != nil {
+			return err
 		}
-		namespaced := mapping.Scope.Name() == meta.RESTScopeNameNamespace
-		if namespaced {
-			if renderedNS != "" {
-				ns = renderedNS
-			} else {
-				ns = owner.GetNamespace()
-			}
+		if len(refs) != 1 || refs[0].Name != cfg.Name {
+			return errors.New("rendered configuration reference changed its identity")
 		}
-		log.FromContext(ctx).Info("configuration delete target resolved", "cfgName", cfg.Name, "gvk", gvk.String(), "renderedName", renderedName, "namespaced", namespaced, "namespace", ns)
+		cfg = refs[0]
+	}
+	values, err := copyConfigurationRenderInputs(base)
+	if err != nil {
+		return err
+	}
+	rendered, err := renderConfiguration(ctx, cfg, *values, mc)
+	if err != nil {
+		return fmt.Errorf("check empty configuration output: %w", err)
+	}
+	doc, err := identityDocument(rendered)
+	if errors.Is(err, io.EOF) || err == nil && emptyYAMLDocument(doc) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check rendered configuration documents: %w", err)
+	}
+	return identityErr
+}
 
-		// Prefer deletion by rendered name
-		if renderedName != "" {
-			outcome, err := deleteByGVKAndName(ctx, cli, owner, gvk, ns, renderedName, &mc)
+func deleteConfigurationTargets(ctx context.Context, cli client.Client, owner metav1.Object, mc *v1.MiddlewareConfiguration, cfg v1.Configuration, base *tools.TemplateValues) error {
+	id, err := parseDeleteIdentity(mc.Spec.Template)
+	if err != nil {
+		return err
+	}
+	// Literal fields do not depend on configuration values. Prepare those
+	// values once, only if an identity expression actually needs rendering.
+	values := sync.OnceValues(func() (*tools.TemplateValues, error) {
+		v := *base
+		return &v, applyConfigurationValues(ctx, cfg, &v)
+	})
+	render := func(key string, field deleteIdentityField) (string, error) {
+		v := base
+		if field.Dynamic() {
+			var err error
+			v, err = values()
 			if err != nil {
-				errList = append(errList, fmt.Sprintf("configuration %s clean up %s/%s: %v", cfg.Name, ns, renderedName, err))
-				continue
-			}
-			if outcome != deleteByNameNotFound {
-				continue
+				return "", fmt.Errorf("prepare values for %s: %w", key, err)
 			}
 		}
-
-		// Fallback: delete by label middleware.cn/app=<owner.Name> + GVK list
-		log.FromContext(ctx).Info("configuration delete entering fallback", "cfgName", cfg.Name, "gvk", gvk.String(), "namespace", ns, "selector", fmt.Sprintf("%s=%s", v1.LabelApp, owner.GetName()))
-		items, listErr := k8s.ListCustomResources(ctx, cli, ns, gvk, client.MatchingLabels{v1.LabelApp: owner.GetName()})
-		if listErr != nil && !errors.IsNotFound(listErr) {
-			errList = append(errList, fmt.Sprintf("configuration %s list fallback error: %v", cfg.Name, listErr))
+		if !field.Present() {
+			return "", fmt.Errorf("missing %s", key)
+		}
+		value, err := field.Render(ctx, v)
+		if err != nil {
+			return "", fmt.Errorf("render %s: %w", key, err)
+		}
+		return value, nil
+	}
+	version, err := render("apiVersion", id.APIVersion)
+	if err != nil {
+		return err
+	}
+	kind, err := render("kind", id.Kind)
+	if err != nil {
+		return err
+	}
+	gvk, err := deleteResourceGVK(version, kind)
+	if err != nil {
+		return err
+	}
+	mapping, err := cli.RESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
+	missingKind := meta.IsNoMatchError(err) || k8s.IsCRDNotInstalled(err)
+	if err != nil && !missingKind {
+		return fmt.Errorf("resolve scope for %s: %w", gvk, err)
+	}
+	ns := ""
+	if (!missingKind && mapping.Scope.Name() == meta.RESTScopeNameNamespace) || (missingKind && id.Namespace.Present()) {
+		ns = owner.GetNamespace()
+		if id.Namespace.Present() {
+			ns, err = render("metadata.namespace", id.Namespace)
+			if err != nil {
+				return err
+			}
+		}
+		if len(validation.IsDNS1123Label(ns)) != 0 {
+			return fmt.Errorf("invalid metadata.namespace for %s", gvk.Kind)
+		}
+	}
+	name, nameErr := render("metadata.name", id.Name)
+	if errors.Is(nameErr, errMutableDeleteIdentity) {
+		return nameErr
+	}
+	if handled, err := retireRecordedConfiguration(ctx, cli, owner, mc); handled || err != nil {
+		return err
+	}
+	if missingKind || isCustomResourceDefinition(gvk) {
+		return nil
+	}
+	if nameErr == nil {
+		outcome, err := deleteByGVKAndName(ctx, cli, owner, gvk, ns, name, mc)
+		if outcome != deleteByNameNotFound || err != nil {
+			return err
+		}
+	} else {
+		log.FromContext(ctx).Info("cannot render resource name, checking configuration markers in the resolved scope", "configuration", mc.Name, "err", nameErr)
+	}
+	items, err := k8s.ListCustomResources(ctx, cli, ns, gvk, client.MatchingLabels{v1.LabelApp: owner.GetName()})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("list fallback for %s: %w", gvk, err)
+	}
+	var problems []error
+	for i := range items {
+		item := &items[i]
+		annotations := item.GetAnnotations()
+		if annotations[v1.LabelConfigurations] != mc.Name {
 			continue
 		}
-		log.FromContext(ctx).Info("configuration fallback list query completed", "cfgName", cfg.Name, "gvk", gvk.String(), "namespace", ns, "items", len(items))
-		for i := range items {
-			item := &items[i]
-			// Several Configurations can render the same kind for this owner.
-			// A list by app label cannot identify which one's policy applies.
-			if item.GetAnnotations()[v1.LabelConfigurations] != cfg.Name {
-				continue
-			}
-			item.SetGroupVersionKind(gvk)
-			if _, err := retireConfigurationResource(ctx, cli, owner, item, &mc); err != nil {
-				errList = append(errList, fmt.Sprintf("configuration %s clean up %s/%s: %v", cfg.Name, item.GetNamespace(), item.GetName(), err))
-			}
+		// Instance names can coincide across namespaces. A label scan must
+		// respect any stronger ownership evidence, even with an explicit delete policy.
+		if marked := annotations[v1.AnnotationConfigurationOwnerUID]; marked != "" && marked != string(owner.GetUID()) {
+			continue
+		}
+		if controller := metav1.GetControllerOf(item); controller != nil && !sameControllerOwner(owner, controller) {
+			continue
+		}
+		item.SetGroupVersionKind(gvk)
+		if _, err := retireConfigurationResource(ctx, cli, owner, item, mc); err != nil {
+			problems = append(problems, fmt.Errorf("clean up %s/%s: %w", ns, item.GetName(), err))
 		}
 	}
+	return errors.Join(problems...)
+}
 
-	if len(errList) > 0 {
-		return fmt.Errorf("%s", strings.Join(errList, ";"))
+// Invalid rendered strings must not turn into a RESTMapper NoMatch, which
+// is also the normal result when an optional CRD has been uninstalled.
+func deleteResourceGVK(version, kind string) (schema.GroupVersionKind, error) {
+	gv, err := schema.ParseGroupVersion(version)
+	if err != nil || gv.String() != version || len(validation.IsDNS1035Label(gv.Version)) != 0 ||
+		(gv.Group != "" && len(validation.IsDNS1123Subdomain(gv.Group)) != 0) {
+		return schema.GroupVersionKind{}, fmt.Errorf("invalid rendered apiVersion")
 	}
-	return nil
+	if len(validation.IsDNS1035Label(strings.ToLower(kind))) != 0 {
+		return schema.GroupVersionKind{}, fmt.Errorf("invalid rendered kind")
+	}
+	return gv.WithKind(kind), nil
 }

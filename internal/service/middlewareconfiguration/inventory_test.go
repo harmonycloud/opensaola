@@ -234,6 +234,28 @@ func TestNormalizeRenderedConfigurationResourcesRejectsSharedIdentity(t *testing
 	}
 }
 
+func TestConfigurationVersionChangeKeepsPublishedIdentity(t *testing.T) {
+	old := inventoryTestResource(true, v1.ConfigurationDisablePolicyDelete)
+	old.Group, old.Version, old.Kind = "inventory.test", "v1alpha1", "Item"
+	current := old
+	current.Version = "v1"
+
+	// Both versions address the same object; switching versions must retain it.
+	owner := inventoryTestOwner()
+	live := inventoryLiveObject(owner, old, old.ResourceUID, true)
+	cli := inventoryTestClient(t, live)
+	if err := DeleteDisabledRenderedConfigurationResources(t.Context(), cli, owner, []v1.RenderedConfigurationResource{old}, []v1.RenderedConfigurationResource{current}); err != nil {
+		t.Fatal(err)
+	}
+	if err := getInventoryObject(t.Context(), cli, old); err != nil {
+		t.Fatalf("expected published target to remain: %v", err)
+	}
+	current.ConfigurationName = "another-source"
+	if _, err := normalizeRenderedConfigurationResources([]v1.RenderedConfigurationResource{old, current}); err == nil {
+		t.Fatal("two configurations cannot publish one target through different versions")
+	}
+}
+
 func TestDeleteDisabledCrossNamespaceResources(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -44,6 +44,12 @@ func MigrateConfigurationOwnerReferences(ctx context.Context, cli client.Client,
 	if stored == nil {
 		return fmt.Errorf("unsupported Configuration owner %T", owner)
 	}
+	// Publication can leave the first target pending before the batch has
+	// an inventory or a completion generation. Only the publication retry
+	// can decide what was written, even if an older reconcile observed this generation.
+	if *pendingConfigurationWrite(owner) != nil {
+		return nil
+	}
 	inventory := *stored
 	generation := *storedGeneration
 	var updated []v1.RenderedConfigurationResource

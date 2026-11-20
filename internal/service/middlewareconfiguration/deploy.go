@@ -19,6 +19,9 @@ package middlewareconfiguration
 import (
 	"context"
 	"fmt"
+	"reflect"
+
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -28,7 +31,6 @@ import (
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
-	"github.com/harmonycloud/opensaola/pkg/tools"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -50,6 +52,12 @@ type renderedConfigurationApplyResult struct {
 // deliberate no-op; stale-object cleanup is performed by the caller from the
 // prior status inventory.
 func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act consts.HandleAction, m *v1.MiddlewareConfiguration) (*renderedConfigurationApplyResult, error) {
+	return handleRenderedConfiguration(ctx, cli, owner, act, m, nil)
+}
+
+// The batch caller supplies the addresses already rendered in this batch.
+// Standalone Handle does not manage an owner's publication inventory.
+func handleRenderedConfiguration(ctx context.Context, cli client.Client, owner metav1.Object, act consts.HandleAction, m *v1.MiddlewareConfiguration, seen map[string]string) (*renderedConfigurationApplyResult, error) {
 	ownerObj, ok := owner.(client.Object)
 	if !ok {
 		return nil, fmt.Errorf("unsupported owner type %T", owner)
@@ -133,20 +141,27 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 			obj.SetOwnerReferences(withoutConfigurationOwner(obj.GetOwnerReferences(), owner))
 		}
 
+		entry := v1.RenderedConfigurationResource{
+			ConfigurationName: m.Name, ConfigurationUID: m.GetUID(),
+			Group: obj.GroupVersionKind().Group, Version: obj.GroupVersionKind().Version, Kind: obj.GetKind(),
+			Namespace: obj.GetNamespace(), Name: obj.GetName(), OwnerUID: owner.GetUID(),
+			Namespaced: resourceIsNamespaced, DisablePolicy: disablePolicy, ControllerReferenceRequired: &requireController,
+		}
 		writer := k8s.NewManagedResourceWriter(cli)
+		if seen != nil {
+			key := renderedConfigurationResourceKey(entry)
+			if other, found := seen[key]; found {
+				return nil, fmt.Errorf("configurations %q and %q render the same resource %s", other, m.Name, key)
+			}
+			seen[key] = m.Name
+			writer.BeforeConfigurationWrite = prepareConfigurationWrite(ctx, cli, ownerObj, obj, entry)
+		}
 		writtenUID, err := writer.ReconcileWithUID(ctx, ownerObj, obj, m.Name)
 		if err != nil {
 			return nil, err
 		}
 
-		identity := v1.RenderedConfigurationResource{
-			ConfigurationName: m.Name,
-			Group:             obj.GroupVersionKind().Group,
-			Version:           obj.GroupVersionKind().Version,
-			Kind:              obj.GetKind(),
-			Namespace:         obj.GetNamespace(),
-			Name:              obj.GetName(),
-		}
+		checkpointed := seen != nil && *pendingConfigurationWrite(ownerObj) != nil
 		live := &unstructured.Unstructured{}
 		live.SetGroupVersionKind(obj.GroupVersionKind())
 		if err := writer.Reader.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
@@ -155,48 +170,26 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 		if writtenUID == "" || live.GetUID() != writtenUID {
 			return nil, fmt.Errorf("configuration target changed after publication: expected UID %q, observed %q", writtenUID, live.GetUID())
 		}
-		if sameNamespace && !requireController {
-			if err := stripLiveConfigurationOwnerReference(ctx, cli, live, owner); err != nil {
-				return nil, err
-			}
-		}
 		// Cleanup authority is established only by the successfully published
 		// live identity, never by an adoption decision made before the write.
 		if !hasConfigurationLifecycleMarkers(owner, live, m.Name, m.GetUID()) {
-			return &renderedConfigurationApplyResult{identity: identity}, nil
-		}
-		if requireController && !metav1.IsControlledBy(live, owner) {
-			// Business field reconciliation preserves lifecycle metadata. Restore
-			// the reference when a previously orphaned target opts back in.
-			if metav1.GetControllerOf(live) != nil {
-				return nil, fmt.Errorf("configuration target %s is now controlled by another owner", client.ObjectKeyFromObject(live))
+			if checkpointed {
+				if err := finishConfigurationWrite(ctx, cli, ownerObj, nil); err != nil {
+					return nil, err
+				}
 			}
-			base := client.MergeFromWithOptions(live.DeepCopy(), client.MergeFromWithOptimisticLock{})
-			if err := ctrl.SetControllerReference(owner, live, cli.Scheme()); err != nil {
+			return &renderedConfigurationApplyResult{identity: entry}, nil
+		}
+		if err := syncConfigurationOwnerReference(ctx, cli, ownerObj, live, entry); err != nil {
+			return nil, err
+		}
+		entry.ResourceUID = live.GetUID()
+		if checkpointed {
+			if err := finishConfigurationWrite(ctx, cli, ownerObj, &entry); err != nil {
 				return nil, err
 			}
-			if err := cli.Patch(ctx, live, base); err != nil {
-				return nil, err
-			}
-			if !metav1.IsControlledBy(live, owner) {
-				return nil, fmt.Errorf("configuration target %s did not accept the controller reference", client.ObjectKeyFromObject(live))
-			}
 		}
-		inventory := &v1.RenderedConfigurationResource{
-			ConfigurationName:           m.Name,
-			ConfigurationUID:            m.GetUID(),
-			Group:                       live.GroupVersionKind().Group,
-			Version:                     live.GroupVersionKind().Version,
-			Kind:                        live.GetKind(),
-			Namespace:                   live.GetNamespace(),
-			Name:                        live.GetName(),
-			OwnerUID:                    owner.GetUID(),
-			ResourceUID:                 live.GetUID(),
-			Namespaced:                  resourceIsNamespaced,
-			DisablePolicy:               disablePolicy,
-			ControllerReferenceRequired: &requireController,
-		}
-		return &renderedConfigurationApplyResult{identity: identity, inventory: inventory}, nil
+		return &renderedConfigurationApplyResult{identity: entry, inventory: &entry}, nil
 
 	case consts.HandleActionDelete:
 		old, err := k8s.GetCustomResource(ctx, cli, obj.GetName(), obj.GetNamespace(), obj.GroupVersionKind())
@@ -215,9 +208,60 @@ func Handle(ctx context.Context, cli client.Client, owner metav1.Object, act con
 	return nil, nil
 }
 
-// handleTemplate processes the template
-func handleTemplate(ctx context.Context, templateValues *tools.TemplateValues, m *v1.MiddlewareConfiguration) (string, error) {
-	return tools.TemplateParse(ctx, m.Spec.Template, templateValues)
+// prepareConfigurationWrite binds all write retries to the initially observed
+// target and commits a pending status entry before acquiring cleanup authority.
+func prepareConfigurationWrite(ctx context.Context, cli client.Client, ownerObj client.Object, obj *unstructured.Unstructured, entry v1.RenderedConfigurationResource) func(*unstructured.Unstructured) error {
+	// Reserve the identity before a target write. On a conflict retry,
+	// reconsider only the same UID (or the result of our own create).
+	var prepared bool
+	var observedUID types.UID
+	var token string
+	return func(live *unstructured.Unstructured) error {
+		var uid types.UID
+		if live != nil {
+			uid = live.GetUID()
+		}
+		if prepared {
+			if uid != observedUID && !(observedUID == "" && live != nil && live.GetAnnotations()[v1.AnnotationConfigurationWriteID] == token && k8s.HasConfigurationCreateReceipt(live, token)) {
+				return fmt.Errorf("configuration target changed during publication: %s", client.ObjectKeyFromObject(obj))
+			}
+			return nil
+		}
+		observedUID = uid
+		// Already confirmed, unchanged lifecycle: preserve the receipt on
+		// normal business updates without writing owner status per target.
+		if live != nil && confirmedConfigurationTarget(ownerObj, live, entry) {
+			token = live.GetAnnotations()[v1.AnnotationConfigurationWriteID]
+		} else {
+			var err error
+			token, err = beginConfigurationWrite(ctx, cli, ownerObj, entry, uid)
+			if err != nil {
+				return err
+			}
+		}
+		annotations := obj.GetAnnotations()
+		delete(annotations, v1.AnnotationConfigurationWriteID)
+		if token != "" {
+			annotations[v1.AnnotationConfigurationWriteID] = token
+		}
+		obj.SetAnnotations(annotations)
+		prepared = true
+		return nil
+	}
+}
+
+func confirmedConfigurationTarget(owner client.Object, live *unstructured.Unstructured, entry v1.RenderedConfigurationResource) bool {
+	records, _ := configurationInventory(owner)
+	if records == nil || !hasConfigurationLifecycleMarkers(owner, live, entry.ConfigurationName, entry.ConfigurationUID) {
+		return false
+	}
+	entry.ResourceUID = live.GetUID()
+	for i := range *records {
+		if reflect.DeepEqual((*records)[i], entry) {
+			return true
+		}
+	}
+	return false
 }
 
 // UpdateStatus updates the MiddlewareConfiguration status

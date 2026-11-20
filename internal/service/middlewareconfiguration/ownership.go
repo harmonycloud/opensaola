@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -248,4 +249,37 @@ func resolveConfigurationDeletePolicy(m *v1.MiddlewareConfiguration, obj metav1.
 		return v1.ConfigurationDeletePolicyOrphan
 	}
 	return ""
+}
+
+// Configuration field writes may commit before this separate ownerReference
+// patch. Both publication and receipt recovery must finish it before confirming
+// lifecycle authority in the inventory.
+func syncConfigurationOwnerReference(ctx context.Context, cli client.Client, owner client.Object, live *unstructured.Unstructured, entry v1.RenderedConfigurationResource) error {
+	if !entry.Namespaced || live.GetNamespace() != owner.GetNamespace() {
+		return nil
+	}
+	if ref := metav1.GetControllerOf(live); ref != nil && !sameControllerOwner(owner, ref) {
+		return fmt.Errorf("configuration target %s is controlled by another owner", client.ObjectKeyFromObject(live))
+	}
+	uid, token := live.GetUID(), live.GetAnnotations()[v1.AnnotationConfigurationWriteID]
+	if entry.ControllerReferenceRequired != nil && !*entry.ControllerReferenceRequired {
+		if err := stripLiveConfigurationOwnerReference(ctx, cli, live, owner); err != nil {
+			return err
+		}
+	} else if !metav1.IsControlledBy(live, owner) {
+		base := client.MergeFromWithOptions(live.DeepCopy(), client.MergeFromWithOptimisticLock{})
+		if err := ctrl.SetControllerReference(owner, live, cli.Scheme()); err != nil {
+			return err
+		}
+		if err := cli.Patch(ctx, live, base); err != nil {
+			return err
+		}
+		if !metav1.IsControlledBy(live, owner) {
+			return fmt.Errorf("configuration target %s did not accept the controller reference", client.ObjectKeyFromObject(live))
+		}
+	}
+	if live.GetUID() != uid || live.GetAnnotations()[v1.AnnotationConfigurationWriteID] != token || !hasConfigurationLifecycleMarkers(owner, live, entry.ConfigurationName, entry.ConfigurationUID) {
+		return fmt.Errorf("configuration target %s lost its publication identity while updating owner references", client.ObjectKeyFromObject(live))
+	}
+	return nil
 }

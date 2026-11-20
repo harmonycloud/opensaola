@@ -143,7 +143,7 @@ func actionWithNativeMountPaths(live, edit *unstructured.Unstructured) (*unstruc
 	for _, path := range [][]string{{"spec"}, {"template", "spec"}, {"spec", "template", "spec"}, {"spec", "jobTemplate", "spec", "template", "spec"}} {
 		raw, _, _ := unstructured.NestedFieldNoCopy(edit.Object, path...)
 		pod, _ := raw.(map[string]any)
-		if !HasPodMountEdits(pod) || !NativeInitContainersAt(live.GroupVersionKind(), append(path, "initContainers")...) {
+		if !HasPodMountEdits(pod) || !NativePodSpecAt(live.GroupVersionKind(), path...) {
 			continue
 		}
 		raw, _, _ = unstructured.NestedFieldNoCopy(live.Object, path...)

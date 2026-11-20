@@ -1,4 +1,7 @@
 {{- if .Values.metrics.serviceMonitor.enabled }}
+{{- if not .Values.metrics.enabled }}
+{{- fail "metrics.serviceMonitor.enabled=true requires metrics.enabled=true" }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:

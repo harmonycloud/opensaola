@@ -76,3 +76,63 @@ func TestBaselineAndMIDVolumeMountIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestBaselineAndMIDContainerEnvOrder(t *testing.T) {
+	deployment := v1.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}
+	pod := v1.GVK{Version: "v1", Kind: "Pod"}
+	cron := v1.GVK{Group: "batch", Version: "v1", Kind: "CronJob"}
+	opaque := v1.GVK{Group: "example.test", Version: "v1", Kind: "Deployment"}
+	const endpoint = `{"name":"ENDPOINT","value":"$(DB_HOST):5432"}`
+	const trace = `{"name":"TRACE","valueFrom":{"fieldRef":{"fieldPath":"metadata.name"}}}`
+	const host = `{"name":"DB_HOST","value":"db"}`
+	const first = `[` + endpoint + `,` + trace + `,` + host + `]`
+	const edit = `[{"name":"DB_HOST"},{"name":"ENDPOINT"}]`
+	const ordered = `[` + host + `,` + trace + `,` + endpoint + `]`
+	for _, tc := range []struct {
+		name                      string
+		target                    v1.GVK
+		prefix, suffix            string
+		group, override, expected string
+	}{
+		{"containers env only", deployment, `{"template":{"spec":`, `}}`, "containers", edit, ordered},
+		{"init container env only", pod, "", "", "initContainers", edit, ordered},
+		{"ephemeral container env only", pod, "", "", "ephemeralContainers", edit, ordered},
+		{"CronJob template", cron, `{"jobTemplate":{"spec":{"template":{"spec":`, `}}}}`, "containers", edit, ordered},
+		{"single value edit", deployment, `{"template":{"spec":`, `}}`, "containers", `[{"name":"DB_HOST","value":"new"}]`, `[` + endpoint + `,` + trace + `,{"name":"DB_HOST","value":"new"}]`},
+		{"new variable before inherited member", deployment, `{"template":{"spec":`, `}}`, "containers", `[{"name":"NEW","value":"x"},{"name":"DB_HOST"}]`, `[` + endpoint + `,` + trace + `,{"name":"NEW","value":"x"},` + host + `]`},
+		{"custom resource keeps package order", opaque, `{"template":{"spec":`, `}}`, "containers", edit, first},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Include two containers with identical variable names. The sidecar is
+			// first, so an accidental positional lookup modifies the wrong one.
+			spec := func(containers string) []byte {
+				return []byte(tc.prefix + `{"` + tc.group + `":[` + containers + `]}` + tc.suffix)
+			}
+			sidecar := `{"name":"sidecar","env":` + first + `}`
+			main := func(env string) string { return `{"name":"main","env":` + env + `}` }
+			base := &v1.MiddlewareBaseline{Spec: v1.MiddlewareBaselineSpec{GVK: tc.target, Parameters: runtime.RawExtension{Raw: spec(sidecar + "," + main(first))}}}
+			mid := &v1.Middleware{Spec: v1.MiddlewareSpec{Parameters: runtime.RawExtension{Raw: spec(main(tc.override))}}}
+			if err := mergeMiddlewareParameters(t.Context(), nil, base, mid); err != nil {
+				t.Fatal(err)
+			}
+			var actual, want any
+			if err := json.Unmarshal(mid.Spec.Parameters.Raw, &actual); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(spec(sidecar+","+main(tc.expected)), &want); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(actual, want) {
+				t.Fatalf("got %s, want %s", mid.Spec.Parameters.Raw, spec(sidecar+","+main(tc.expected)))
+			}
+		})
+	}
+}
+
+func TestMIDRejectsAmbiguousEnvOrder(t *testing.T) {
+	base := &v1.MiddlewareBaseline{Spec: v1.MiddlewareBaselineSpec{GVK: v1.GVK{Version: "v1", Kind: "Pod"}, Parameters: runtime.RawExtension{Raw: []byte(`{"containers":[{"name":"main","env":[{"name":"DB_HOST","value":"db"}]}]}`)}}}
+	mid := &v1.Middleware{Spec: v1.MiddlewareSpec{Parameters: runtime.RawExtension{Raw: []byte(`{"containers":[{"name":"main","env":[{"name":"DB_HOST"},{"name":"DB_HOST"}]}]}`)}}}
+	if err := mergeMiddlewareParameters(t.Context(), nil, base, mid); err == nil || !strings.Contains(err.Error(), `containers["main"].env`) {
+		t.Fatalf("expected duplicate env error for main, got %v", err)
+	}
+}

@@ -152,8 +152,8 @@ metrics:
   # -- ServiceMonitor for Prometheus auto-discovery (requires prometheus-operator)
   # -- 供 Prometheus 自动发现的 ServiceMonitor（需要 prometheus-operator）
   serviceMonitor:
-    # -- Enable ServiceMonitor creation
-    # -- 是否创建 ServiceMonitor
+    # -- Enable ServiceMonitor creation (requires metrics.enabled=true)
+    # -- 是否创建 ServiceMonitor（要求 metrics.enabled=true）
     enabled: false
     # -- Scrape interval
     # -- 抓取间隔

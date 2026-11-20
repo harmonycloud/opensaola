@@ -44,7 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-func hydrateDeleteContext(ctx context.Context, cli client.Client, m *v1.Middleware) error {
+func hydrateDeleteContext(ctx context.Context, cli client.Client, m *v1.Middleware) (*v1.MiddlewareBaseline, error) {
 	log.FromContext(ctx).Info("start hydrating Middleware delete context",
 		"name", m.Name,
 		"namespace", m.Namespace,
@@ -58,7 +58,7 @@ func hydrateDeleteContext(ctx context.Context, cli client.Client, m *v1.Middlewa
 
 	baseline, err := middlewarebaseline.Get(ctx, cli, m.Spec.Baseline, m.Labels[v1.LabelPackageName])
 	if err != nil {
-		return fmt.Errorf("get baseline error: %w", err)
+		return nil, fmt.Errorf("get baseline error: %w", err)
 	}
 
 	configurationsBefore := len(m.Spec.Configurations)
@@ -69,15 +69,15 @@ func hydrateDeleteContext(ctx context.Context, cli client.Client, m *v1.Middlewa
 	necessaryHydrated := false
 
 	if err = tools.StructMerge(&baseline.Spec.Configurations, &m.Spec.Configurations, tools.StructMergeArrayType); err != nil {
-		return fmt.Errorf("struct merge configurations error: %w", err)
+		return nil, fmt.Errorf("struct merge configurations error: %w", err)
 	}
 
 	if err = tools.StructMerge(&baseline.Labels, &m.Labels, tools.StructMergeMapType); err != nil {
-		return fmt.Errorf("struct merge labels error: %w", err)
+		return nil, fmt.Errorf("struct merge labels error: %w", err)
 	}
 
 	if err = tools.StructMerge(&baseline.Annotations, &m.Annotations, tools.StructMergeMapType); err != nil {
-		return fmt.Errorf("struct merge annotations error: %w", err)
+		return nil, fmt.Errorf("struct merge annotations error: %w", err)
 	}
 
 	if m.Spec.OperatorBaseline.Name == "" {
@@ -115,7 +115,7 @@ func hydrateDeleteContext(ctx context.Context, cli client.Client, m *v1.Middlewa
 		"annotationsHydrated", len(m.Annotations) > annotationsBefore,
 	)
 
-	return nil
+	return &baseline, nil
 }
 
 func HandleResource(ctx context.Context, cli client.Client, action consts.HandleAction, m *v1.Middleware) error {
@@ -130,9 +130,10 @@ func HandleResource(ctx context.Context, cli client.Client, action consts.Handle
 		)
 		return nil
 	}
-	// Delete path: do not rely on full template rendering (only need to locate name/namespace)
+	// Deleting the primary resource needs only its identity.
 	if action == consts.HandleActionDelete {
-		if err := hydrateDeleteContext(ctx, cli, m); err != nil {
+		baseline, err := hydrateDeleteContext(ctx, cli, m)
+		if err != nil {
 			return fmt.Errorf("hydrate delete context error: %w", err)
 		}
 		log.FromContext(ctx).Info("start executing Middleware delete cleanup",
@@ -145,8 +146,18 @@ func HandleResource(ctx context.Context, cli client.Client, action consts.Handle
 			"gvkName", m.Spec.OperatorBaseline.GvkName,
 			"deletionTimestamp", m.GetDeletionTimestamp(),
 		)
-		// Clean up extra resources (delete-only: prefer rendering metadata.name only; fall back to label-based list deletion on failure)
-		if err := handleExtraResource(ctx, cli, action, m); err != nil {
+		// A dynamic Configuration with no recorded target may need the same
+		// parameters that were available to its baseline reference on publication.
+		prepareParameters := func(ctx context.Context, values *tools.TemplateValues) error {
+			rendered := m.DeepCopy()
+			if err := mergeMiddlewareParameters(ctx, cli, baseline, rendered); err != nil {
+				return err
+			}
+			parameters, err := renderMiddlewareParameters(ctx, &rendered.Spec.Parameters, values)
+			values.Parameters = parameters
+			return err
+		}
+		if err := middlewareconfiguration.DeleteTemplateRenderedResources(ctx, cli, m, m, prepareParameters); err != nil {
 			return fmt.Errorf("build extra resource error: %w", err)
 		}
 		// Delete CR (delete-only: only need gvk + name + namespace)
@@ -223,19 +234,17 @@ func renderPrimaryCustomResource(ctx context.Context, cli client.Client, m *v1.M
 func handleExtraResource(ctx context.Context, cli client.Client, act consts.HandleAction, m *v1.Middleware) (err error) {
 	conditionBuildExtraResource := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeBuildExtraResource)
 	defer func() {
-		if act != consts.HandleActionDelete {
-			if err != nil {
-				log.FromContext(ctx).Error(err, "extra resource error", "action", act)
-				conditionBuildExtraResource.Failed(ctx, err.Error(), m.Generation)
-			} else {
-				log.FromContext(ctx).Info("extra resource finished", "action", act)
-				conditionBuildExtraResource.Success(ctx, m.Generation)
-			}
-			if updateErr := k8s.UpdateMiddlewareStatus(ctx, cli, m); updateErr != nil {
-				log.FromContext(ctx).Error(updateErr, "update middleware status error")
-				if err == nil {
-					err = updateErr
-				}
+		if err != nil {
+			log.FromContext(ctx).Error(err, "extra resource error", "action", act)
+			conditionBuildExtraResource.Failed(ctx, err.Error(), m.Generation)
+		} else {
+			log.FromContext(ctx).Info("extra resource finished", "action", act)
+			conditionBuildExtraResource.Success(ctx, m.Generation)
+		}
+		if updateErr := k8s.UpdateMiddlewareStatus(ctx, cli, m); updateErr != nil {
+			log.FromContext(ctx).Error(updateErr, "update middleware status error")
+			if err == nil {
+				err = updateErr
 			}
 		}
 	}()
@@ -243,28 +252,13 @@ func handleExtraResource(ctx context.Context, cli client.Client, act consts.Hand
 	var mcs []*v1.MiddlewareConfiguration
 
 	switch act {
-	case consts.HandleActionDelete:
-		// Delete path: skip full template rendering (avoid nil pointer in template body blocking cleanup)
-		log.FromContext(ctx).Info("Middleware delete path starting extra resources cleanup",
-			"name", m.Name,
-			"namespace", m.Namespace,
-			"packageName", m.GetLabels()[v1.LabelPackageName],
-			"configurationsCount", len(m.Spec.Configurations),
-		)
-		return middlewareconfiguration.DeleteTemplateRenderedResources(ctx, cli, m, m)
-
 	case consts.HandleActionPublish, consts.HandleActionUpdate:
 		mcs, err = middlewareconfiguration.GetTemplateParsedMiddlewareConfigurations(ctx, cli, act, m)
 		if err != nil {
 			return err
 		}
-		var inventory []v1.RenderedConfigurationResource
-		inventory, err = middlewareconfiguration.ReconcileRenderedConfigurationResources(ctx, cli, m, act, mcs, m.Status.RenderedConfigurationResources)
-		if err != nil {
-			return err
-		}
-		m.Status.RenderedConfigurationResources = inventory
-		m.Status.RenderedConfigurationResourcesGeneration = m.Generation
+		_, err = middlewareconfiguration.ReconcileRenderedConfigurationResources(ctx, cli, m, act, mcs)
+		return err
 	}
 
 	return nil

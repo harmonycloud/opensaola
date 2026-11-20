@@ -29,6 +29,7 @@ import (
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/controller"
 	"github.com/harmonycloud/opensaola/internal/k8s"
+	"github.com/harmonycloud/opensaola/internal/k8s/kubeclient"
 	"github.com/harmonycloud/opensaola/internal/resource"
 	"github.com/harmonycloud/opensaola/internal/resource/logger"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
@@ -204,7 +205,8 @@ func main() {
 	)
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme: scheme,
+		Scheme:         scheme,
+		MapperProvider: kubeclient.NewManagerRESTMapper,
 		// Metrics HTTP server exposes controller-runtime built-in metrics on metricsAddr over plain HTTP.
 		// Metrics HTTP 服务器在 metricsAddr 上以明文 HTTP 暴露 controller-runtime 内置指标。
 		Metrics:                metricsserver.Options{BindAddress: metricsAddr},
@@ -274,6 +276,10 @@ func main() {
 		os.Exit(1)
 	}
 	k8s.ConfigureResourceIntents(intentSchemas)
+	if err := mgr.Add(intentSchemas); err != nil {
+		setupLog.Error(err, "unable to register OpenAPI schema preload")
+		os.Exit(1)
+	}
 
 	if err = (&controller.MiddlewareOperatorBaselineReconciler{
 		Client:   mgr.GetClient(),

@@ -357,7 +357,7 @@ func TestDeleteTemplateRenderedResourcesKeepsOrphanResource(t *testing.T) {
 		},
 	}
 	cli := orphanTestClient(t, owner, cfg, existing)
-	if err := DeleteTemplateRenderedResources(context.Background(), cli, owner, owner); err != nil {
+	if err := DeleteTemplateRenderedResources(context.Background(), cli, owner, owner, nil); err != nil {
 		t.Fatalf("delete template rendered resources: %v", err)
 	}
 	cm := &corev1.ConfigMap{}
@@ -404,7 +404,7 @@ func TestDeleteTemplateRenderedResourcePolicies(t *testing.T) {
 					Name: name, Namespace: "mv1", Labels: map[string]string{v1.LabelApp: owner.Name}, Annotations: annotations,
 				}}
 				cli := orphanTestClient(t, owner, cfg, existing)
-				if err := DeleteTemplateRenderedResources(context.Background(), cli, owner, owner); err != nil {
+				if err := DeleteTemplateRenderedResources(context.Background(), cli, owner, owner, nil); err != nil {
 					t.Fatal(err)
 				}
 				err := cli.Get(context.Background(), client.ObjectKeyFromObject(existing), &corev1.ConfigMap{})

@@ -38,6 +38,9 @@ type ManagedResourceWriter struct {
 	Client        client.Client
 	Reader        client.Reader
 	IntentSchemas IntentSchemaResolver
+	// BeforeConfigurationWrite persists the lifecycle checkpoint for the exact
+	// live object used by this attempt. A nil target denotes a create.
+	BeforeConfigurationWrite func(*unstructured.Unstructured) error
 }
 
 // ConfigureResourceIntents installs the required schema resolver for mutable resources.
@@ -179,6 +182,32 @@ func cleanApplyObject(desired *unstructured.Unstructured) *unstructured.Unstruct
 	return result
 }
 
+// A create with a pending lifecycle checkpoint has a unique Update manager.
+// Kubernetes records it on the accepted POST; copying labels and annotations
+// to a new object does not reproduce this receipt.
+func configurationCreateManager(id string) string {
+	return v1.FieldOwner + "-create-" + id
+}
+
+func (w *ManagedResourceWriter) createFieldOwner(target *unstructured.Unstructured) client.FieldOwner {
+	if id := target.GetAnnotations()[v1.AnnotationConfigurationWriteID]; w.BeforeConfigurationWrite != nil && id != "" {
+		return client.FieldOwner(configurationCreateManager(id))
+	}
+	return client.FieldOwner(v1.FieldOwner)
+}
+
+func HasConfigurationCreateReceipt(live *unstructured.Unstructured, id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, entry := range live.GetManagedFields() {
+		if entry.Subresource == "" && entry.Operation == metav1.ManagedFieldsOperationUpdate && entry.Manager == configurationCreateManager(id) {
+			return true
+		}
+	}
+	return false
+}
+
 // createMutableResource identifies this particular POST even when its response
 // is lost. A direct GET can recover explicit declarations, never POST defaults.
 // If a timeout preceded the commit, fail and let normal reconciliation retry.
@@ -190,7 +219,7 @@ func (w *ManagedResourceWriter) createMutableResource(ctx context.Context, targe
 	}
 	annotations[AnnotationResourceIntentOperation] = receipt
 	target.SetAnnotations(annotations)
-	if err = w.Client.Create(ctx, target, client.FieldOwner(v1.FieldOwner)); err == nil {
+	if err = w.Client.Create(ctx, target, w.createFieldOwner(target)); err == nil {
 		return true, nil
 	}
 	var status apierrors.APIStatus
@@ -244,6 +273,11 @@ func (w *ManagedResourceWriter) ReconcileWithUID(ctx context.Context, owner clie
 			if verifyErr := verifyObservedSpecForWrite(fresh, observed, configuration); verifyErr != nil {
 				return "", verifyErr
 			}
+			if w.BeforeConfigurationWrite != nil {
+				if err := w.BeforeConfigurationWrite(observed); err != nil {
+					return "", err
+				}
+			}
 		}
 		if apierrors.IsNotFound(err) {
 			intent := cleanApplyObject(desired)
@@ -263,7 +297,7 @@ func (w *ManagedResourceWriter) ReconcileWithUID(ctx context.Context, owner clie
 			if mutable {
 				createdResponse, err = w.createMutableResource(ctx, intent)
 			} else {
-				err = w.Client.Create(ctx, intent, client.FieldOwner(v1.FieldOwner))
+				err = w.Client.Create(ctx, intent, w.createFieldOwner(intent))
 			}
 			if apierrors.IsAlreadyExists(err) {
 				continue

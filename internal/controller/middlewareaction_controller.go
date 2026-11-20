@@ -18,10 +18,6 @@ package controller
 
 import (
 	"context"
-	"fmt"
-
-	"github.com/harmonycloud/opensaola/internal/service/middlewareactionbaseline"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/concurrency"
@@ -49,7 +45,7 @@ type MiddlewareActionReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
+func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	ctx = withReconcileLogger(ctx, "middlewareaction", "MiddlewareAction", req)
 
 	log.FromContext(ctx).V(1).Info("start processing MiddlewareAction", "name", req.NamespacedName)
@@ -60,50 +56,14 @@ func (r *MiddlewareActionReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if middlewareAction.Status.State != "" {
+	if middlewareAction.Status.State == v1.StateAvailable || middlewareAction.Status.State == v1.StateUnavailable {
 		return ctrl.Result{}, nil
 	}
-
-	defer func() {
-		middlewareAction.Status.State = v1.StateAvailable
-		middlewareAction.Status.Reason = ""
-		for _, condition := range middlewareAction.Status.Conditions {
-			if condition.Status == metav1.ConditionFalse {
-				middlewareAction.Status.State = v1.StateUnavailable
-				middlewareAction.Status.Reason = metav1.StatusReason(fmt.Sprintf("%s,%s", condition.Type, condition.Message))
-				break
-			} else if condition.Status == metav1.ConditionUnknown {
-				middlewareAction.Status.State = v1.StateUnavailable
-				middlewareAction.Status.Reason = metav1.StatusReason(fmt.Sprintf("%s,%s", condition.Type, condition.Message))
-				break
-			}
-		}
-
-		err = k8s.UpdateMiddlewareActionStatus(ctx, r.Client, middlewareAction)
-		if err != nil {
-			log.FromContext(ctx).Error(err, "failed to update MiddlewareAction status", "namespace", req.Namespace, "name", req.Name)
-		}
-	}()
-
-	if err = middlewareaction.Check(ctx, r.Client, middlewareAction); err != nil {
-		r.Recorder.Event(middlewareAction, "Warning", "ValidationFailed", err.Error())
-		log.FromContext(ctx).Error(err, "failed to validate MiddlewareAction", "namespace", req.Namespace, "name", req.Name)
+	if err := middlewareaction.Execute(ctx, r.Client, middlewareAction); err != nil {
+		r.Recorder.Event(middlewareAction, "Warning", "ActionFailed", err.Error())
 		return ctrl.Result{}, err
 	}
-
-	// Get the operatorbaseline from the package
-	middlewareActionBaseline, err := middlewareactionbaseline.Get(ctx, r.Client, middlewareAction.Spec.Baseline, middlewareAction.Labels[v1.LabelPackageName])
-	if err != nil {
-		log.FromContext(ctx).Error(err, "failed to get MiddlewareActionBaseline for MiddlewareAction", "namespace", req.Namespace, "name", req.Name)
-		return ctrl.Result{}, err
-	}
-
-	if middlewareActionBaseline.Spec.BaselineType != v1.WorkflowPreAction {
-		if err = middlewareaction.Execute(ctx, r.Client, middlewareAction); err != nil {
-			r.Recorder.Event(middlewareAction, "Warning", "ExecutionFailed", err.Error())
-			log.FromContext(ctx).Error(err, "failed to execute MiddlewareAction", "namespace", req.Namespace, "name", req.Name)
-			return ctrl.Result{}, err
-		}
+	if middlewareAction.Status.State == v1.StateAvailable {
 		r.Recorder.Event(middlewareAction, "Normal", "Executed", "Action executed successfully")
 	}
 

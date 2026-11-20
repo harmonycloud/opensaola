@@ -52,6 +52,7 @@ func TestUpdateMiddlewareStatusPreservesCustomResources(t *testing.T) {
 				Name:              "old-config",
 			}},
 			RenderedConfigurationResourcesGeneration: 2,
+			PendingConfigurationWrite:                &v1.PendingConfigurationWrite{ID: "started"},
 		},
 	}
 	desired := live.DeepCopy()
@@ -64,7 +65,9 @@ func TestUpdateMiddlewareStatusPreservesCustomResources(t *testing.T) {
 		Kind:              "ConfigMap",
 		Name:              "new-config",
 	}}
-	desired.Status.RenderedConfigurationResourcesGeneration = 3
+	desired.Status.PendingConfigurationWrite = nil
+	// Status can be written by another handler within the same owner generation.
+	desired.Status.RenderedConfigurationResourcesGeneration = 2
 
 	cli := fake.NewClientBuilder().
 		WithScheme(scheme).
@@ -92,11 +95,14 @@ func TestUpdateMiddlewareStatusPreservesCustomResources(t *testing.T) {
 	if got := stored.Status.Reason; got != "controller reconciliation completed" {
 		t.Fatalf("reason = %q, want controller reconciliation completed", got)
 	}
-	if got := stored.Status.RenderedConfigurationResourcesGeneration; got != 3 {
-		t.Fatalf("renderedConfigurationResourcesGeneration = %d, want 3", got)
+	if got := stored.Status.RenderedConfigurationResourcesGeneration; got != 2 {
+		t.Fatalf("renderedConfigurationResourcesGeneration = %d, want 2", got)
 	}
-	if got := stored.Status.RenderedConfigurationResources; len(got) != 1 || got[0].ConfigurationName != "new-config" {
-		t.Fatalf("renderedConfigurationResources = %#v, want new-config inventory", got)
+	if got := stored.Status.RenderedConfigurationResources; len(got) != 1 || got[0].ConfigurationName != "old-config" {
+		t.Fatalf("renderedConfigurationResources = %#v, want persisted inventory", got)
+	}
+	if got := stored.Status.PendingConfigurationWrite; got == nil || got.ID != "started" {
+		t.Fatalf("lost pending Configuration write: %#v", got)
 	}
 }
 
@@ -287,5 +293,37 @@ func TestCompleteMiddlewareReconcileResumeRejectsPolicyChange(t *testing.T) {
 	}
 	if stored.Spec.ReconcileOverrides != nil {
 		t.Fatalf("override was persisted despite policy mismatch: %#v", stored.Spec.ReconcileOverrides)
+	}
+}
+
+func TestControllerStatusCannotMarkReplacementProcessed(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	meta := metav1.ObjectMeta{Name: "reused", Namespace: "ns", Generation: 1, UID: "replacement"}
+	mid := &v1.Middleware{ObjectMeta: meta}
+	mo := &v1.MiddlewareOperator{ObjectMeta: meta}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(mid, mo).WithObjects(mid, mo).Build()
+	staleMid := mid.DeepCopy()
+	staleMid.UID = "old-owner"
+	staleMid.Status.ObservedGeneration = 8
+	staleMO := mo.DeepCopy()
+	staleMO.UID = "old-owner"
+	staleMO.Status.ObservedGeneration = 8
+	if err := UpdateMiddlewareStatus(t.Context(), c, staleMid); err == nil {
+		t.Fatal("stale Middleware status accepted")
+	}
+	if err := UpdateMiddlewareOperatorStatus(t.Context(), c, staleMO); err == nil {
+		t.Fatal("stale MiddlewareOperator status accepted")
+	}
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(mid), mid); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(mo), mo); err != nil {
+		t.Fatal(err)
+	}
+	if mid.Status.ObservedGeneration != 0 || mo.Status.ObservedGeneration != 0 {
+		t.Fatal("replacement was marked processed")
 	}
 }

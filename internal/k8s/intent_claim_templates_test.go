@@ -95,12 +95,12 @@ func TestStatefulSetClaimTemplateDeclarations(t *testing.T) {
 		{"equivalent capacity", []string{"spec", "resources", "requests", "storage"}, "5120Mi", true},
 		{"class changed", []string{"spec", "storageClassName"}, "other", false},
 		{"access mode changed", []string{"spec", "accessModes"}, []any{"ReadWriteMany"}, false},
-		{"foreign annotation", []string{"metadata", "annotations"}, map[string]any{"external": "true"}, false},
-		{"unexpected volume mode", []string{"spec", "volumeMode"}, "Block", false},
-		{"unexpected phase", []string{"status", "phase"}, "Bound", false},
-		{"unexpected status field", []string{"status", "accessModes"}, []any{"ReadWriteOnce"}, false},
-		{"unexpected kind", []string{"kind"}, "Pod", false},
-		{"unexpected version", []string{"apiVersion"}, "v2", false},
+		{"foreign annotation", []string{"metadata", "annotations"}, map[string]any{"external": "true"}, true},
+		{"undeclared volume mode", []string{"spec", "volumeMode"}, "Block", true},
+		{"undeclared phase", []string{"status", "phase"}, "Bound", true},
+		{"undeclared status field", []string{"status", "accessModes"}, []any{"ReadWriteOnce"}, true},
+		{"undeclared kind", []string{"kind"}, "Pod", true},
+		{"undeclared version", []string{"apiVersion"}, "v2", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := runtime.DeepCopyJSON(full)
@@ -113,12 +113,12 @@ func TestStatefulSetClaimTemplateDeclarations(t *testing.T) {
 		unstructured.RemoveNestedField(observed, "spec", "resources", "requests", "storage")
 		check(t, makeObject(claim), makeObject(observed), false)
 	})
-	t.Run("custom StatefulSet retains its own atomic semantics", func(t *testing.T) {
+	t.Run("schema-free custom resource projects its own declared fields", func(t *testing.T) {
 		desired, observed := makeObject(claim), makeObject(full)
 		desired.SetAPIVersion("example.test/v1")
 		observed.SetAPIVersion("example.test/v1")
-		if err := ValidateDeclaredResourceIntent(managedfields.NewDeducedTypeConverter(), desired, observed); err == nil {
-			t.Fatal("PVC defaults applied to an unrelated custom resource")
+		if err := ValidateDeclaredResourceIntent(managedfields.NewDeducedTypeConverter(), desired, observed); err != nil {
+			t.Fatalf("extra receipt fields should also be accepted for a CR: %v", err)
 		}
 	})
 	t.Run("explicit block cannot become filesystem", func(t *testing.T) {

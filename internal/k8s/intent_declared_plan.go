@@ -78,6 +78,12 @@ func decodeFieldElement(segment string) (fieldpath.PathElement, error) {
 		name := segment[2:]
 		return fieldpath.PathElement{FieldName: &name}, nil
 	}
+	if strings.HasPrefix(segment, "i:") {
+		i, err := strconv.Atoi(segment[2:])
+		if err == nil && i >= 0 && strconv.Itoa(i) == segment[2:] {
+			return fieldpath.PathElement{Index: &i}, nil
+		}
+	}
 	if strings.HasPrefix(segment, "v:") || strings.HasPrefix(segment, "k:") {
 		var item any
 		if strict, err := kjson.UnmarshalStrict([]byte(segment[2:]), &item); err == nil && len(strict) == 0 {
@@ -107,6 +113,9 @@ func decodeFieldSegments(segments []string) (fieldpath.Path, error) {
 		pe, err := decodeFieldElement(s)
 		if err != nil {
 			return nil, err
+		}
+		if i == 0 && pe.FieldName == nil {
+			return nil, fmt.Errorf("stored field plan must start with an object field")
 		}
 		path[i] = pe
 	}
@@ -233,6 +242,13 @@ func (p *DeclaredIntentMergeResult) Validate(converter managedfields.TypeConvert
 			if _, err := lookup.indexList(v.value, atom, opaque, keys, a.path); err != nil {
 				return err
 			}
+			if merger.ordersNamedMembers(a.path) {
+				wanted, _ := a.wanted.([]any)
+				actual, _ := v.value.([]any)
+				if err := checkDeclaredOrder(a.path, wanted, actual); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return p.validateDeletions(&lookup, scope, root)
@@ -250,31 +266,54 @@ func (a declaredFieldAssertion) satisfied(m *intentDeclaredMerger, v intentDecla
 		_, ok := v.value.(map[string]any)
 		return ok
 	case assertList:
-		actual, ok := v.value.([]any)
-		if !ok || !m.ordersInitContainers(a.path) {
-			return ok
-		}
-		// Project the API result onto the declared members. Admission can add
-		// independent init containers but cannot reverse two declared steps.
-		wanted, ok := a.wanted.([]any)
-		if !ok {
-			return false
-		}
-		next := 0
-		for _, item := range actual {
-			if next == len(wanted) {
-				break
-			}
-			current, ok := item.(map[string]any)
-			expected, valid := wanted[next].(map[string]any)
-			if ok && valid && current["name"] == expected["name"] {
-				next++
-			}
-		}
-		return next == len(wanted)
+		_, ok := v.value.([]any)
+		return ok || m.acceptsNullList(a.wanted, v.value, a.path)
 	default:
 		return m.matchesDeclaredValue(a.wanted, v.value, a.typ, a.path)
 	}
+}
+
+// Compare only the declared names. An injected member between two declared
+// members is valid, and neither its name nor any variable value is diagnostic data.
+func checkDeclaredOrder(path fieldpath.Path, wanted, actual []any) error {
+	if len(wanted) < 2 {
+		return nil // membership and payload are checked by the child assertions
+	}
+	next := 0
+	for _, item := range actual {
+		if declaredMemberName(item) == declaredMemberName(wanted[next]) {
+			next++
+			if next == len(wanted) {
+				return nil
+			}
+		}
+	}
+	location := safeDeclaredPath(path)
+	if *path[len(path)-1].FieldName != "env" {
+		return fmt.Errorf("resource did not converge to its declared fields at %s", location)
+	}
+	expected := make([]string, 0, len(wanted))
+	declared := make(map[string]bool, len(wanted))
+	for _, item := range wanted {
+		name := declaredMemberName(item)
+		expected = append(expected, name)
+		declared[name] = true
+	}
+	observed := make([]string, 0, len(wanted))
+	for _, item := range actual {
+		if name := declaredMemberName(item); declared[name] {
+			observed = append(observed, name)
+		}
+	}
+	// This path was type-checked as a native container's env. Report only its
+	// name key; unrelated associative paths continue to use redacted selectors.
+	if key := path[len(path)-2].Key; key != nil && len(*key) == 1 {
+		field := (*key)[0]
+		if field.Name == "name" && field.Value.IsString() {
+			location = fmt.Sprintf("%s[name=%q].env", safeDeclaredPath(path[:len(path)-2]), field.Value.AsString())
+		}
+	}
+	return fmt.Errorf("resource did not converge to its declared fields at %s: expected order %q, observed %q", location, expected, observed)
 }
 
 func (m *intentDeclaredMerger) nativeFieldOmittable(path fieldpath.Path, val any) bool {

@@ -26,10 +26,7 @@ import (
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 )
 
 // migrateLegacyConfigurationReferences detaches retained resources of instances
@@ -58,18 +55,25 @@ func detachLegacyConfigurationReferences(ctx context.Context, cli client.Client,
 	if strings.TrimSpace(mcf.Spec.Template) == "" {
 		return nil
 	}
-	var head metav1.TypeMeta
-	// Already-valid YAML and inline JSON expose the kind directly. A templated
-	// body may not parse as YAML until rendered, even when its GVK is literal.
-	if err := yaml.Unmarshal([]byte(mcf.Spec.Template), &head); err != nil || head.APIVersion == "" || head.Kind == "" {
-		version, kind, _, _ := deleteTemplateLineValues(mcf.Spec.Template)
-		head.APIVersion, head.Kind = normalizeRenderedName(version), normalizeRenderedName(kind)
+	id, err := parseDeleteType(mcf.Spec.Template)
+	if err != nil {
+		return err
 	}
-	apiVersion, kind := head.APIVersion, head.Kind
-	if apiVersion == "" || kind == "" || strings.Contains(apiVersion+kind, "{{") {
+	if id.APIVersion.Dynamic() || id.Kind.Dynamic() {
 		return fmt.Errorf("no static apiVersion/kind for legacy ownership lookup")
 	}
-	gvk := schema.FromAPIVersionAndKind(apiVersion, kind)
+	version, err := id.APIVersion.Render(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("legacy apiVersion: %w", err)
+	}
+	kind, err := id.Kind.Render(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("legacy kind: %w", err)
+	}
+	gvk, err := deleteResourceGVK(version, kind)
+	if err != nil {
+		return err
+	}
 	mapping, err := cli.RESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version)
 	if meta.IsNoMatchError(err) || k8s.IsCRDNotInstalled(err) {
 		return nil

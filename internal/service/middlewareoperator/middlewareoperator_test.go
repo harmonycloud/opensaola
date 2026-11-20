@@ -18,12 +18,17 @@ package middlewareoperator
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	v1 "github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 func TestHandleResourceDeleteNoOperatorReturnsNil(t *testing.T) {
@@ -59,5 +64,30 @@ func TestHandleResourceSuspendedSkipsChildWrites(t *testing.T) {
 
 	if err := CompareDeployment(context.Background(), nil, &appsv1.Deployment{}, mo); err != nil {
 		t.Fatalf("CompareDeployment() error = %v, want suspended no-op", err)
+	}
+}
+
+func TestPublishRetriesFailureToSaveConfigurationCondition(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := v1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	mo := &v1.MiddlewareOperator{ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "ns", UID: "owner", Generation: 2}}
+	base := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(mo).WithObjects(mo).Build()
+	statusErr := errors.New("status write interrupted")
+	cli := interceptor.NewClient(base, interceptor.Funcs{SubResourceUpdate: func(context.Context, client.Client, string, client.Object, ...client.SubResourceUpdateOption) error {
+		return statusErr
+	}})
+	if err := handleExtraResource(t.Context(), cli, consts.HandleActionPublish, mo); !errors.Is(err, statusErr) {
+		t.Fatalf("expected status error for retry, got %v", err)
+	}
+	if err := base.Get(t.Context(), client.ObjectKeyFromObject(mo), mo); err != nil {
+		t.Fatal(err)
+	}
+	if mo.Status.RenderedConfigurationResourcesGeneration != 2 || mo.Status.ObservedGeneration != 0 {
+		t.Fatalf("unexpected status after interrupted publication: %#v", mo.Status)
+	}
+	if err := handleExtraResource(t.Context(), base, consts.HandleActionPublish, mo); err != nil {
+		t.Fatal(err)
 	}
 }

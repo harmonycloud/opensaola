@@ -58,7 +58,7 @@ func CreateMiddlewarePackage(ctx context.Context, cli client.Client, m *v1.Middl
 
 // DeleteMiddlewarePackage deletes a MiddlewarePackage.
 func DeleteMiddlewarePackage(ctx context.Context, cli client.Client, m *v1.MiddlewarePackage) error {
-	return cli.Delete(ctx, m)
+	return cli.Delete(ctx, m, client.Preconditions{UID: &m.UID, ResourceVersion: &m.ResourceVersion})
 }
 
 // UpdateMiddlewarePackage updates a MiddlewarePackage.

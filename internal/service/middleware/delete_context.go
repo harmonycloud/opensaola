@@ -80,7 +80,8 @@ func CanSkipDeleteCleanup(m *v1.Middleware) bool {
 	if m == nil {
 		return true
 	}
-	return !middlewareConditionIsTrue(m, v1.CondTypeBuildExtraResource) &&
+	return m.Status.PendingConfigurationWrite == nil && len(m.Status.RenderedConfigurationResources) == 0 &&
+		!middlewareConditionIsTrue(m, v1.CondTypeBuildExtraResource) &&
 		!middlewareConditionIsTrue(m, v1.CondTypeApplyCluster)
 }
 

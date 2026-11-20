@@ -59,7 +59,7 @@ func MergeDeclaredResourceIntent(converter managedfields.TypeConverter, before, 
 // deletions that could not be fulfilled. Callers must reject deletion conflicts
 // before preparing a record and validate DeletionChecks against server replies.
 func PlanDeclaredResourceIntent(converter managedfields.TypeConverter, before, live, effectiveDesired, rawDesired *unstructured.Unstructured, protected *fieldpath.Set) (*DeclaredIntentMergeResult, error) {
-	return planDeclaredResourceIntent(converter, before, live, effectiveDesired, rawDesired, protected, false)
+	return planDeclaredResourceIntent(converter, before, live, effectiveDesired, rawDesired, protected, declaredUpdate)
 }
 
 // OverlayActionFields uses API list identities for a one-off edit. Within an
@@ -69,14 +69,22 @@ func OverlayActionFields(converter managedfields.TypeConverter, live, edit *unst
 	if err != nil {
 		return nil, err
 	}
-	plan, err := planDeclaredResourceIntent(converter, nil, live, edit, edit, nil, true)
+	plan, err := planDeclaredResourceIntent(converter, nil, live, edit, edit, nil, actionOverlay)
 	if err != nil {
 		return nil, err
 	}
 	return plan.Object, nil
 }
 
-func planDeclaredResourceIntent(converter managedfields.TypeConverter, before, live, effectiveDesired, rawDesired *unstructured.Unstructured, protected *fieldpath.Set, actionOverlay bool) (*DeclaredIntentMergeResult, error) {
+type declaredMergeMode int
+
+const (
+	declaredUpdate declaredMergeMode = iota
+	actionOverlay
+	retryAfterAtomicRelease
+)
+
+func planDeclaredResourceIntent(converter managedfields.TypeConverter, before, live, effectiveDesired, rawDesired *unstructured.Unstructured, protected *fieldpath.Set, mode declaredMergeMode) (*DeclaredIntentMergeResult, error) {
 	if converter == nil || live == nil || effectiveDesired == nil || rawDesired == nil {
 		return nil, fmt.Errorf("declared intent merge requires schema, live, effective and raw desired objects")
 	}
@@ -105,7 +113,7 @@ func planDeclaredResourceIntent(converter managedfields.TypeConverter, before, l
 		}
 		objects[i] = intentDeclaredValue{value: scoped.Object, present: true}
 	}
-	merger := intentDeclaredMerger{actionOverlay: actionOverlay, topology: topology, protected: protected, retained: map[string]struct{}{}, root: root, nativeType: declaredNativeType(live.GroupVersionKind())}
+	merger := intentDeclaredMerger{mode: mode, topology: topology, protected: protected, retained: map[string]struct{}{}, root: root, nativeType: declaredNativeType(live.GroupVersionKind())}
 	merged, err := merger.merge(objects[0], objects[1], objects[2], objects[3], intentDeclaredType{ref: root}, nil, false)
 	if err != nil {
 		return nil, err
@@ -119,7 +127,7 @@ func planDeclaredResourceIntent(converter managedfields.TypeConverter, before, l
 		return nil, fmt.Errorf("merged declarations do not match the resource schema")
 	}
 	restoreIntentSystemFields(result, live)
-	if declaredNativeObjectEquivalent(intentMergeScope(result), intentMergeScope(live)) {
+	if len(merger.atomicReleases) == 0 && declaredNativeObjectEquivalent(intentMergeScope(result), intentMergeScope(live)) {
 		// Avoid repeated patches for already satisfied native omitempty values.
 		// This is semantic equality after merging, never removal of raw intent.
 		result = live.DeepCopy()
@@ -129,7 +137,7 @@ func planDeclaredResourceIntent(converter managedfields.TypeConverter, before, l
 		paths = append(paths, path)
 	}
 	sort.Strings(paths)
-	return &DeclaredIntentMergeResult{Object: result, assertions: merger.assertions, namedEmptyLists: merger.namedEmptyLists, PreservedExternal: paths, BlockedDeletions: merger.blocked, DeletionChecks: compactDeclaredDeletionChecks(merger.checks)}, nil
+	return &DeclaredIntentMergeResult{Object: result, assertions: merger.assertions, namedEmptyLists: merger.namedEmptyLists, PreservedExternal: paths, BlockedDeletions: merger.blocked, DeletionChecks: compactDeclaredDeletionChecks(merger.checks), atomicReleases: merger.atomicReleases}, nil
 }
 
 // ValidateDeclaredResourceIntent checks declaration projection, not whole-object
@@ -157,7 +165,7 @@ type intentDeclaredType struct {
 }
 
 type intentDeclaredMerger struct {
-	actionOverlay   bool
+	mode            declaredMergeMode
 	topology        *schema.Schema
 	root            schema.TypeRef
 	assertions      []declaredFieldAssertion
@@ -168,6 +176,7 @@ type intentDeclaredMerger struct {
 	nativeType      reflect.Type
 	blocked         []DeclaredDeletionConflict
 	checks          []DeclaredDeletionCheck
+	atomicReleases  []DeclaredDeletionCheck
 }
 
 func (m *intentDeclaredMerger) resolve(typ intentDeclaredType, path fieldpath.Path) (schema.Atom, bool, error) {
@@ -208,14 +217,10 @@ func (m *intentDeclaredMerger) merge(b, l, d, raw intentDeclaredValue, typ inten
 	switch wanted := raw.value.(type) {
 	case map[string]any:
 		if !opaque && (atom.Map == nil || atom.Map.ElementRelationship == schema.Atomic) {
-			if current, ok := l.value.(map[string]any); m.actionOverlay && ok {
+			if current, ok := l.value.(map[string]any); m.mode == actionOverlay && ok {
 				return intentDeclaredValue{value: tools.MergeMap(runtime.DeepCopyJSON(current), runtime.DeepCopyJSON(wanted)), present: true}, nil
 			}
-			m.assert(path, typ, raw.value, assertValue)
-			if l.present && m.matchesDeclaredValue(raw.value, l.value, typ, path) {
-				return copyDeclaredValue(l), nil
-			}
-			return copyDeclaredValue(raw), nil
+			return m.mergeAtomic(b, l, raw, typ, path)
 		}
 		m.assert(path, typ, raw.value, assertObject)
 		return m.mergeMap(b, l, d, raw, atom, opaque, path)
@@ -241,16 +246,12 @@ func (m *intentDeclaredMerger) merge(b, l, d, raw intentDeclaredValue, typ inten
 			m.assert(path, typ, raw.value, assertList)
 			return m.mergeList(b, l, d, raw, atom, opaque, keys, path)
 		}
-		if current, ok := l.value.([]any); m.actionOverlay && ok {
+		if current, ok := l.value.([]any); m.mode == actionOverlay && ok {
 			// Both operands have been copied into the merge scope; the package
 			// overlay preserves an existing array for an empty edit.
 			return intentDeclaredValue{value: tools.MergeArray(current, wanted), present: true}, nil
 		}
-		m.assert(path, typ, raw.value, assertValue)
-		if l.present && m.matchesDeclaredValue(wanted, l.value, typ, path) {
-			return copyDeclaredValue(l), nil
-		}
-		return copyDeclaredValue(raw), nil
+		return m.mergeAtomic(b, l, raw, typ, path)
 	default:
 		m.assert(path, typ, raw.value, assertValue)
 		if l.present && declaredEqual(raw.value, l.value, typ.ref) {
@@ -258,6 +259,47 @@ func (m *intentDeclaredMerger) merge(b, l, d, raw intentDeclaredValue, typ inten
 		}
 		return copyDeclaredValue(raw), nil
 	}
+}
+
+// Atomic values are written as a whole. A satisfied projection can keep the live
+// value, unless it still contains a field withdrawn from the prior declaration.
+func (m *intentDeclaredMerger) mergeAtomic(before, live, wanted intentDeclaredValue, typ intentDeclaredType, path fieldpath.Path) (intentDeclaredValue, error) {
+	m.assert(path, typ, wanted.value, assertValue)
+	satisfied := live.present && m.matchesDeclaredValue(wanted.value, live.value, typ, path)
+	if m.mode == retryAfterAtomicRelease && satisfied {
+		// The same declaration was already submitted. A retry for another
+		// field must preserve the accepted value, including its supplements.
+		return copyDeclaredValue(live), nil
+	}
+	needsRemoval := false
+	if before.present && !reflect.DeepEqual(before.value, wanted.value) {
+		lookup := declaredDeletionLookup{merger: m, lists: map[string]map[string]intentDeclaredMember{}}
+		err := m.walkAtomicWithdrawals(before.value, wanted.value, typ, path, func(old any, child intentDeclaredType, removed fieldpath.Path) error {
+			current, _, err := lookup.find(live.value, typ, removed[len(path):])
+			if err != nil {
+				return err
+			}
+			if current.present {
+				needsRemoval = true
+				// Admission may have filled this key in the preceding write.
+				wasReleased := m.mode == retryAfterAtomicRelease && !m.deletionProtected(removed)
+				if !wasReleased && !m.canRemoveLeaf(old, current.value, child, removed) {
+					return nil
+				}
+			}
+			// Submitting the omission releases this key inside a still-declared
+			// atomic unit. Only recovery without a receipt needs proof of absence.
+			m.atomicReleases = append(m.atomicReleases, declaredDeletionCheck(removed))
+			return nil
+		})
+		if err != nil {
+			return intentDeclaredValue{}, err
+		}
+	}
+	if !needsRemoval && satisfied {
+		return copyDeclaredValue(live), nil
+	}
+	return copyDeclaredValue(wanted), nil
 }
 
 func (m *intentDeclaredMerger) remove(b, l intentDeclaredValue, typ intentDeclaredType, path fieldpath.Path, member bool) (intentDeclaredValue, error) {
@@ -340,16 +382,23 @@ func (m *intentDeclaredMerger) remove(b, l intentDeclaredValue, typ intentDeclar
 }
 
 func (m *intentDeclaredMerger) removeLeaf(b, l intentDeclaredValue, typ intentDeclaredType, path fieldpath.Path) intentDeclaredValue {
-	if m.deletionProtected(path) {
-		m.blockDeletion(path, "field is protected by another Apply manager")
-		return copyDeclaredValue(l)
-	}
-	if !m.equivalent(b.value, l.value, typ, path) {
-		m.blockDeletion(path, "historically declared value was changed externally")
+	if !m.canRemoveLeaf(b.value, l.value, typ, path) {
 		return copyDeclaredValue(l)
 	}
 	m.checkDeletion(path)
 	return intentDeclaredValue{}
+}
+
+func (m *intentDeclaredMerger) canRemoveLeaf(before, live any, typ intentDeclaredType, path fieldpath.Path) bool {
+	if m.deletionProtected(path) {
+		m.blockDeletion(path, "field is protected by another Apply manager")
+		return false
+	}
+	if !m.equivalent(before, live, typ, path) {
+		m.blockDeletion(path, "historically declared value was changed externally")
+		return false
+	}
+	return true
 }
 
 func (m *intentDeclaredMerger) removeMember(b, l intentDeclaredValue, typ intentDeclaredType, atom schema.Atom, opaque bool, path fieldpath.Path) (intentDeclaredValue, error) {
@@ -584,11 +633,14 @@ func (m *intentDeclaredMerger) mergeList(b, l, d, raw intentDeclaredValue, atom 
 			out = append(out, merged.value)
 		}
 	}
-	if m.ordersInitContainers(path) && raw.present {
+	if raw.present && m.ordersNamedMembers(path) {
 		wanted, _ := raw.value.([]any)
-		if err := OrderDeclaredInitContainers(out, wanted); err != nil {
-			return intentDeclaredValue{}, err
+		if err := OrderDeclaredNamedMembers(out, wanted); err != nil {
+			return intentDeclaredValue{}, fmt.Errorf("%s: %w", safeDeclaredPath(path), err)
 		}
+	}
+	if l.present && m.acceptsNullList(out, l.value, path) {
+		return l, nil
 	}
 	return intentDeclaredValue{value: out, present: true}, nil
 }
@@ -635,23 +687,25 @@ func declaredEqual(a, b any, ref schema.TypeRef) bool {
 }
 
 // A historical value authorizes deletion only under the original symmetric
-// equality rules. A declaration can additionally accept a versioned API default
-// in the response, and only in the submitted -> observed direction.
+// equality rules. Affirmative validation projects only submitted object keys.
 func (m *intentDeclaredMerger) equivalent(a, b any, typ intentDeclaredType, path fieldpath.Path) bool {
 	return (declaredValueComparison{intentDeclaredMerger: m}).equal(a, b, typ, path)
 }
 
 func (m *intentDeclaredMerger) matchesDeclaredValue(wanted, observed any, typ intentDeclaredType, path fieldpath.Path) bool {
-	return (declaredValueComparison{intentDeclaredMerger: m, allowAdmissionDefaults: true}).equal(wanted, observed, typ, path)
+	return (declaredValueComparison{intentDeclaredMerger: m, projectDeclaration: true}).equal(wanted, observed, typ, path)
 }
 
 type declaredValueComparison struct {
 	*intentDeclaredMerger
-	allowAdmissionDefaults bool
+	projectDeclaration bool
 }
 
 func (m declaredValueComparison) equal(a, b any, typ intentDeclaredType, path fieldpath.Path) bool {
 	if declaredEqual(a, b, typ.ref) {
+		return true
+	}
+	if m.projectDeclaration && m.acceptsNullList(a, b, path) {
 		return true
 	}
 	if native := declaredNativePathType(m.nativeType, path); native != nil {
@@ -683,7 +737,7 @@ func (m declaredValueComparison) equalMap(wanted, observed map[string]any, atom 
 		childPath := appendDeclaredPath(path, fieldpath.PathElement{FieldName: &key})
 		actual, found := observed[key]
 		if !found {
-			if m.allowAdmissionDefaults && m.nativeFieldOmittable(childPath, expected) {
+			if m.projectDeclaration && m.nativeFieldOmittable(childPath, expected) {
 				continue
 			}
 			if child.defaultValue == nil {
@@ -695,6 +749,9 @@ func (m declaredValueComparison) equalMap(wanted, observed map[string]any, atom 
 			return false
 		}
 	}
+	if m.projectDeclaration {
+		return true
+	}
 	for key, actual := range observed {
 		if _, found := wanted[key]; found {
 			continue
@@ -703,11 +760,6 @@ func (m declaredValueComparison) equalMap(wanted, observed map[string]any, atom 
 		childPath := appendDeclaredPath(path, fieldpath.PathElement{FieldName: &key})
 		if child.defaultValue != nil && m.equal(child.defaultValue, actual, child, childPath) {
 			continue
-		}
-		if m.allowAdmissionDefaults {
-			if expected, ok := nativeAdmissionDefault(m.nativeType, childPath, wanted); ok && m.equal(expected, actual, child, childPath) {
-				continue
-			}
 		}
 		return false
 	}
@@ -718,10 +770,6 @@ func (m declaredValueComparison) equalList(al, bl []any, atom schema.Atom, opaqu
 	if len(al) != len(bl) {
 		return false
 	}
-	keys, associative, err := declaredListKeys(atom, opaque, path, intentDeclaredValue{value: al, present: true}, intentDeclaredValue{value: bl, present: true})
-	if err != nil {
-		return false
-	}
 	child := intentDeclaredType{opaque: opaque}
 	if opaque {
 		child.ref = opaqueDeclaredRef()
@@ -730,7 +778,10 @@ func (m declaredValueComparison) equalList(al, bl []any, atom schema.Atom, opaqu
 	} else {
 		return false
 	}
-	if associative {
+	// An opaque array reached through an atomic value has no schema key.
+	// The named-list overlay is applied only where merge visits the list.
+	if !opaque && atom.List.ElementRelationship == schema.Associative {
+		keys := atom.List.Keys
 		left, leftErr := m.listMembers(intentDeclaredValue{value: al, present: true}, atom, opaque, keys, path)
 		right, rightErr := m.listMembers(intentDeclaredValue{value: bl, present: true}, atom, opaque, keys, path)
 		if leftErr != nil || rightErr != nil {

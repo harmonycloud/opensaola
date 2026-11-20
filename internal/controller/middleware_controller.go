@@ -152,6 +152,9 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				if getErr != nil {
 					return getErr
 				}
+				if latest.UID != mid.UID {
+					return nil // The finalizer belonged to the previous owner.
+				}
 				controllerutil.RemoveFinalizer(latest, v1.FinalizerMiddleware)
 				return r.Update(ctx, latest)
 			}); updateErr != nil {
@@ -320,7 +323,7 @@ func (r *MiddlewareReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			}
 		}
 		r.Recorder.Event(mid, "Normal", "Published", "Middleware published successfully")
-	} else if generation > observedGeneration || mid.Status.State == v1.StateUpdating || wasReconcilePaused {
+	} else if generation > observedGeneration || mid.Status.State == v1.StateUpdating || wasReconcilePaused || mid.Status.PendingConfigurationWrite != nil {
 		if err = middleware.HandleResource(ctxkeys.WithScheme(ctx, r.Scheme), r.Client, consts.HandleActionUpdate, mid); err != nil {
 			log.FromContext(ctx).Error(err, "middleware update failed", "namespace", mid.Namespace, "name", mid.Name)
 			return ctrl.Result{}, err

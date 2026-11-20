@@ -19,6 +19,7 @@ package packages
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -30,10 +31,8 @@ import (
 	"github.com/harmonycloud/opensaola/pkg/tools"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/klauspost/compress/zstd"
-	apiErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/yaml"
 )
 
@@ -182,6 +181,10 @@ func List(ctx context.Context, cli client.Client, opt Option) ([]*Package, error
 	return pkgs, nil
 }
 
+// ErrInvalidArchive identifies a deterministic package-content error. API read
+// failures are kept separate so an activation can retry them.
+var ErrInvalidArchive = errors.New("invalid package archive")
+
 func Get(ctx context.Context, cli client.Client, name string) (*Package, error) {
 	// Use APIReader (direct API call) if available, because the informer
 	// cache strips Secret.Data via TransformFunc to save memory.
@@ -207,18 +210,18 @@ func Get(ctx context.Context, cli client.Client, name string) (*Package, error) 
 	// Decompress data
 	decompressData, err := DeCompress(s.Data[Release])
 	if err != nil {
-		return nil, fmt.Errorf("decompress data failed: %w", err)
+		return nil, fmt.Errorf("%w: decompress data failed: %w", ErrInvalidArchive, err)
 	}
 	// Read file info from tar
 	info, err := tools.ReadTarInfo(decompressData)
 	if err != nil {
-		return nil, fmt.Errorf("read tar info failed: %w", err)
+		return nil, fmt.Errorf("%w: read tar info failed: %w", ErrInvalidArchive, err)
 	}
 
 	var metadata Metadata
 	err = yaml.Unmarshal(info.Files["metadata.yaml"], &metadata)
 	if err != nil {
-		return nil, fmt.Errorf("unmarshal metadata failed: %w", err)
+		return nil, fmt.Errorf("%w: unmarshal metadata failed: %w", ErrInvalidArchive, err)
 	}
 	pkg := &Package{
 		Name:      s.Name,
@@ -252,179 +255,6 @@ func GetMetadata(ctx context.Context, cli client.Client, packageName string) (*M
 
 	return &metadata, nil
 }
-
-func GetConfigurations(ctx context.Context, cli client.Client, packageName string) (map[string]*v1.MiddlewareConfiguration, error) {
-	pkg, err := Get(ctx, cli, packageName)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get the configurations list from the package
-	var configurations = make(map[string]*v1.MiddlewareConfiguration)
-	for _, v := range pkg.Files {
-		if bytes.Contains(v, []byte("kind: MiddlewareConfiguration")) {
-			configuration := new(v1.MiddlewareConfiguration)
-			err = yaml.Unmarshal(v, &configuration)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "unmarshal file failed")
-				return nil, err
-			}
-			configurations[configuration.Name] = configuration
-		}
-	}
-	return configurations, nil
-}
-
-func GetMiddlewareBaselines(ctx context.Context, cli client.Client, packageName string) ([]*v1.MiddlewareBaseline, error) {
-	pkg, err := Get(ctx, cli, packageName)
-	if err != nil {
-		return nil, err
-	}
-
-	var baselines []*v1.MiddlewareBaseline
-	for _, v := range pkg.Files {
-		if bytes.Contains(v, []byte("kind: MiddlewareBaseline")) {
-			baseline := new(v1.MiddlewareBaseline)
-			err = yaml.Unmarshal(v, baseline)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "unmarshal file failed")
-				return nil, err
-			}
-			baselines = append(baselines, baseline)
-		}
-	}
-	return baselines, nil
-}
-
-func GetMiddlewareOperatorBaselines(ctx context.Context, cli client.Client, packageName string) ([]*v1.MiddlewareOperatorBaseline, error) {
-	pkg, err := Get(ctx, cli, packageName)
-	if err != nil {
-		return nil, err
-	}
-
-	var baselines []*v1.MiddlewareOperatorBaseline
-	for _, v := range pkg.Files {
-		if bytes.Contains(v, []byte("kind: MiddlewareOperatorBaseline")) {
-			baseline := new(v1.MiddlewareOperatorBaseline)
-			err = yaml.Unmarshal(v, baseline)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "unmarshal file failed")
-				return nil, err
-			}
-			baselines = append(baselines, baseline)
-		}
-	}
-	return baselines, nil
-}
-
-func GetMiddlewareActionBaselines(ctx context.Context, cli client.Client, packageName string) ([]*v1.MiddlewareActionBaseline, error) {
-	pkg, err := Get(ctx, cli, packageName)
-	if err != nil {
-		return nil, err
-	}
-
-	var baselines []*v1.MiddlewareActionBaseline
-	for _, v := range pkg.Files {
-		if bytes.Contains(v, []byte("kind: MiddlewareActionBaseline")) {
-			baseline := new(v1.MiddlewareActionBaseline)
-			err = yaml.Unmarshal(v, baseline)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "unmarshal file failed")
-				return nil, err
-			}
-			baselines = append(baselines, baseline)
-		}
-	}
-	return baselines, nil
-}
-
-func GetMiddlewareBaseline(ctx context.Context, cli client.Client, name, packageName string) (*v1.MiddlewareBaseline, error) {
-	pkg, err := Get(ctx, cli, packageName)
-	if err != nil {
-		return nil, err
-	}
-
-	var isExist bool
-
-	// Get the baseline from the package
-	var md = new(v1.MiddlewareBaseline)
-	for _, v := range pkg.Files {
-		if bytes.Contains(v, []byte("kind: MiddlewareBaseline")) {
-			err = yaml.Unmarshal(v, md)
-			if err != nil {
-				log.FromContext(ctx).V(1).Info("unmarshal file failed", "error", err.Error())
-				return nil, err
-			}
-			if md.Name == name {
-				isExist = true
-				break
-			}
-		}
-	}
-	if !isExist {
-		return nil, apiErrors.NewNotFound(k8s.MiddlewareBaselineGroupResource(), name)
-	}
-	return md, nil
-}
-
-func GetMiddlewareOperatorBaseline(ctx context.Context, cli client.Client, name, packageName string) (*v1.MiddlewareOperatorBaseline, error) {
-	pkg, err := Get(ctx, cli, packageName)
-	if err != nil {
-		return nil, err
-	}
-
-	var isExist bool
-
-	// Get the baseline from the package
-	var mod = new(v1.MiddlewareOperatorBaseline)
-	for _, v := range pkg.Files {
-		if bytes.Contains(v, []byte("kind: MiddlewareOperatorBaseline")) &&
-			bytes.Contains(v, []byte(fmt.Sprintf("name: %s", name))) {
-			err = yaml.Unmarshal(v, mod)
-			if err != nil {
-				log.FromContext(ctx).V(1).Info("unmarshal file failed", "error", err.Error())
-				return nil, err
-			}
-			isExist = true
-			break
-		}
-	}
-	if !isExist {
-		return nil, apiErrors.NewNotFound(k8s.MiddlewareOperatorBaselineGroupResource(), name)
-	}
-	return mod, nil
-}
-
-// GetMiddlewareActionBaseline retrieves a middleware action baseline definition
-// func GetMiddlewareActionBaseline(ctx context.Context, cli client.Client, name, packageName string) (*v1.MiddlewareActionBaseline, error) {
-//	pkg, err := Get(ctx, cli, packageName)
-//	if err != nil {
-//		return nil, err
-//	}
-//
-//	var isExist bool
-//
-//	// Get the baseline from the package
-//	var mad = new(v1.MiddlewareActionBaseline)
-//	for k, v := range pkg.Files {
-//		if strings.Contains(k, "baseline") &&
-//			strings.Contains(string(v), mad.GroupVersionKind().Kind) &&
-//			strings.Contains(string(v), name) {
-//			err = yaml.Unmarshal(v, mad)
-//			if err != nil {
-//				log.FromContext(ctx).V(1).Info("unmarshal file failed", "error", err.Error())
-//				return nil, err
-//			}
-//			isExist = true
-//			break
-//		}
-//	}
-//	if !isExist {
-//		return nil, apiErrors.NewNotFound(k8s.MiddlewareActionBaselineGroupResource(), name)
-//	}
-//	return mad, nil
-//
-// }
 
 func Compress(data []byte) ([]byte, int, error) {
 	buf := bytes.NewBuffer([]byte{})

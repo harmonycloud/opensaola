@@ -17,17 +17,20 @@ limitations under the License.
 package middlewareconfiguration
 
 import (
+	"context"
 	"testing"
+
+	"github.com/harmonycloud/opensaola/pkg/tools"
 )
 
-func TestDeleteTemplateLineValues(t *testing.T) {
+func TestDeleteIdentityFromPackageTemplates(t *testing.T) {
 	tests := []struct {
-		name              string
-		template          string
-		wantAPIVersion    string
-		wantKind          string
-		wantNameExpr      string
-		wantNamespaceExpr string
+		name           string
+		template       string
+		wantAPIVersion string
+		wantKind       string
+		wantName       string
+		wantNamespace  string
 	}{
 		{
 			name: "standard YAML template",
@@ -38,10 +41,10 @@ metadata:
   namespace: {{ .Globe.Namespace }}
 spec:
   replicas: 1`,
-			wantAPIVersion:    "apps/v1",
-			wantKind:          "Deployment",
-			wantNameExpr:      "{{ .Globe.Name }}-mysql",
-			wantNamespaceExpr: "{{ .Globe.Namespace }}",
+			wantAPIVersion: "apps/v1",
+			wantKind:       "Deployment",
+			wantName:       "demo-mysql",
+			wantNamespace:  "monitoring",
 		},
 		{
 			name: "explicit literal namespace (cross-namespace render)",
@@ -50,10 +53,10 @@ kind: ConfigMap
 metadata:
   name: {{ .Globe.Name }}-dashboard
   namespace: monitoring`,
-			wantAPIVersion:    "v1",
-			wantKind:          "ConfigMap",
-			wantNameExpr:      "{{ .Globe.Name }}-dashboard",
-			wantNamespaceExpr: "monitoring",
+			wantAPIVersion: "v1",
+			wantKind:       "ConfigMap",
+			wantName:       "demo-dashboard",
+			wantNamespace:  "monitoring",
 		},
 		{
 			name: "namespace under spec must not be extracted",
@@ -63,10 +66,10 @@ metadata:
   name: {{ .Globe.Name }}-config
 spec:
   namespace: should-not-be-extracted`,
-			wantAPIVersion:    "v1",
-			wantKind:          "ConfigMap",
-			wantNameExpr:      "{{ .Globe.Name }}-config",
-			wantNamespaceExpr: "",
+			wantAPIVersion: "v1",
+			wantKind:       "ConfigMap",
+			wantName:       "demo-config",
+			wantNamespace:  "",
 		},
 		{
 			name: "template with comments",
@@ -80,7 +83,7 @@ metadata:
     app: test`,
 			wantAPIVersion: "v1",
 			wantKind:       "ConfigMap",
-			wantNameExpr:   "{{ .Globe.Name }}-config",
+			wantName:       "demo-config",
 		},
 		{
 			name: "metadata.name with quotes",
@@ -90,7 +93,7 @@ metadata:
   name: "{{ .Globe.Name }}-secret"`,
 			wantAPIVersion: "v1",
 			wantKind:       "Secret",
-			wantNameExpr:   `"{{ .Globe.Name }}-secret"`,
+			wantName:       "demo-secret",
 		},
 		{
 			name: "no metadata section",
@@ -100,7 +103,7 @@ spec:
   finalizers: []`,
 			wantAPIVersion: "v1",
 			wantKind:       "Namespace",
-			wantNameExpr:   "",
+			wantName:       "",
 		},
 		{
 			name: "metadata followed by other top-level fields",
@@ -112,14 +115,14 @@ spec:
   serviceName: test`,
 			wantAPIVersion: "apps/v1",
 			wantKind:       "StatefulSet",
-			wantNameExpr:   "{{ .Globe.Name }}-sts",
+			wantName:       "demo-sts",
 		},
 		{
 			name:           "empty template",
 			template:       "",
 			wantAPIVersion: "",
 			wantKind:       "",
-			wantNameExpr:   "",
+			wantName:       "",
 		},
 		{
 			name: "comments only",
@@ -127,7 +130,7 @@ spec:
 # comment2`,
 			wantAPIVersion: "",
 			wantKind:       "",
-			wantNameExpr:   "",
+			wantName:       "",
 		},
 		{
 			name: "CRD type template",
@@ -136,10 +139,10 @@ kind: Redis
 metadata:
   name: {{ .Globe.Name }}
   namespace: {{ .Globe.Namespace }}`,
-			wantAPIVersion:    "middleware.cn/v1",
-			wantKind:          "Redis",
-			wantNameExpr:      "{{ .Globe.Name }}",
-			wantNamespaceExpr: "{{ .Globe.Namespace }}",
+			wantAPIVersion: "middleware.cn/v1",
+			wantKind:       "Redis",
+			wantName:       "demo",
+			wantNamespace:  "monitoring",
 		},
 		{
 			name: "name not under metadata (should not be extracted)",
@@ -151,7 +154,7 @@ metadata:
   name: correct-name`,
 			wantAPIVersion: "v1",
 			wantKind:       "ConfigMap",
-			wantNameExpr:   "correct-name",
+			wantName:       "correct-name",
 		},
 		{
 			name: "metadata with multiple indentation levels",
@@ -169,7 +172,7 @@ spec:
     - port: 80`,
 			wantAPIVersion: "v1",
 			wantKind:       "Service",
-			wantNameExpr:   "{{ .Globe.Name }}-svc",
+			wantName:       "demo-svc",
 		},
 		{
 			name: "nacos derived mysql scenario (regression key case)",
@@ -185,90 +188,63 @@ spec:
       containers:
         - name: mysql
           image: mysql:5.7`,
-			wantAPIVersion:    "apps/v1",
-			wantKind:          "Deployment",
-			wantNameExpr:      "{{ .Globe.Name }}-nacos-mysql",
-			wantNamespaceExpr: "{{ .Globe.Namespace }}",
+			wantAPIVersion: "apps/v1",
+			wantKind:       "Deployment",
+			wantName:       "demo-nacos-mysql",
+			wantNamespace:  "monitoring",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotAPI, gotKind, gotName, gotNS := deleteTemplateLineValues(tt.template)
-			if gotAPI != tt.wantAPIVersion {
-				t.Errorf("apiVersion: got %q, want %q", gotAPI, tt.wantAPIVersion)
+			identity, err := parseDeleteIdentity(tt.template)
+			if tt.wantAPIVersion == "" && err != nil {
+				return // An empty document has no deletion target.
 			}
-			if gotKind != tt.wantKind {
-				t.Errorf("kind: got %q, want %q", gotKind, tt.wantKind)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if gotName != tt.wantNameExpr {
-				t.Errorf("nameExpr: got %q, want %q", gotName, tt.wantNameExpr)
-			}
-			if gotNS != tt.wantNamespaceExpr {
-				t.Errorf("namespaceExpr: got %q, want %q", gotNS, tt.wantNamespaceExpr)
+			values := &tools.TemplateValues{Globe: map[string]interface{}{"Name": "demo", "Namespace": "monitoring"}}
+			for _, tc := range []struct {
+				key   string
+				field deleteIdentityField
+				want  string
+			}{
+				{"apiVersion", identity.APIVersion, tt.wantAPIVersion},
+				{"kind", identity.Kind, tt.wantKind},
+				{"metadata.name", identity.Name, tt.wantName},
+				{"metadata.namespace", identity.Namespace, tt.wantNamespace},
+			} {
+				if !tc.field.Present() && tc.want == "" {
+					continue
+				}
+				got, err := tc.field.Render(context.Background(), values)
+				if err != nil || got != tc.want {
+					t.Errorf("%s: got %q, %v; want %q", tc.key, got, err, tc.want)
+				}
 			}
 		})
 	}
 }
 
-func TestNormalizeRenderedName(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		want  string
+func TestDeleteGVKRejectsMalformedIdentityBeforeDiscovery(t *testing.T) {
+	for _, test := range []struct {
+		version, kind string
+		valid         bool
 	}{
-		{
-			name:  "plain name",
-			input: "my-deployment",
-			want:  "my-deployment",
-		},
-		{
-			name:  "leading and trailing spaces",
-			input: "  my-deployment  ",
-			want:  "my-deployment",
-		},
-		{
-			name:  "double-quoted",
-			input: `"my-deployment"`,
-			want:  "my-deployment",
-		},
-		{
-			name:  "single-quoted",
-			input: "'my-deployment'",
-			want:  "my-deployment",
-		},
-		{
-			name:  "quotes with spaces",
-			input: `  "my-deployment"  `,
-			want:  "my-deployment",
-		},
-		{
-			name:  "empty string",
-			input: "",
-			want:  "",
-		},
-		{
-			name:  "whitespace only",
-			input: "   ",
-			want:  "",
-		},
-		{
-			name:  "nacos-mysql name",
-			input: "yzk-nacos-mysql",
-			want:  "yzk-nacos-mysql",
-		},
-		{
-			name:  "rendered template with quotes",
-			input: `"yzk-nacos-mysql"`,
-			want:  "yzk-nacos-mysql",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeRenderedName(tt.input)
-			if got != tt.want {
-				t.Errorf("normalizeRenderedName(%q) = %q, want %q", tt.input, got, tt.want)
+		{"v1", "ConfigMap", true},
+		{"example.io/v1alpha1", "LogPolicy", true},
+		{"v1/extra/path", "ConfigMap", false},
+		{"example.io/", "ConfigMap", false},
+		{"/v1", "ConfigMap", false},
+		{"'v1'", "ConfigMap", false},
+		{"v1", "'ConfigMap'", false},
+		{"v1", "<no value>", false},
+	} {
+		t.Run(test.version+"_"+test.kind, func(t *testing.T) {
+			gvk, err := deleteResourceGVK(test.version, test.kind)
+			if (err == nil) != test.valid || (test.valid && (gvk.GroupVersion().String() != test.version || gvk.Kind != test.kind)) {
+				t.Fatalf("unexpected deletion identity %v, error %v", gvk, err)
 			}
 		})
 	}

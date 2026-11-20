@@ -249,6 +249,20 @@ func TestCanSkipDeleteCleanup_NoCreatedResources(t *testing.T) {
 	}
 }
 
+func TestCanSkipDeleteCleanup_PartialConfigurationPublication(t *testing.T) {
+	m := emptyMiddleware("partial", "default")
+	m.Status.Conditions = []metav1.Condition{{Type: v1.CondTypeBuildExtraResource, Status: metav1.ConditionFalse}}
+	m.Status.PendingConfigurationWrite = &v1.PendingConfigurationWrite{ID: "in-flight"}
+	if CanSkipDeleteCleanup(m) {
+		t.Fatal("pending writes require recovery before finalization")
+	}
+	m.Status.PendingConfigurationWrite = nil
+	m.Status.RenderedConfigurationResources = []v1.RenderedConfigurationResource{{Name: "partial-target"}}
+	if CanSkipDeleteCleanup(m) {
+		t.Fatal("confirmed writes require cleanup even after the batch failed")
+	}
+}
+
 func TestCanSkipDeleteCleanup_CreatedResources(t *testing.T) {
 	tests := []struct {
 		name          string

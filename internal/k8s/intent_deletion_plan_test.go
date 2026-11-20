@@ -93,6 +93,8 @@ func TestPlanDeclaredMemberDeletion(t *testing.T) {
 		{name: "protected key-only member cannot be deleted", before: `{"containers":[{"name":"broker"}]}`, live: `{"containers":[{"name":"broker"}]}`, desired: `{"containers":[]}`, protected: fieldpath.NewSet(fieldpath.MakePathOrDie("spec", "containers")), blocked: true},
 		{name: "atomic array cannot split external member", before: `{"atomic":[{"name":"owned"}]}`, live: `{"atomic":[{"name":"owned"},{"name":"external"}]}`, desired: `{}`, blocked: true},
 		{name: "atomic map cannot split external child", before: `{"atomicMap":{"owned":"one"}}`, live: `{"atomicMap":{"owned":"one","external":"two"}}`, desired: `{}`, blocked: true},
+		{name: "withdrawn atomic child changed externally", before: `{"atomicMap":{"keep":"yes","drop":"old"}}`, live: `{"atomicMap":{"keep":"yes","drop":"changed"}}`, desired: `{"atomicMap":{"keep":"yes"}}`, blocked: true},
+		{name: "other apply owns atomic list holding withdrawn child", before: `{"anyItems":[{"keep":1,"drop":2}]}`, live: `{"anyItems":[{"keep":1,"drop":2}]}`, desired: `{"anyItems":[{"keep":1}]}`, protected: fieldpath.NewSet(fieldpath.MakePathOrDie("spec", "anyItems")), blocked: true},
 		{name: "set keeps external membership", before: `{"tags":["owned"]}`, live: `{"tags":["owned","external"]}`, desired: `{}`, want: `{"tags":["external"]}`, external: true},
 		{name: "opaque null can be deleted", before: `{"nullable":null}`, live: `{"nullable":null}`, desired: `{}`, want: `{}`},
 		{name: "Quantity normalization permits deletion", before: `{"resources":{"cpu":"1.0"}}`, live: `{"resources":{"cpu":"1"}}`, desired: `{}`, want: `{}`},
@@ -242,6 +244,45 @@ func TestValidateNativePlannedDeletionNormalization(t *testing.T) {
 			err = ValidateResourceIntentDeletions(converter, plan, declaredPodObject(t, test.accepted))
 			if (err == nil) != test.valid {
 				t.Fatalf("valid=%v error=%v", test.valid, err)
+			}
+		})
+	}
+}
+
+func TestLegacyDeletionRespectsProtectedMapPaths(t *testing.T) {
+	converter := declaredTestConverter(t)
+	before := intentTestObject(t, `{"options":{"owned":"one"}}`)
+	live := intentTestObject(t, `{"options":{"owned":"one","external":"keep"}}`)
+	desired := intentTestObject(t, `{}`)
+	want := intentTestObject(t, `{"options":{"external":"keep"}}`)
+	for _, test := range []struct {
+		name      string
+		protected fieldpath.Path
+		blocked   bool
+	}{
+		{"map itself", fieldpath.MakePathOrDie("spec", "options"), true},
+		{"ancestor", fieldpath.MakePathOrDie("spec"), true},
+		{"sibling", fieldpath.MakePathOrDie("spec", "anotherMap"), false},
+		{"external child", fieldpath.MakePathOrDie("spec", "options", "external"), false},
+		{"historical child", fieldpath.MakePathOrDie("spec", "options", "owned"), true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			plan, err := PlanLegacyResourceIntentDeletions(converter, before, live, desired, fieldpath.NewSet(test.protected))
+			if err != nil {
+				t.Fatal(err)
+			}
+			conflict := plan.DeletionConflictError()
+			if test.blocked {
+				if conflict == nil || !strings.Contains(conflict.Error(), ".spec.options") {
+					t.Fatalf("expected deletion under .spec.options to be blocked with %s protected, got %v", test.protected, conflict)
+				}
+				return
+			}
+			if conflict != nil {
+				t.Fatal(conflict)
+			}
+			if !reflect.DeepEqual(plan.Object.Object, want.Object) {
+				t.Fatalf("got %s want %s", intentTestJSON(plan.Object.Object), intentTestJSON(want.Object))
 			}
 		})
 	}

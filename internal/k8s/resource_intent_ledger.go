@@ -44,9 +44,14 @@ func intentLedgerName(owner client.Object, target *unstructured.Unstructured, co
 }
 
 type intentAttempt struct {
-	ID              string                `json:"id"`
-	Deletions       []StoredDeletionCheck `json:"deletions,omitempty"`
-	NamedEmptyLists [][]string            `json:"namedEmptyLists,omitempty"`
+	ID                string `json:"id"`
+	AtomicWithdrawals bool   `json:"atomicWithdrawals,omitempty"`
+	// A matching operation on the target proves the atomic value was submitted
+	// with its released keys omitted. Keep that evidence if a retry is prepared
+	// but stops before it reaches the target.
+	AtomicReleaseOperation string                `json:"atomicReleaseOperation,omitempty"`
+	Deletions              []StoredDeletionCheck `json:"deletions,omitempty"`
+	NamedEmptyLists        [][]string            `json:"namedEmptyLists,omitempty"`
 }
 
 func isIntentLedger(secret *corev1.Secret) bool {
@@ -123,7 +128,12 @@ func (w *ManagedResourceWriter) publishIntent(ctx context.Context, owner client.
 	if err != nil {
 		return err
 	}
-	candidate.Attempt = &intentAttempt{ID: string(uuid.NewUUID()), Deletions: checks, NamedEmptyLists: plan.NamedEmptyLists()}
+	candidate.Attempt = &intentAttempt{ID: string(uuid.NewUUID()), Deletions: checks, NamedEmptyLists: plan.NamedEmptyLists(), AtomicWithdrawals: true}
+	if base != nil && base.atomicReleaseReceipt != "" {
+		candidate.Attempt.AtomicReleaseOperation = base.atomicReleaseReceipt
+	} else if len(plan.atomicReleases) > 0 {
+		candidate.Attempt.AtomicReleaseOperation = candidate.Attempt.ID
+	}
 	candidate.DeletionBase = base
 	ledger, err := buildIntentLedger(owner, live, candidate)
 	if err != nil {
@@ -263,11 +273,28 @@ func (w *ManagedResourceWriter) resolvePendingIntent(ctx context.Context, owner 
 	if err != nil {
 		return nil, nil, err
 	}
+	// Older pending attempts relied on whole-value comparison for withdrawn
+	// atomic children. Recover those obligations from the two immutable raw
+	// snapshots before evaluating their receipt under projection semantics.
+	if !pending.Attempt.AtomicWithdrawals && base != nil {
+		var history *DeclaredIntentMergeResult
+		if base.Version == 1 {
+			history, err = PlanLegacyResourceIntentDeletions(converter, base.Desired, base.Desired, pending.Desired, nil)
+		} else {
+			history, err = PlanDeclaredResourceIntent(converter, base.Desired, base.Desired, pending.Desired, pending.Desired, nil)
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		checks = append(checks, history.atomicReleases...)
+	}
 	plan, err := NewDeclaredValidationPlan(converter, pending.Desired, checks, pending.Attempt.NamedEmptyLists...)
 	if err != nil {
 		return nil, nil, err
 	}
-	if live.GetAnnotations()[AnnotationResourceIntentOperation] == pending.Attempt.ID && verifyIntentIdentity(owner, live, pending.Desired, config) == nil && plan.Validate(converter, intentObject(live)) == nil {
+	operation := live.GetAnnotations()[AnnotationResourceIntentOperation]
+	identityOK := verifyIntentIdentity(owner, live, pending.Desired, config) == nil
+	if operation == pending.Attempt.ID && identityOK && plan.Validate(converter, intentObject(live)) == nil {
 		if err := w.finishLedger(ctx, owner, live, previous, pending); err != nil {
 			return nil, nil, err
 		}
@@ -278,7 +305,16 @@ func (w *ManagedResourceWriter) resolvePendingIntent(ctx context.Context, owner 
 	// No target receipt and the RV was fenced by our own recovery, or a
 	// competing write expired the original RV before any business write.
 	fenced := live.GetLabels()[LabelResourceIntentGCFence] == pending.Attempt.ID
-	if !fenced && !reflect.DeepEqual(intentObject(desired).Object, pending.Desired.Object) {
+	sameDeclaration := reflect.DeepEqual(intentObject(desired).Object, pending.Desired.Object)
+	if base != nil && sameDeclaration && identityOK && pending.Attempt.AtomicReleaseOperation != "" &&
+		(operation == pending.Attempt.ID || operation == pending.Attempt.AtomicReleaseOperation) {
+		// Only the released atomic keys may use this receipt on retry. Keep the
+		// old confirmed baseline for every outstanding granular/whole deletion.
+		retryBase := *base
+		retryBase.atomicReleaseReceipt = operation
+		return &retryBase, previous, nil
+	}
+	if !fenced && !sameDeclaration {
 		if !previousProjectionSatisfied(converter, base, pending, live) {
 			return nil, nil, managedWriteBlocked("pending field transaction only partially verified; restore the previous or pending declaration before retrying")
 		}
@@ -293,7 +329,11 @@ func previousProjectionSatisfied(c managedfields.TypeConverter, base, pending *r
 		return false
 	}
 	p, err := PlanDeclaredResourceIntent(c, pending.Desired, intentObject(live), base.Desired, base.Desired, nil)
-	return err == nil && p.DeletionConflictError() == nil && p.Validate(c, intentObject(live)) == nil
+	if err != nil {
+		return false
+	}
+	p.DeletionChecks = append(p.DeletionChecks, p.atomicReleases...)
+	return p.Validate(c, intentObject(live)) == nil
 }
 
 // An old v2 pending payload predates persisted checks. Reconstruct only the
@@ -324,13 +364,14 @@ func resolveLegacyPending(c managedfields.TypeConverter, hash string, live, desi
 		if e != nil {
 			return nil, nil, e
 		}
-		plan, err = NewDeclaredValidationPlan(c, candidate.Desired, legacy.DeletionChecks)
+		plan, err = NewDeclaredValidationPlan(c, candidate.Desired, append(legacy.DeletionChecks, legacy.atomicReleases...))
 	} else {
 		plan, err = PlanDeclaredResourceIntent(c, before, before, effective, candidate.Desired, nil)
 	}
 	if err != nil {
 		return nil, nil, err
 	}
+	plan.DeletionChecks = append(plan.DeletionChecks, plan.atomicReleases...)
 	if plan.Validate(c, intentObject(live)) == nil {
 		candidate.DeletionBase = nil
 		return candidate, s, nil

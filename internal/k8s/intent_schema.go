@@ -21,7 +21,10 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,8 +34,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/managedfields"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
+	"k8s.io/kube-openapi/pkg/handler3"
 	"k8s.io/kube-openapi/pkg/schemaconv"
 	"k8s.io/kube-openapi/pkg/validation/spec"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	smdschema "sigs.k8s.io/structured-merge-diff/v6/schema"
 )
 
@@ -55,21 +60,28 @@ type IntentSchemaResolver interface {
 }
 
 type intentSchemaCacheEntry struct {
-	hash      string
+	version   string // discovery URL, or a body digest for unversioned documents
 	converter managedfields.TypeConverter
 	topology  *smdschema.Schema
+	roots     map[schema.GroupVersionKind][]string
+	hashes    map[schema.GroupVersionKind]string
 }
 
-type liveIntentSchemaResolver struct {
+type intentSchemaGroup struct {
+	users int // protected by the resolver mutex
+	gate  chan struct{}
+	entry *intentSchemaCacheEntry
+}
+
+// LiveIntentSchemaResolver provides schema lookup and manager startup preloading.
+type LiveIntentSchemaResolver struct {
 	client rest.Interface
 	mu     sync.Mutex
-	cache  map[schema.GroupVersion]intentSchemaCacheEntry
+	groups map[schema.GroupVersion]*intentSchemaGroup
 }
 
-// NewIntentSchemaResolver creates a resolver for the connected API server. Only
-// converted schemas are cached: each lookup fetches the current group/version
-// document so that changing a CRD cannot leave a stale deletion topology in use.
-func NewIntentSchemaResolver(config *rest.Config) (IntentSchemaResolver, error) {
+// NewIntentSchemaResolver creates a cache scoped to one API server.
+func NewIntentSchemaResolver(config *rest.Config) (*LiveIntentSchemaResolver, error) {
 	if config == nil {
 		return nil, fmt.Errorf("intent schema resolver requires a REST config")
 	}
@@ -77,53 +89,189 @@ func NewIntentSchemaResolver(config *rest.Config) (IntentSchemaResolver, error) 
 	if config.Timeout <= 0 || config.Timeout > intentSchemaTimeout {
 		config.Timeout = intentSchemaTimeout
 	}
-	client, err := discovery.NewDiscoveryClientForConfig(config)
+	// NewDiscoveryClientForConfig normally sets this before constructing
+	// the transport. Keep the same identity in API server audit records.
+	if config.UserAgent == "" {
+		config.UserAgent = rest.DefaultKubernetesUserAgent()
+	}
+	httpClient, err := rest.HTTPClientFor(config)
+	if err != nil {
+		return nil, err
+	}
+	// A stale discovery hash redirects to the new revision. Never store that
+	// response under the obsolete URL; the next lookup reads the current index.
+	discoveryHTTP := *httpClient
+	discoveryHTTP.CheckRedirect = func(_ *http.Request, via []*http.Request) error {
+		if via[0].URL.Query().Get("hash") != "" {
+			return apierrors.NewServiceUnavailable("OpenAPI document changed during lookup; retry discovery")
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("too many discovery redirects")
+		}
+		return nil
+	}
+	client, err := discovery.NewDiscoveryClientForConfigAndClient(config, &discoveryHTTP)
 	if err != nil {
 		return nil, fmt.Errorf("create intent schema discovery client: %w", err)
 	}
-	return &liveIntentSchemaResolver{
-		client: client.RESTClient(),
-		cache:  make(map[schema.GroupVersion]intentSchemaCacheEntry),
-	}, nil
+	return &LiveIntentSchemaResolver{client: client.RESTClient(), groups: make(map[schema.GroupVersion]*intentSchemaGroup)}, nil
 }
 
-func (r *liveIntentSchemaResolver) Resolve(ctx context.Context, gvk schema.GroupVersionKind) (managedfields.TypeConverter, string, error) {
+// NeedLeaderElection allows each replica to warm its own read-only cache at startup.
+func (*LiveIntentSchemaResolver) NeedLeaderElection() bool { return false }
+
+// Start preloads common native schemas alongside the manager's controllers.
+// On-demand lookups use the same cache and retry failed preloads independently.
+func (r *LiveIntentSchemaResolver) Start(ctx context.Context) error {
+	for _, gvk := range []schema.GroupVersionKind{
+		{Version: "v1", Kind: "ConfigMap"},
+		{Group: "apps", Version: "v1", Kind: "StatefulSet"},
+	} {
+		if ctx.Err() != nil {
+			break
+		}
+		if _, _, err := r.Resolve(ctx, gvk); err != nil && ctx.Err() == nil {
+			log.FromContext(ctx).Error(err, "OpenAPI preload failed; will retry on demand", "groupVersion", gvk.GroupVersion().String())
+		}
+	}
+	return nil
+}
+
+// Serialize discovery and publication within one group so a delayed old
+// response cannot replace a newer converter. Failed lookups for unknown GVs
+// leave no cache entries. A canceled waiter does not cancel the active fetch.
+func (r *LiveIntentSchemaResolver) acquire(ctx context.Context, gv schema.GroupVersion) (*intentSchemaGroup, func(), error) {
+	r.mu.Lock()
+	group := r.groups[gv]
+	if group == nil {
+		group = &intentSchemaGroup{gate: make(chan struct{}, 1)}
+		r.groups[gv] = group
+	}
+	group.users++
+	r.mu.Unlock()
+	release := func() {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		group.users--
+		if group.users == 0 && group.entry == nil {
+			delete(r.groups, gv)
+		}
+	}
+	select {
+	case group.gate <- struct{}{}:
+		return group, func() {
+			<-group.gate
+			release()
+		}, nil
+	case <-ctx.Done():
+		release()
+		return nil, nil, ctx.Err()
+	}
+}
+
+func (r *LiveIntentSchemaResolver) Resolve(ctx context.Context, gvk schema.GroupVersionKind) (managedfields.TypeConverter, string, error) {
 	if gvk.Version == "" || gvk.Kind == "" {
 		return nil, "", fmt.Errorf("intent schema requires a complete GVK: %s", gvk)
 	}
 	ctx, cancel := context.WithTimeout(ctx, intentSchemaTimeout)
 	defer cancel()
-	path := "/openapi/v3/api/" + gvk.Version
-	if gvk.Group != "" {
-		path = "/openapi/v3/apis/" + gvk.Group + "/" + gvk.Version
+	group, unlock, err := r.acquire(ctx, gvk.GroupVersion())
+	if err != nil {
+		return nil, "", err
 	}
-	// client-go's OpenAPIV3().Paths()/Schema() use context.TODO internally.
-	// The same unversioned discovery REST client keeps caller cancellation and
-	// timeout semantics while requesting the current (unhashed) GV endpoint.
-	raw, err := r.client.Get().AbsPath(path).SetHeader("Accept", "application/json").DoRaw(ctx)
-	useV2 := false
+	defer unlock()
+
+	// client-go's OpenAPIV3 helpers use context.TODO. Keep caller deadlines.
+	raw, err := r.client.Get().AbsPath("/openapi/v3").SetHeader("Accept", "application/json").DoRaw(ctx)
 	if apierrors.IsNotFound(err) {
-		// A newly installed CRD may be served before its v3 GV document has
-		// been published. That is a retryable discovery gap, not an old server:
-		// recording a v2 baseline now and switching to v3 later can change its
-		// topology hash despite no CRD edit. Only a missing v3 root proves the
-		// server lacks v3 discovery.
-		_, rootErr := r.client.Get().AbsPath("/openapi/v3").SetHeader("Accept", "application/json").DoRaw(ctx)
-		if rootErr == nil {
-			return nil, "", apierrors.NewServiceUnavailable(fmt.Sprintf("OpenAPI v3 schema for %s is not published yet; retry after discovery catches up", gvk))
+		// v2 has a single cluster-wide document; retain only one converter.
+		v2, unlockV2, err := r.acquire(ctx, schema.GroupVersion{})
+		if err != nil {
+			return nil, "", err
 		}
-		if !apierrors.IsNotFound(rootErr) {
-			return nil, "", fmt.Errorf("check OpenAPI v3 availability for %s: %w", gvk, rootErr)
-		}
-		useV2 = true
-		// Kubernetes 1.21/1.22 do not publish OpenAPI v3. Their actual v2
-		// definitions are still usable merge schemas, not a deduced fallback.
-		// Authorization, timeout, and malformed-v3 errors must remain failures.
-		raw, err = r.client.Get().AbsPath("/openapi/v2").SetHeader("Accept", "application/json").DoRaw(ctx)
+		defer unlockV2()
+		return v2.resolve(ctx, gvk, r.client.Get().AbsPath("/openapi/v2"), "", true)
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("read OpenAPI index for %s: %w", gvk, err)
+	}
+	var index handler3.OpenAPIV3Discovery
+	if err := json.Unmarshal(raw, &index); err != nil {
+		return nil, "", fmt.Errorf("decode OpenAPI index: %w", err)
+	}
+	if index.Paths == nil {
+		return nil, "", fmt.Errorf("OpenAPI index is missing paths")
+	}
+	key := "api/" + gvk.Version
+	if gvk.Group != "" {
+		key = "apis/" + gvk.GroupVersion().String()
+	}
+	item, ok := index.Paths[key]
+	if !ok {
+		return nil, "", apierrors.NewServiceUnavailable(fmt.Sprintf("OpenAPI v3 schema for %s is not published yet; retry after discovery catches up", gvk))
+	}
+	locator, err := url.ParseRequestURI(item.ServerRelativeURL)
+	if err != nil || !strings.HasPrefix(item.ServerRelativeURL, "/") || strings.HasPrefix(item.ServerRelativeURL, "//") {
+		return nil, "", fmt.Errorf("invalid OpenAPI document URL for %s", gvk)
+	}
+	// Discovery behind a proxy may include the configured client prefix.
+	prefix := strings.TrimSuffix(r.client.Get().AbsPath("/").URL().Path, "/")
+	if prefix != "" && strings.HasPrefix(locator.Path, prefix+"/") {
+		locator.Path = strings.TrimPrefix(locator.Path, prefix)
+	}
+	request := r.client.Get().RequestURI(locator.RequestURI())
+	version := ""
+	if locator.Query().Get("hash") != "" {
+		version = item.ServerRelativeURL
+	}
+	return group.resolve(ctx, gvk, request, version, false)
+}
+
+func (g *intentSchemaGroup) resolve(ctx context.Context, gvk schema.GroupVersionKind, request *rest.Request, version string, v2 bool) (managedfields.TypeConverter, string, error) {
+	if version != "" && g.entry != nil && g.entry.version == version {
+		return g.entry.lookup(gvk)
+	}
+	raw, err := request.SetHeader("Accept", "application/json").DoRaw(ctx)
+	if !v2 && apierrors.IsNotFound(err) {
+		return nil, "", apierrors.NewServiceUnavailable(fmt.Sprintf("OpenAPI v3 schema for %s is not published yet; retry after discovery catches up", gvk))
 	}
 	if err != nil {
 		return nil, "", fmt.Errorf("read intent schema for %s: %w", gvk, err)
 	}
+	if version == "" {
+		version = fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
+		if g.entry != nil && g.entry.version == version {
+			return g.entry.lookup(gvk)
+		}
+	}
+	entry, err := parseIntentSchema(raw, version, v2)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse intent schema for %s: %w", gvk, err)
+	}
+	converter, hash, err := entry.lookup(gvk)
+	if err == nil {
+		g.entry = entry
+	}
+	return converter, hash, err
+}
+
+func (e *intentSchemaCacheEntry) lookup(gvk schema.GroupVersionKind) (managedfields.TypeConverter, string, error) {
+	if hash, ok := e.hashes[gvk]; ok {
+		return e.converter, hash, nil
+	}
+	roots := e.roots[gvk]
+	if len(roots) != 1 {
+		return nil, "", fmt.Errorf("expected exactly one OpenAPI model for %s, found %d", gvk, len(roots))
+	}
+	hash, err := intentMergeTopologyHash(e.topology, roots[0])
+	if err != nil {
+		return nil, "", err
+	}
+	e.hashes[gvk] = hash
+	return e.converter, hash, nil
+}
+
+func parseIntentSchema(raw []byte, version string, v2 bool) (*intentSchemaCacheEntry, error) {
 	var document struct {
 		Components struct {
 			Schemas map[string]*spec.Schema `json:"schemas"`
@@ -131,58 +279,34 @@ func (r *liveIntentSchemaResolver) Resolve(ctx context.Context, gvk schema.Group
 		Definitions map[string]*spec.Schema `json:"definitions"`
 	}
 	if err := json.Unmarshal(raw, &document); err != nil {
-		return nil, "", fmt.Errorf("decode intent schema for %s: %w", gvk, err)
+		return nil, err
 	}
 	models := document.Components.Schemas
-	if useV2 {
+	if v2 {
 		models = document.Definitions
 	}
 	if len(models) == 0 {
-		return nil, "", fmt.Errorf("OpenAPI schemas missing for %s", gvk)
+		return nil, fmt.Errorf("OpenAPI schemas missing")
 	}
-	root, err := requireIntentSchemaGVK(models, gvk)
+	roots, err := intentSchemaRoots(models)
 	if err != nil {
-		return nil, "", err
-	}
-	canonical, err := json.Marshal(models)
-	if err != nil {
-		return nil, "", fmt.Errorf("hash intent schema for %s: %w", gvk, err)
-	}
-	hash := fmt.Sprintf("sha256:%x", sha256.Sum256(canonical))
-	gv := gvk.GroupVersion()
-	if useV2 {
-		// v2 is a single server-wide document. Share its converter instead of
-		// retaining a full copy for every requested group/version.
-		gv = schema.GroupVersion{}
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if cached, ok := r.cache[gv]; ok && cached.hash == hash {
-		semanticHash, err := intentMergeTopologyHash(cached.topology, root)
-		return cached.converter, semanticHash, err
+		return nil, err
 	}
 	converter, err := managedfields.NewTypeConverter(models, false)
 	if err != nil {
-		return nil, "", fmt.Errorf("convert intent schema for %s: %w", gvk, err)
+		return nil, fmt.Errorf("convert intent schema: %w", err)
 	}
 	topology, err := schemaconv.ToSchemaFromOpenAPI(models, false)
 	if err != nil {
-		return nil, "", fmt.Errorf("convert intent topology for %s: %w", gvk, err)
+		return nil, fmt.Errorf("convert intent topology: %w", err)
 	}
 	if err := validateDeclaredOpaqueTopology(topology); err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	// OpenAPI properties are maps. The converter preserves their iteration
-	// order in Fields, which must not make a stable topology hash nondeterministic.
 	for i := range topology.Types {
 		sortIntentSchemaFields(&topology.Types[i].Atom)
 	}
-	semanticHash, err := intentMergeTopologyHash(topology, root)
-	if err != nil {
-		return nil, "", err
-	}
-	r.cache[gv] = intentSchemaCacheEntry{hash: hash, converter: converter, topology: topology}
-	return converter, semanticHash, nil
+	return &intentSchemaCacheEntry{version: version, converter: converter, topology: topology, roots: roots, hashes: make(map[schema.GroupVersionKind]string)}, nil
 }
 
 // The converter's named untyped reference is the provenance marker used by the
@@ -199,12 +323,11 @@ func validateDeclaredOpaqueTopology(topology *smdschema.Schema) error {
 	return nil
 }
 
-func requireIntentSchemaGVK(models map[string]*spec.Schema, gvk schema.GroupVersionKind) (string, error) {
-	matches := 0
-	root := ""
+func intentSchemaRoots(models map[string]*spec.Schema) (map[schema.GroupVersionKind][]string, error) {
+	roots := make(map[schema.GroupVersionKind][]string)
 	for name, model := range models {
 		if model == nil {
-			return "", fmt.Errorf("OpenAPI contains a null schema for %s", gvk)
+			return nil, fmt.Errorf("OpenAPI contains a null schema for %s", name)
 		}
 		extension, exists := model.Extensions["x-kubernetes-group-version-kind"]
 		if !exists {
@@ -212,23 +335,17 @@ func requireIntentSchemaGVK(models map[string]*spec.Schema, gvk schema.GroupVers
 		}
 		raw, err := json.Marshal(extension)
 		if err != nil {
-			return "", fmt.Errorf("encode intent schema GVK: %w", err)
+			return nil, fmt.Errorf("encode intent schema GVK: %w", err)
 		}
 		var kinds []schema.GroupVersionKind
 		if err := json.Unmarshal(raw, &kinds); err != nil {
-			return "", fmt.Errorf("decode intent schema GVK: %w", err)
+			return nil, fmt.Errorf("decode intent schema GVK: %w", err)
 		}
 		for _, candidate := range kinds {
-			if candidate == gvk {
-				matches++
-				root = name
-			}
+			roots[candidate] = append(roots[candidate], name)
 		}
 	}
-	if matches != 1 {
-		return "", fmt.Errorf("expected exactly one OpenAPI model for %s, found %d", gvk, matches)
-	}
-	return root, nil
+	return roots, nil
 }
 
 func sortIntentSchemaFields(atom *smdschema.Atom) {

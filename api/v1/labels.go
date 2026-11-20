@@ -53,6 +53,8 @@ const (
 	// PVC and PV resources are retained while other resource types are deleted; CRDs are
 	// always retained by the disable lifecycle.
 	AnnotationConfigurationDisablePolicy = "middleware.cn/configurationDisablePolicy"
+	// AnnotationConfigurationWriteID binds a target write to the owner's pending inventory entry.
+	AnnotationConfigurationWriteID = "middleware.cn/configurationWriteID"
 	// AnnotationConfigurationOwnerUID and AnnotationConfigurationUID are written to
 	// lifecycle-managed rendered resources so disable cleanup can verify identity safely.
 	AnnotationConfigurationOwnerUID = "middleware.cn/configurationOwnerUID"

@@ -63,18 +63,21 @@ type MiddlewareOperatorStatus struct {
 
 	// OperatorStatus holds the deployment status for each operator deployment managed by this resource.
 	OperatorStatus map[string]appsv1.DeploymentStatus `json:"operators,omitempty"`
-	// OperatorAvailable is a human-readable summary of operator availability (e.g., "1/1").
+	// OperatorAvailable reports available/total replicas of the primary operator Deployment.
 	OperatorAvailable string `json:"operatorAvailable,omitempty"`
 	// Reason provides a human-readable explanation of the current state.
 	Reason string `json:"reason,omitempty"`
 
-	// Ready indicates whether all operator deployments are available and healthy.
+	// Ready indicates whether the primary Deployment created from spec.deployment is ready.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
-	// Runtime is an optional summary field for kubectl display (forward compatible).
+	// Runtime describes the primary operator Deployment for kubectl display.
 	// +optional
 	Runtime string `json:"runtime,omitempty"`
 
+	// PendingConfigurationWrite records the target of a single in-flight Configuration publication.
+	// +optional
+	PendingConfigurationWrite *PendingConfigurationWrite `json:"pendingConfigurationWrite,omitempty"`
 	// RenderedConfigurationResources is the lifecycle-managed inventory of resources rendered from MiddlewareConfigurations.
 	// It enables kind-aware cleanup when a configuration template becomes empty after a feature is disabled.
 	RenderedConfigurationResources []RenderedConfigurationResource `json:"renderedConfigurationResources,omitempty"`

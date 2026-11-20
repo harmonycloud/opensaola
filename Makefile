@@ -74,6 +74,7 @@ SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
 KIND_CLUSTER ?= opensaola-e2e
+E2E_TEST := go test -count=1 -tags=e2e ./test/e2e/ -v -ginkgo.v
 HELM_RELEASE ?= opensaola
 HELM_NAMESPACE_FROM_ALIAS := false
 ifneq ($(origin n),undefined)
@@ -259,7 +260,7 @@ test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated 
 		echo "No Kind cluster named '$(KIND_CLUSTER)' is running. Create one via: kind create cluster --name $(KIND_CLUSTER)"; \
 		exit 1; \
 	}
-	KIND_CLUSTER='$(KIND_CLUSTER)' CERT_MANAGER_INSTALL_SKIP='$(CERT_MANAGER_INSTALL_SKIP)' go test ./test/e2e/ -v -ginkgo.v
+	KIND_CLUSTER='$(KIND_CLUSTER)' CERT_MANAGER_INSTALL_SKIP='$(CERT_MANAGER_INSTALL_SKIP)' $(E2E_TEST)
 
 .PHONY: kind-create
 kind-create: ## Create a Kind cluster for e2e (KIND_CLUSTER, default: opensaola-e2e).
@@ -288,7 +289,7 @@ test-e2e-smoke: manifests generate fmt vet ## Run e2e on a temporary Kind cluste
 		$(MAKE) kind-create KIND_CLUSTER='$(KIND_CLUSTER)'; \
 	fi; \
 	set +e; \
-	KIND_CLUSTER='$(KIND_CLUSTER)' CERT_MANAGER_INSTALL_SKIP=true go test -tags=e2e ./test/e2e/ -v -ginkgo.v; \
+	KIND_CLUSTER='$(KIND_CLUSTER)' CERT_MANAGER_INSTALL_SKIP=true $(E2E_TEST); \
 	status=$$?; \
 	set -e; \
 	if [ $$created -eq 1 ]; then \
@@ -386,12 +387,16 @@ verify-chart-crds: ## Verify Helm chart CRDs match generated CRDs.
 test-helm-images: ## Test Helm image prefix resolution.
 	bash hack/helm-image-resolution_test.sh
 
+.PHONY: test-helm-metrics
+test-helm-metrics: ## Test Helm metrics and ServiceMonitor configuration.
+	HELM="$(HELM)" bash hack/helm-metrics_test.sh
+
 .PHONY: test-helm-data-namespace
 test-helm-data-namespace: ## Test Helm data namespace retention on a disposable Kind cluster.
 	bash hack/helm-data-namespace_test.sh
 
 .PHONY: helm-check
-helm-check: helm-lint helm-template helm-package verify-chart-crds test-helm-images ## Run all Helm chart checks.
+helm-check: helm-lint helm-template helm-package verify-chart-crds test-helm-images test-helm-metrics ## Run all Helm chart checks.
 
 .PHONY: helm-deploy
 helm-deploy: helm-upgrade ## Install or upgrade OpenSaola from the local Helm chart.

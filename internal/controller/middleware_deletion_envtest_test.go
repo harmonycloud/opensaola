@@ -27,12 +27,67 @@ import (
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+var _ = Describe("MID optional Configuration deletion", func() {
+	It("removes the MID when a dynamic template renders only a comment with inherited values", func() {
+		name := "optional-delete-" + randomSuffix()
+		labels := map[string]string{v1.LabelPackageName: name}
+		cfg := &v1.MiddlewareConfiguration{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
+			Spec: v1.MiddlewareConfigurationSpec{Template: `{{ printf "# optional resource\n" }}
+{{- with dict "settings" .Values "name" .Globe.Name }}
+{{- if or .settings.metrics.enabled (not .settings.paused) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .name }}
+{{- end }}
+{{- end }}`},
+		}
+		Expect(k8sClient.Create(ctx, cfg)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, cfg) })
+		values, err := json.Marshal(map[string]any{
+			"metrics": map[string]any{"enabled": `{{ (eq (toString .Necessary.metricsEnabled) "true") }}`},
+			"paused":  `{{ .Parameters.paused | toJson }}`,
+		})
+		Expect(err).NotTo(HaveOccurred())
+		baseline := &v1.MiddlewareBaseline{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels},
+			Spec: v1.MiddlewareBaselineSpec{
+				GVK:            v1.GVK{Group: "apps", Version: "v1", Kind: "Deployment"},
+				Parameters:     runtime.RawExtension{Raw: []byte(`{"paused":true,"replicas":0,"selector":{"matchLabels":{"app":"fixture"}},"template":{"metadata":{"labels":{"app":"fixture"}},"spec":{"containers":[{"name":"main","image":"registry.k8s.io/pause:3.10"}]}}}`)},
+				Configurations: []v1.Configuration{{Name: name, Values: runtime.RawExtension{Raw: values}}},
+			},
+		}
+		Expect(k8sClient.Create(ctx, baseline)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, baseline) })
+		mid := &v1.Middleware{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: labels, Finalizers: []string{v1.FinalizerMiddleware}},
+			Spec:       v1.MiddlewareSpec{Baseline: name, Necessary: runtime.RawExtension{Raw: []byte(`{"metricsEnabled":false}`)}},
+		}
+		Expect(k8sClient.Create(ctx, mid)).To(Succeed())
+		_, err = reconcileMiddleware(mid.Name, mid.Namespace)
+		Expect(err).NotTo(HaveOccurred())
+		key := client.ObjectKeyFromObject(mid)
+		Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+		Expect(mid.Status.RenderedConfigurationResourcesGeneration).To(Equal(mid.Generation))
+		Expect(mid.Status.RenderedConfigurationResources).To(BeEmpty())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key, &corev1.ConfigMap{}))).To(BeTrue())
+		Expect(k8sClient.Get(ctx, key, &appsv1.Deployment{})).To(Succeed())
+
+		Expect(k8sClient.Delete(ctx, mid)).To(Succeed())
+		_, err = reconcileMiddleware(mid.Name, mid.Namespace)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key, &v1.Middleware{}))).To(BeTrue())
+	})
+})
 
 var _ = Describe("Owned field deletion status", func() {
 	It("keeps the generation pending after blocked deletion and retries without changing MID", func() {
@@ -143,5 +198,52 @@ var _ = Describe("MID native init container execution order", func() {
 		}
 		Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
 		Expect(mid.Status.ObservedGeneration).To(Equal(mid.Generation))
+	})
+})
+
+var _ = Describe("MID native container environment variable order", func() {
+	It("publishes and reorders inherited variables while retaining external entries", func() {
+		name := "mid-env-order-" + randomSuffix()
+		labels := map[string]string{v1.LabelPackageName: name}
+		selector := map[string]string{"app": name}
+		host := corev1.EnvVar{Name: "DB_HOST", Value: "db"}
+		endpoint := corev1.EnvVar{Name: "ENDPOINT", Value: "$(DB_HOST):5432"}
+		trace := corev1.EnvVar{Name: "TRACE_ID", Value: "external"}
+		base, err := json.Marshal(appsv1.DeploymentSpec{
+			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
+			Selector: &metav1.LabelSelector{MatchLabels: selector},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: selector},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "registry.k8s.io/pause:3.10", Env: []corev1.EnvVar{host, endpoint}}}},
+			},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		baseline := &v1.MiddlewareBaseline{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}, Spec: v1.MiddlewareBaselineSpec{GVK: v1.GVK{Group: "apps", Version: "v1", Kind: "Deployment"}, Parameters: runtime.RawExtension{Raw: base}}}
+		Expect(k8sClient.Create(ctx, baseline)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, baseline) })
+		mid := &v1.Middleware{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: labels, Finalizers: []string{v1.FinalizerMiddleware}},
+			Spec:       v1.MiddlewareSpec{Baseline: name, Parameters: runtime.RawExtension{Raw: []byte(`{"template":{"spec":{"containers":[{"name":"main","env":[{"name":"ENDPOINT"},{"name":"DB_HOST"}]}]}}}`)}},
+		}
+		Expect(k8sClient.Create(ctx, mid)).To(Succeed())
+		_, err = reconcileMiddleware(name, "default")
+		Expect(err).NotTo(HaveOccurred())
+		key := client.ObjectKeyFromObject(mid)
+		dep := &appsv1.Deployment{}
+		Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, dep) })
+		Expect(dep.Spec.Template.Spec.Containers[0].Env).To(Equal([]corev1.EnvVar{endpoint, host}))
+		dep.Spec.Template.Spec.Containers[0].Env = []corev1.EnvVar{endpoint, trace, host}
+		Expect(k8sClient.Update(ctx, dep)).To(Succeed())
+		Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+		mid.Spec.Parameters = runtime.RawExtension{Raw: []byte(`{"template":{"spec":{"containers":[{"name":"main","env":[{"name":"DB_HOST"},{"name":"ENDPOINT"}]}]}}}`)}
+		Expect(k8sClient.Update(ctx, mid)).To(Succeed())
+		_, err = reconcileMiddleware(name, "default")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(k8sClient.Get(ctx, key, dep)).To(Succeed())
+		Expect(dep.Spec.Template.Spec.Containers[0].Env).To(Equal([]corev1.EnvVar{host, trace, endpoint}))
+		Expect(k8sClient.Get(ctx, key, mid)).To(Succeed())
+		Expect(mid.Status.ObservedGeneration).To(Equal(mid.Generation))
+		Expect(meta.IsStatusConditionTrue(mid.Status.Conditions, v1.CondTypeApplyCluster)).To(BeTrue())
 	})
 })

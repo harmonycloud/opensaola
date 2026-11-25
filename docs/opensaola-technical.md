@@ -38,7 +38,7 @@
   - [6.1 各 service 的职责和核心方法](#61-各-service-的职责和核心方法)
 - [7. Watcher / Syncer 机制](#7-watcher--syncer-机制)
   - [7.1 CR Watcher](#71-cr-watcherpkgservicewatchercustomresourcego)
-  - [7.2 Synchronizer](#72-synchronizerpkgservicesynchronizersynchronizergo)
+  - [7.2 Synchronizer](#72-synchronizer)
 - [8. 升级触发机制](#8-升级触发机制)
   - [8.1 触发方式](#81-触发方式)
   - [8.2 升级流程（以 Middleware 为例）](#82-升级流程以-middleware-为例)
@@ -126,7 +126,7 @@ API Group: `middleware.cn`，Version: `v1`
           |
           v
    +------+------+
-   | Synchronizer |  （定时同步 CR 状态到 Middleware.Status.CustomResources）
+   | Synchronizer |  （按资源事件同步 CR 状态到 Middleware.Status.CustomResources）
    +-------------+
 ```
 
@@ -344,7 +344,7 @@ MiddlewareAction (Namespaced) -- 引用 --> MiddlewareActionBaseline
 |--------|------|------|--------|------|----------|
 | observedGeneration | int64 | 否 | 0 | 已观察到的 Generation | 用于判断是否需要更新 |
 | conditions | []metav1.Condition | 否 | nil | 条件列表 | patchMergeKey=type，patchStrategy=merge |
-| customResources | CustomResources | 否 | 零值 | 关联 CR 的状态快照 | 由 Synchronizer 定时同步 |
+| customResources | CustomResources | 否 | 零值 | 关联 CR 的状态快照 | 由 Synchronizer 在资源变更后同步 |
 | state | State | 否 | `""` | 整体状态 | 任何 Condition 为 False 则为 Unavailable |
 | reason | string | 否 | `""` | 状态原因 | 取第一个 False Condition 的 Message |
 | renderedConfigurationResources | []RenderedConfigurationResource | 否 | nil | 已受生命周期治理的 Configuration 资源清单 | 模板变空/引用移除后的 Kind 感知清理依据；控制器维护 |
@@ -1207,9 +1207,13 @@ HandleResource(Publish)
    - Counter == 1：close(StopChan) -> 从 Map 删除
    - Counter > 1：Counter--
 
-### 7.2 Synchronizer（pkg/service/synchronizer/synchronizer.go）
+### 7.2 Synchronizer
 
-**功能**：每秒定时同步 CR 状态到 Middleware.Status.CustomResources
+`SyncCustomResourceV2` 在启动时计算一次 `Middleware.status.customResources`。同一命名空间的 MID 共享七类资源的 informer 缓存。后续通知按 MID 合并，默认窗口为 200 毫秒。
+
+- Pod 新增或删除时，根据 Pod 标签、自身身份、owner 链（如 Pod → ReplicaSet → Deployment → 主 CR），以及 MID 灾备或数据同步注解里直接引用的 Pod，通知所有相关 MID。更新时同时检查新旧 Pod，因此更换归属后，原 MID 和新 MID 都能刷新状态。
+- 归属判断只读本地缓存。遇到归属不明、同名 owner 的 UID 已变、缓存或注册信息尚未就绪等情况，会通知该命名空间的全部活跃 MID。
+- StatefulSet、Deployment、DaemonSet、ReplicaSet、Service、PVC 发生变更，以及命名空间缓存首次就绪时，也会通知全部活跃 MID。收到通知的 MID 执行原有状态计算。
 
 **同步内容**：
 1. 获取 CR 的 status -> 反序列化到 CustomResources

@@ -336,9 +336,10 @@ func applyLocalReadinessDiagnostic(
 // recomputeAndUpdateStatus reads the latest Middleware and CR state, rebuilds
 // the full include list from the local informer cache, and writes the result back
 // to Middleware.status if anything changed.
-func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstructured.Unstructured, mid *v1.Middleware, mgr *NsInformerManager) {
+func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstructured.Unstructured, mid *v1.Middleware, mgr *NsInformerManager, registrationKey string) {
 	var err error
 
+	readStarted := time.Now()
 	nowMid, err := k8s.GetMiddleware(ctx, cli, mid.Name, mid.Namespace)
 	if err != nil {
 		// Middleware has been deleted; nothing to do.
@@ -368,6 +369,17 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		}
 		log.FromContext(ctx).Error(err, "recomputeAndUpdateStatus: get custom resource error")
 		return
+	}
+
+	sources := podSources{
+		primary:     ownerCandidate{APIVersion: nowCr.GetAPIVersion(), Kind: nowCr.GetKind(), Name: nowCr.GetName(), UID: nowCr.GetUID()},
+		mid:         ownerCandidate{APIVersion: v1.GroupVersion.String(), Kind: "Middleware", Name: nowMid.Name, UID: nowMid.UID},
+		disasterPod: referencedPod(nowMid.Annotations[v1.AnnotationDisasterSyncer]),
+		dataPod:     referencedPod(nowMid.Annotations[v1.AnnotationDataSyncer]),
+		readStarted: readStarted,
+	}
+	if mgr != nil {
+		mgr.recordPodSources(nowMid.Namespace, registrationKey, sources)
 	}
 
 	nowCrStatusBytes, err := json.Marshal(nowCr.Object["status"])
@@ -407,20 +419,7 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		services     = make(map[string]corev1.Service)
 		pvcs         = make(map[string]corev1.PersistentVolumeClaim)
 	)
-	baseOwnerCandidates := []ownerCandidate{
-		{
-			APIVersion: nowCr.GetAPIVersion(),
-			Kind:       nowCr.GetKind(),
-			Name:       nowCr.GetName(),
-			UID:        nowCr.GetUID(),
-		},
-		{
-			APIVersion: v1.GroupVersion.String(),
-			Kind:       "Middleware",
-			Name:       nowMid.Name,
-			UID:        nowMid.UID,
-		},
-	}
+	baseOwnerCandidates := []ownerCandidate{sources.primary, sources.mid}
 
 	// Operator-managed Middleware mirrors the primary CR lifecycle directly,
 	// regardless of the CR's GVK. A declared CEL status rule takes precedence
@@ -965,7 +964,7 @@ func SyncCustomResourceV2(ctx context.Context, cli client.Client, cr *unstructur
 	}
 	defer mgr.Unregister(ns, registrationKey)
 
-	// 3. Register the debouncer; informer events route here via NotifyNamespace.
+	// 3. Register the debouncer for this Middleware.
 	triggerFn := func() {
 		select {
 		case <-session.ctx.Done():
@@ -974,7 +973,7 @@ func SyncCustomResourceV2(ctx context.Context, cli client.Client, cr *unstructur
 			return
 		default:
 		}
-		recomputeAndUpdateStatus(session.ctx, cli, cr, mid, mgr)
+		recomputeAndUpdateStatus(session.ctx, cli, cr, mid, mgr, registrationKey)
 	}
 	var debouncer *Debouncer
 	if !session.registerIfActive(func() {

@@ -28,6 +28,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -155,7 +156,8 @@ type nsEntry struct {
 
 	// midKeys tracks which SyncV2 registrations are active. Session lease keys
 	// make leader handover registrations distinct even for the same Middleware.
-	midKeys map[string]struct{}
+	midKeys map[string]podSources
+	podView *podRouteView
 
 	// factory is the shared informer factory scoped to this namespace.
 	factory informers.SharedInformerFactory
@@ -173,7 +175,8 @@ func (e *nsEntry) addRegistration(midKey string) (added, active bool, refCount i
 	if _, exists := e.midKeys[midKey]; exists {
 		return false, true, e.refCount
 	}
-	e.midKeys[midKey] = struct{}{}
+	e.midKeys[midKey] = podSources{}
+	e.podView = nil
 	e.refCount++
 	return true, true, e.refCount
 }
@@ -185,6 +188,7 @@ func (e *nsEntry) removeRegistration(midKey string) (removed, shouldStop bool, r
 		return false, false, e.refCount
 	}
 	delete(e.midKeys, midKey)
+	e.podView = nil
 	e.refCount--
 	if e.refCount <= 0 {
 		e.refCount = 0
@@ -220,7 +224,8 @@ type NsInformerManager struct {
 	// entries maps namespace string to *nsEntry.
 	entries sync.Map
 
-	// eventCallback is invoked on any Add/Update/Delete event in a namespace.
+	// podCallback can handle a Pod event when all its targets are known.
+	podCallback   func(string, sets.Set[string]) bool
 	eventCallback func(ns string)
 	callbackMu    sync.RWMutex
 
@@ -229,11 +234,27 @@ type NsInformerManager struct {
 }
 
 // SetEventCallback registers a callback that is invoked whenever any resource
-// event fires within a namespace. Intended for use by the debouncer layer.
+// event fires within a namespace.
 func (m *NsInformerManager) SetEventCallback(fn func(ns string)) {
 	m.callbackMu.Lock()
 	defer m.callbackMu.Unlock()
 	m.eventCallback = fn
+	m.podCallback = nil
+}
+
+// UseStatusDebouncers routes attributable Pod events to the affected sync sessions.
+func (m *NsInformerManager) UseStatusDebouncers() {
+	m.callbackMu.Lock()
+	defer m.callbackMu.Unlock()
+	m.eventCallback = globalDebounceRegistry.NotifyNamespace
+	m.podCallback = globalDebounceRegistry.notifyRegisteredMIDs
+}
+
+func (m *NsInformerManager) notifyPodTargets(ns string, targets sets.Set[string]) bool {
+	m.callbackMu.RLock()
+	fn := m.podCallback
+	m.callbackMu.RUnlock()
+	return fn != nil && fn(ns, targets)
 }
 
 // notifyNamespace calls the registered event callback for the given namespace.
@@ -283,7 +304,7 @@ func (m *NsInformerManager) Register(ctx context.Context, ns, midKey string) err
 			cancel:   nsCancel,
 			factory:  factory,
 			refCount: 1,
-			midKeys:  map[string]struct{}{midKey: {}},
+			midKeys:  map[string]podSources{midKey: {}},
 		}
 
 		actual, loaded := m.entries.LoadOrStore(ns, entry)
@@ -305,8 +326,7 @@ func (m *NsInformerManager) Register(ctx context.Context, ns, midKey string) err
 		}
 
 		// Register event handlers for all 7 resource types.
-		handler := m.buildHandler(ns)
-		m.registerHandlers(factory, handler)
+		m.registerHandlers(ns, entry)
 
 		// Start the factory and all registered informers.
 		factory.Start(nsCtx.Done())
@@ -401,22 +421,32 @@ func (m *NsInformerManager) buildHandler(ns string) cache.ResourceEventHandlerFu
 	}
 }
 
-// registerHandlers adds the unified event handler to all 7 informers.
-func (m *NsInformerManager) registerHandlers(factory informers.SharedInformerFactory, handler cache.ResourceEventHandlerFuncs) {
-	mustAdd := func(informer cache.SharedIndexInformer) {
+func (m *NsInformerManager) registerHandlers(ns string, entry *nsEntry) {
+	factory := entry.factory
+	handler := m.buildHandler(ns)
+	pods := newPodEventHandler(ns, func() (podRouteView, bool) {
+		m.callbackMu.RLock()
+		targeted := m.podCallback != nil
+		m.callbackMu.RUnlock()
+		if !targeted {
+			return podRouteView{}, false
+		}
+		return entry.podRouteSnapshot(ns)
+	}, m.notifyPodTargets, m.notifyNamespace)
+	mustAdd := func(informer cache.SharedIndexInformer, handler cache.ResourceEventHandlerFuncs) {
 		if _, err := informer.AddEventHandler(handler); err != nil {
 			// Non-fatal: log and continue; cache still works without callback.
 			ctrl.Log.WithName("synchronizer").Info("NsInformerManager: AddEventHandler failed", "warning", true, "error", err)
 		}
 	}
 
-	mustAdd(factory.Apps().V1().StatefulSets().Informer())
-	mustAdd(factory.Apps().V1().Deployments().Informer())
-	mustAdd(factory.Apps().V1().DaemonSets().Informer())
-	mustAdd(factory.Apps().V1().ReplicaSets().Informer())
-	mustAdd(factory.Core().V1().Pods().Informer())
-	mustAdd(factory.Core().V1().Services().Informer())
-	mustAdd(factory.Core().V1().PersistentVolumeClaims().Informer())
+	mustAdd(factory.Apps().V1().StatefulSets().Informer(), handler)
+	mustAdd(factory.Apps().V1().Deployments().Informer(), handler)
+	mustAdd(factory.Apps().V1().DaemonSets().Informer(), handler)
+	mustAdd(factory.Apps().V1().ReplicaSets().Informer(), handler)
+	mustAdd(factory.Core().V1().Pods().Informer(), pods)
+	mustAdd(factory.Core().V1().Services().Informer(), handler)
+	mustAdd(factory.Core().V1().PersistentVolumeClaims().Informer(), handler)
 }
 
 // ────────────────────────────────────────────────────────────────────────────

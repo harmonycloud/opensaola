@@ -31,6 +31,7 @@ import (
 	"github.com/harmonycloud/opensaola/internal/service/consts"
 	"github.com/harmonycloud/opensaola/internal/service/middleware"
 	"github.com/harmonycloud/opensaola/internal/service/status"
+	"github.com/harmonycloud/opensaola/internal/service/synchronizer"
 	"github.com/harmonycloud/opensaola/internal/service/watcher"
 	"github.com/harmonycloud/opensaola/pkg/tools/ctxkeys"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -367,6 +368,9 @@ func (r *MiddlewareReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			if !ok {
 				return true
 			}
+			// A referenced Pod may already belong to another MID. Refresh its
+			// observer even when this update also carries a status change.
+			synchronizer.NotifyPodReferenceChange(oldObj, newObj)
 
 			// Compare whether status has changed
 			if !equality.Semantic.DeepEqual(oldObj.Status, newObj.Status) {

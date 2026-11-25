@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -250,7 +249,7 @@ func (m *NsInformerManager) notifyNamespace(ns string) {
 
 // Register ensures informers for ns are running and increments the reference count
 // for midKey. If this is the first registration for ns, it starts 7 typed informers
-// and blocks until their caches are synced or ctx is canceled.
+// and notifies the namespace once their shared cache is ready.
 func (m *NsInformerManager) Register(ctx context.Context, ns, midKey string) error {
 	for {
 		// Fast path: join a live entry. addRegistration and final teardown share
@@ -314,18 +313,18 @@ func (m *NsInformerManager) Register(ctx context.Context, ns, midKey string) err
 
 		log.FromContext(ctx).Info("NsInformerManager: started informers, waiting for cache sync...", "ns", ns)
 
-		// WaitForCacheSync with timeout derived from ctx.
-		syncCtx, syncCancel := context.WithTimeout(ctx, 60*time.Second)
-		synced := factory.WaitForCacheSync(syncCtx.Done())
-		syncCancel()
-		for resType, ok := range synced {
-			if !ok {
-				log.FromContext(ctx).Info("NsInformerManager: informer not synced (ctx canceled or timed out)", "warning", true, "ns", ns, "resType", resType)
+		// The cache belongs to the namespace, even if the first MID leaves.
+		go func() {
+			for _, synced := range factory.WaitForCacheSync(nsCtx.Done()) {
+				if !synced {
+					return
+				}
 			}
-		}
-
-		entry.synced.Store(true)
-		log.FromContext(ctx).Info("NsInformerManager: registered (cache synced)", "ns", ns, "midKey", midKey, "refCount", 1)
+			if nsCtx.Err() == nil {
+				entry.synced.Store(true)
+				m.notifyNamespace(ns)
+			}
+		}()
 		return nil
 	}
 }

@@ -63,7 +63,10 @@ func (m *NsInformerManager) recordPodSources(ns, lease string, sources podSource
 	if !ok {
 		return
 	}
-	entry := raw.(*nsEntry)
+	entry, ok := raw.(*nsEntry)
+	if !ok {
+		return
+	}
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	prev, active := entry.midKeys[lease]

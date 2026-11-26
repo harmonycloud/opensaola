@@ -55,6 +55,10 @@ func (f deleteIdentityField) Dynamic() bool {
 }
 
 func (f deleteIdentityField) Render(ctx context.Context, values *tools.TemplateValues) (string, error) {
+	return f.render(ctx, values, nil)
+}
+
+func (f deleteIdentityField) render(ctx context.Context, values *tools.TemplateValues, inputs func(string) (*tools.TemplateValues, error)) (string, error) {
 	if !f.Present() {
 		return "", fmt.Errorf("identity field is missing")
 	}
@@ -85,6 +89,12 @@ func (f deleteIdentityField) Render(ctx context.Context, values *tools.TemplateV
 			return "", err
 		}
 		template = f.projection.definitions + bindings + template
+		if inputs != nil {
+			values, err = inputs(template)
+			if err != nil {
+				return "", err
+			}
+		}
 		rendered, err := tools.TemplateParse(ctx, template, values)
 		if err != nil {
 			return "", err

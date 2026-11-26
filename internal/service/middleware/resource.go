@@ -148,10 +148,15 @@ func HandleResource(ctx context.Context, cli client.Client, action consts.Handle
 		)
 		// A dynamic Configuration with no recorded target may need the same
 		// parameters that were available to its baseline reference on publication.
-		prepareParameters := func(ctx context.Context, values *tools.TemplateValues) error {
+		prepareParameters := func(ctx context.Context, values *tools.TemplateValues, project middlewareconfiguration.DeleteParameterProjection) error {
 			rendered := m.DeepCopy()
 			if err := mergeMiddlewareParameters(ctx, cli, baseline, rendered); err != nil {
 				return err
+			}
+			if project != nil {
+				if err := project(&rendered.Spec.Parameters); err != nil {
+					return err
+				}
 			}
 			parameters, err := renderMiddlewareParameters(ctx, &rendered.Spec.Parameters, values)
 			values.Parameters = parameters

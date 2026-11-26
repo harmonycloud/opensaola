@@ -77,7 +77,7 @@ func TestDeleteConfigurationWithNoRecordedTarget(t *testing.T) {
 					return nil
 				},
 			})
-			err = DeleteTemplateRenderedResources(t.Context(), cli, owner, owner, func(context.Context, *tools.TemplateValues) error {
+			err = DeleteTemplateRenderedResources(t.Context(), cli, owner, owner, func(context.Context, *tools.TemplateValues, DeleteParameterProjection) error {
 				t.Fatal("literal reference values must not load baseline parameters")
 				return nil
 			})
@@ -110,7 +110,7 @@ func TestDeleteRendersConfigurationReferenceBeforeOptionalResource(t *testing.T)
 			cfg.Spec.Template = `{{ printf "# optional resource\n" }}{{ with .Values }}{{ if ne $.Parameters nil }}{{ fail "parameters leaked into the MCF" }}{{ end }}{{ if or .metrics.enabled .settings.enabled }}{{ toYaml (dict "kind" "ServiceMonitor") }}{{ end }}{{ end }}`
 			owner.Spec.Configurations = []v1.Configuration{{Name: cfg.Name, Values: runtime.RawExtension{Raw: []byte(reference)}}}
 			cli := orphanTestClient(t, owner, cfg)
-			err := DeleteTemplateRenderedResources(t.Context(), cli, owner, owner, func(_ context.Context, values *tools.TemplateValues) error {
+			err := DeleteTemplateRenderedResources(t.Context(), cli, owner, owner, func(_ context.Context, values *tools.TemplateValues, _ DeleteParameterProjection) error {
 				if tc.prepareError != "" {
 					return fmt.Errorf("%s", tc.prepareError)
 				}
@@ -144,7 +144,7 @@ func TestDeleteRecordedTargetBeforeCheckingEmptyOutput(t *testing.T) {
 			ConfigurationName: cfg.Name, ConfigurationUID: cfg.UID, ResourceUID: target.UID, OwnerUID: owner.UID,
 		}}
 		cli := orphanTestClient(t, owner, cfg, target)
-		if err := DeleteTemplateRenderedResources(t.Context(), cli, owner, owner, func(context.Context, *tools.TemplateValues) error {
+		if err := DeleteTemplateRenderedResources(t.Context(), cli, owner, owner, func(context.Context, *tools.TemplateValues, DeleteParameterProjection) error {
 			t.Fatal("recorded target must not load reference values")
 			return nil
 		}); err != nil {
@@ -382,5 +382,158 @@ metadata:
 	}
 	if err := cli.Get(t.Context(), client.ObjectKeyFromObject(other), &corev1.ConfigMap{}); err != nil {
 		t.Fatalf("unexpected change in the other namespace: %v", err)
+	}
+}
+
+func TestDeleteConfigurationReadsOnlyIdentityInputs(t *testing.T) {
+	for _, tc := range []struct {
+		name, bindings, expr string
+		recorded             bool
+	}{
+		{"recorded Redis", "", "{{ .Globe.Name }}", true},
+		{"legacy Redis", "", "{{ .Globe.Name }}", false},
+		{"nested reference", "", "{{ .Values.route.name }}", false},
+		{"local alias", "{{ $route := .Values.route }}", "{{ $route.name }}", false},
+		{"literal index", "", "{{ index .Values \"route\" \"name\" }}", false},
+		{"named helper", `{{define "target"}}{{.Globe.Name}}{{end}}`, `{{include "target" .}}`, false},
+		{"named helper with values", `{{define "target"}}{{.route.name}}{{end}}`, `{{include "target" .Values}}`, false},
+		{"computed owner key", "", `{{ index .Values .Globe.Name }}`, false},
+		{"key presence", "", `{{ ternary .Globe.Name "wrong" (hasKey .Values "password") }}`, false},
+		{"published map shape", "", `{{ ternary "wrong" .Globe.Name (eq .Values nil) }}`, false},
+		{"typed reference", "", `{{ ternary .Globe.Name "wrong" .Values.typed }}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			owner := testMiddleware()
+			owner.Labels = map[string]string{v1.LabelPackageName: "fixture"}
+			cfg := orphanTestConfig(nil)
+			cfg.Labels = owner.Labels
+			cfg.Spec.Template = tc.bindings + "\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: " + tc.expr + "\n  namespace: {{ .Globe.Namespace }}\ndata:\n  forbidden: {{ fail \"body must not run\" }}"
+			raw, err := json.Marshal(map[string]any{
+				"password": "{{ (index .Parameters.pod 0).requirepass }}",
+				"route":    map[string]any{"name": "{{ .Globe.Name }}", "unused": `{{ fail "unused route member" }}`},
+				owner.Name: "{{ .Globe.Name }}",
+				"typed":    `{{ eq .Globe.Name "redis-lxt" }}`,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner.Spec.Configurations = []v1.Configuration{{Name: cfg.Name, Values: runtime.RawExtension{Raw: raw}}}
+			target := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+				Name: owner.Name, Namespace: owner.Namespace, UID: "target",
+				Labels: map[string]string{v1.LabelApp: owner.Name},
+				Annotations: map[string]string{
+					v1.LabelConfigurations: cfg.Name, v1.AnnotationConfigurationOwnerUID: string(owner.UID),
+					v1.AnnotationConfigurationUID: string(cfg.UID),
+				},
+			}}
+			if tc.recorded {
+				owner.Status.RenderedConfigurationResources = []v1.RenderedConfigurationResource{{
+					ConfigurationName: cfg.Name, ConfigurationUID: cfg.UID, OwnerUID: owner.UID, ResourceUID: target.UID,
+					Version: "v1", Kind: "ConfigMap", Namespace: owner.Namespace, Name: target.Name, Namespaced: true,
+				}}
+			}
+			other := target.DeepCopy()
+			other.Namespace = "other"
+			other.UID = "other"
+			cli := interceptor.NewClient(orphanTestClient(t, owner, cfg, target, other), interceptor.Funcs{List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				t.Fatal("expected exact identity; unexpected label scan")
+				return nil
+			}})
+			err = DeleteTemplateRenderedResources(t.Context(), cli, owner, owner, func(context.Context, *tools.TemplateValues, DeleteParameterProjection) error {
+				t.Fatal("unrelated Parameters evaluated")
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = cli.Get(t.Context(), client.ObjectKeyFromObject(target), &corev1.ConfigMap{}); !apierrors.IsNotFound(err) {
+				t.Fatalf("expected deletion: %v", err)
+			}
+			if err = cli.Get(t.Context(), client.ObjectKeyFromObject(other), &corev1.ConfigMap{}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestDeleteReferenceProjectsMergedParameters(t *testing.T) {
+	base := &tools.TemplateValues{Globe: map[string]any{"Name": "redis-lxt"}}
+	cfg := v1.Configuration{Name: "redis-credential", Values: runtime.RawExtension{Raw: []byte(`{"name":"{{ (index .Parameters.pod 0).target }}","unused":"{{ fail \"unrelated reference\" }}"}`)}}
+	calls := 0
+	prepare := func(_ context.Context, values *tools.TemplateValues, project DeleteParameterProjection) error {
+		calls++
+		params := runtime.RawExtension{Raw: []byte(`{"pod":[{"target":"redis-lxt","other":"{{ fail \"irrelevant Pod field\" }}"},{"target":"{{ fail \"irrelevant Pod\" }}"}],"body":"{{ fail \"irrelevant body\" }}"}`)}
+		if err := project(&params); err != nil {
+			return err
+		}
+		if strings.Contains(string(params.Raw), "fail") {
+			t.Fatal("unused parameter template would be executed")
+		}
+		return json.Unmarshal(params.Raw, &values.Parameters)
+	}
+	v, err := configurationIdentityValues(t.Context(), cfg, base, "{{ .Values.name }}", prepare)
+	if err != nil || calls != 1 || v.Values["name"] != "redis-lxt" || v.Parameters != nil {
+		t.Fatalf("reference projection: calls=%d values=%+v err=%v", calls, v, err)
+	}
+}
+
+func TestDeleteUnresolvedNamespaceDoesNotUseOwnerNamespace(t *testing.T) {
+	for _, source := range []string{
+		`{"select":"{{ .Globe.Name }}","redis-lxt":"other"}`,
+		`{"{{ .Globe.Name }}":"other","select":"redis-lxt"}`,
+	} {
+		owner := testMiddleware()
+		owner.Labels = map[string]string{v1.LabelPackageName: "redis"}
+		cfg := orphanTestConfig(nil)
+		cfg.Labels = owner.Labels
+		cfg.Spec.Template = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: target\n  namespace: {{ index .Values .Values.select | default .Globe.Namespace }}"
+		owner.Spec.Configurations = []v1.Configuration{{Name: cfg.Name, Values: runtime.RawExtension{Raw: []byte(source)}}}
+		target := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "target", Namespace: owner.Namespace, UID: "unrelated"}}
+		cfg.Annotations = map[string]string{v1.AnnotationConfigurationDeletePolicy: v1.ConfigurationDeletePolicyDelete}
+		cli := orphanTestClient(t, owner, cfg, target)
+		err := DeleteTemplateRenderedResources(t.Context(), cli, owner, owner, nil)
+		if err == nil || !strings.Contains(err.Error(), "metadata.namespace") {
+			t.Fatalf("expected unresolved namespace; got %v", err)
+		}
+		if err := cli.Get(t.Context(), client.ObjectKeyFromObject(target), target); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestDeleteRefusesProjectionAcrossInputMutation(t *testing.T) {
+	cfg := v1.Configuration{Name: "mutable", Values: runtime.RawExtension{Raw: []byte(`{
+		"a":"{{ $_ := set .Necessary \"ns\" \"published\" }}",
+		"ns":"{{ .Necessary.ns }}"
+	}`)}}
+	base := &tools.TemplateValues{Necessary: map[string]any{"ns": "other"}}
+	_, err := configurationIdentityValues(t.Context(), cfg, base, "{{ .Values.ns }}", nil)
+	if err == nil || !strings.Contains(err.Error(), "may be modified") || base.Necessary["ns"] != "other" {
+		t.Fatalf("an omitted mutation could change the deletion namespace: %v", err)
+	}
+}
+
+func TestDeleteEmptyOutputUsesOnlyReferencedParameters(t *testing.T) {
+	cfg := v1.Configuration{Name: "redis-shard-sc", Values: runtime.RawExtension{Raw: []byte(`{"type":"{{ .Parameters.type }}","proxy":"{{ hasKey .Parameters \"predixy\" }}"}`)}}
+	mc := orphanTestConfig(nil)
+	mc.Spec.Template = `{{if eq .Values.type "cluster"}}apiVersion: v1
+kind: ConfigMap
+metadata: {name: redis-shard}{{end}}`
+	base := &tools.TemplateValues{}
+	err := verifyEmptyConfiguration(t.Context(), cfg, base, mc, errOpaqueDeleteIdentity, func(_ context.Context, v *tools.TemplateValues, project DeleteParameterProjection) error {
+		if project == nil {
+			t.Fatal("unrelated primary-resource parameters would be rendered")
+		}
+		raw := runtime.RawExtension{Raw: []byte(`{"type":"sentinel","unused":"{{ fail \"unrelated parameter\" }}"}`)}
+		if err := project(&raw); err != nil {
+			return err
+		}
+		if strings.Contains(string(raw.Raw), "fail") {
+			t.Fatal("unexpected full parameter render")
+		}
+		return json.Unmarshal(raw.Raw, &v.Parameters)
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

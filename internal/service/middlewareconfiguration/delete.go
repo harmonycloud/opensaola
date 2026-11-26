@@ -17,7 +17,6 @@ limitations under the License.
 package middlewareconfiguration
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -144,7 +143,7 @@ func canDetachConfigurationOwner(owner metav1.Object, live *unstructured.Unstruc
 
 // Resolve only the identity when cleaning up an object. Re-rendering can
 // confirm that a configuration has no output, but cannot identify an old target.
-func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, owner metav1.Object, quoter tools.Quoter, prepareParameters func(context.Context, *tools.TemplateValues) error) error {
+func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, owner metav1.Object, quoter tools.Quoter, prepareParameters prepareDeleteParameters) error {
 	configurations := quoter.GetConfigurations()
 	if resourceOwner, ok := owner.(client.Object); ok {
 		if err := recoverConfigurationWrite(ctx, cli, resourceOwner); err != nil {
@@ -176,30 +175,35 @@ func DeleteTemplateRenderedResources(ctx context.Context, cli client.Client, own
 	if pkgName == "" {
 		return fmt.Errorf("package name is empty")
 	}
-	baseValues, err := tools.GetTemplateValues(ctx, quoter)
-	if err != nil {
-		return fmt.Errorf("failed to get template values: %w", err)
-	}
+	baseValues := sync.OnceValues(func() (*tools.TemplateValues, error) {
+		return tools.GetTemplateValues(ctx, quoter)
+	})
 	var problems []error
 	for _, cfg := range configurations {
 		mc, err := Get(ctx, cli, cfg.Name, pkgName)
 		if err == nil {
-			err = deleteConfigurationTargets(ctx, cli, owner, &mc, cfg, baseValues)
-			// Generated objects and fields that depend on earlier mutations
-			// can only be identified by their original publication.
-			if errors.Is(err, errOpaqueDeleteIdentity) || errors.Is(err, errMutableDeleteIdentity) {
-				if handled, recordErr := retireRecordedConfiguration(ctx, cli, owner, &mc); handled || recordErr != nil {
-					err = recordErr
-				} else {
-					err = verifyEmptyConfiguration(ctx, cfg, baseValues, &mc, err, prepareParameters)
-				}
-			}
+			err = deleteReferencedConfiguration(ctx, cli, owner, &mc, cfg, baseValues, prepareParameters)
 		}
 		if err != nil {
 			problems = append(problems, fmt.Errorf("configuration %s: %w", cfg.Name, err))
 		}
 	}
 	return errors.Join(problems...)
+}
+
+func deleteReferencedConfiguration(ctx context.Context, cli client.Client, owner metav1.Object, mc *v1.MiddlewareConfiguration, cfg v1.Configuration, loadValues func() (*tools.TemplateValues, error), prepare prepareDeleteParameters) error {
+	if handled, err := retireRecordedConfiguration(ctx, cli, owner, mc); handled || err != nil {
+		return err
+	}
+	base, err := loadValues()
+	if err != nil {
+		return fmt.Errorf("get template values: %w", err)
+	}
+	err = deleteConfigurationTargets(ctx, cli, owner, mc, cfg, base, prepare)
+	if errors.Is(err, errOpaqueDeleteIdentity) || errors.Is(err, errMutableDeleteIdentity) {
+		return verifyEmptyConfiguration(ctx, cfg, base, mc, err, prepare)
+	}
+	return err
 }
 
 func copyConfigurationRenderInputs(base *tools.TemplateValues) (*tools.TemplateValues, error) {
@@ -213,25 +217,10 @@ func copyConfigurationRenderInputs(base *tools.TemplateValues) (*tools.TemplateV
 	return &values, nil
 }
 
-func verifyEmptyConfiguration(ctx context.Context, cfg v1.Configuration, base *tools.TemplateValues, mc *v1.MiddlewareConfiguration, identityErr error, prepareParameters func(context.Context, *tools.TemplateValues) error) error {
-	if bytes.Contains(cfg.Values.Raw, []byte("{{")) {
-		refValues, err := copyConfigurationRenderInputs(base)
-		if err != nil {
-			return err
-		}
-		if prepareParameters != nil {
-			if err := prepareParameters(ctx, refValues); err != nil {
-				return fmt.Errorf("prepare configuration reference parameters: %w", err)
-			}
-		}
-		refs, err := RenderConfigurationReferences(ctx, []v1.Configuration{cfg}, refValues)
-		if err != nil {
-			return err
-		}
-		if len(refs) != 1 || refs[0].Name != cfg.Name {
-			return errors.New("rendered configuration reference changed its identity")
-		}
-		cfg = refs[0]
+func verifyEmptyConfiguration(ctx context.Context, cfg v1.Configuration, base *tools.TemplateValues, mc *v1.MiddlewareConfiguration, identityErr error, prepareParameters prepareDeleteParameters) error {
+	cfg, err := renderDeleteReference(ctx, cfg, base, prepareParameters, true)
+	if err != nil {
+		return err
 	}
 	values, err := copyConfigurationRenderInputs(base)
 	if err != nil {
@@ -251,30 +240,19 @@ func verifyEmptyConfiguration(ctx context.Context, cfg v1.Configuration, base *t
 	return identityErr
 }
 
-func deleteConfigurationTargets(ctx context.Context, cli client.Client, owner metav1.Object, mc *v1.MiddlewareConfiguration, cfg v1.Configuration, base *tools.TemplateValues) error {
+func deleteConfigurationTargets(ctx context.Context, cli client.Client, owner metav1.Object, mc *v1.MiddlewareConfiguration, cfg v1.Configuration, base *tools.TemplateValues, prepareParameters prepareDeleteParameters) error {
 	id, err := parseDeleteIdentity(mc.Spec.Template)
 	if err != nil {
 		return err
 	}
-	// Literal fields do not depend on configuration values. Prepare those
-	// values once, only if an identity expression actually needs rendering.
-	values := sync.OnceValues(func() (*tools.TemplateValues, error) {
-		v := *base
-		return &v, applyConfigurationValues(ctx, cfg, &v)
-	})
+	valuesFor := func(source string) (*tools.TemplateValues, error) {
+		return configurationIdentityValues(ctx, cfg, base, source, prepareParameters)
+	}
 	render := func(key string, field deleteIdentityField) (string, error) {
-		v := base
-		if field.Dynamic() {
-			var err error
-			v, err = values()
-			if err != nil {
-				return "", fmt.Errorf("prepare values for %s: %w", key, err)
-			}
-		}
 		if !field.Present() {
 			return "", fmt.Errorf("missing %s", key)
 		}
-		value, err := field.Render(ctx, v)
+		value, err := field.render(ctx, base, valuesFor)
 		if err != nil {
 			return "", fmt.Errorf("render %s: %w", key, err)
 		}
@@ -313,9 +291,6 @@ func deleteConfigurationTargets(ctx context.Context, cli client.Client, owner me
 	name, nameErr := render("metadata.name", id.Name)
 	if errors.Is(nameErr, errMutableDeleteIdentity) {
 		return nameErr
-	}
-	if handled, err := retireRecordedConfiguration(ctx, cli, owner, mc); handled || err != nil {
-		return err
 	}
 	if missingKind || isCustomResourceDefinition(gvk) {
 		return nil

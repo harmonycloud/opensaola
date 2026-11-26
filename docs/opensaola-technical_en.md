@@ -38,7 +38,7 @@
   - [6.1 Service Responsibilities and Core Methods](#61-service-responsibilities-and-core-methods)
 - [7. Watcher / Syncer Mechanism](#7-watcher--syncer-mechanism)
   - [7.1 CR Watcher](#71-cr-watcherpkgservicewatchercustomresourcego)
-  - [7.2 Synchronizer](#72-synchronizerpkgservicesynchronizersynchronizergo)
+  - [7.2 Synchronizer](#72-synchronizer)
 - [8. Upgrade Trigger Mechanism](#8-upgrade-trigger-mechanism)
   - [8.1 Trigger Methods](#81-trigger-methods)
   - [8.2 Upgrade Flow (Using Middleware as an Example)](#82-upgrade-flow-using-middleware-as-an-example)
@@ -126,7 +126,7 @@ API Group: `middleware.cn`, Version: `v1`
           |
           v
    +------+------+
-   | Synchronizer |  (periodically syncs CR status to Middleware.Status.CustomResources)
+   | Synchronizer |  (syncs CR status to Middleware.Status.CustomResources on events)
    +-------------+
 ```
 
@@ -344,7 +344,7 @@ MiddlewareAction (Namespaced) -- references --> MiddlewareActionBaseline
 |-------|------|----------|---------|-------------|-------------------|
 | observedGeneration | int64 | No | 0 | Observed Generation | Used to determine whether an update is needed |
 | conditions | []metav1.Condition | No | nil | Condition list | patchMergeKey=type, patchStrategy=merge |
-| customResources | CustomResources | No | zero value | Status snapshot of associated CRs | Periodically synced by the Synchronizer |
+| customResources | CustomResources | No | zero value | Status snapshot of associated CRs | Updated by the Synchronizer on resource events |
 | state | State | No | `""` | Overall state | Set to Unavailable if any Condition is False |
 | reason | string | No | `""` | State reason | Takes the Message from the first False Condition |
 | renderedConfigurationResources | []RenderedConfigurationResource | No | nil | Lifecycle-managed Configuration resource inventory | Used for kind-aware cleanup after a template becomes empty or a reference is removed; controller-managed |
@@ -1210,9 +1210,13 @@ Defines all constants:
    - Counter == 1: close(StopChan) -> remove from Map
    - Counter > 1: Counter--
 
-### 7.2 Synchronizer (pkg/service/synchronizer/synchronizer.go)
+### 7.2 Synchronizer
 
-**Function**: Periodically syncs CR status to Middleware.Status.CustomResources every second
+`SyncCustomResourceV2` computes `Middleware.status.customResources` on startup. Seven informers share a namespace cache. Each MID groups subsequent notifications into a debounce window (200 ms by default).
+
+- A Pod addition or deletion notifies the MIDs identified by its labels, its own identity, or its owner chain (for example, Pod → ReplicaSet → Deployment → primary CR). A MID can also name a Pod in a disaster or data sync annotation. An update considers both versions of the Pod so a change of ownership wakes the old and new MIDs.
+- Routing uses the local cache. If a Pod's ownership is unclear, an owner UID has changed, or a required cache or registration is unavailable, every active MID in the namespace receives the event.
+- StatefulSet, Deployment, DaemonSet, ReplicaSet, Service and PVC events also notify the entire namespace, as does the initial cache sync. Each notified MID runs its normal status calculation.
 
 **Sync Contents**:
 1. Get CR status -> deserialize into CustomResources

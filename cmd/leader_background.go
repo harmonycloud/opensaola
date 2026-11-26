@@ -59,10 +59,7 @@ func (t *leaderBackgroundTasks) Start(ctx context.Context) error {
 		if err != nil {
 			l.Error(err, "start NsInformerManager")
 		} else {
-			// Wire informer events to the debouncer layer.
-			nsInformerManager.SetEventCallback(func(ns string) {
-				synchronizer.NotifyNamespace(ns)
-			})
+			nsInformerManager.UseStatusDebouncers()
 		}
 	} else {
 		l.Info("no REST config provided, NsInformerManager will not start")

@@ -213,8 +213,7 @@ func (r *NsDebounceRegistry) UnregisterIfCurrent(ns, midName string, want *Debou
 }
 
 // NotifyNamespace notifies every Debouncer registered under the given namespace.
-// This is called by an informer EventHandler when any Pod/StatefulSet/etc. changes
-// within that namespace.
+// It also handles Pod events whose targets could not be fully resolved.
 func (r *NsDebounceRegistry) NotifyNamespace(ns string) {
 	prefix := ns + "/"
 

@@ -113,6 +113,18 @@ func TestActionBaselineCheck_OmittedSteps(t *testing.T) {
 	}
 }
 
+func TestActionBaselineCheck_ExplicitEmptySteps(t *testing.T) {
+	m := newActionBaseline("empty-action", nil, []v1.Step{})
+	cli := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(m).WithStatusSubresource(m).Build()
+	if err := Check(t.Context(), cli, m); err != nil {
+		t.Fatal(err)
+	}
+	got := findCondition(m.Status.Conditions, v1.CondTypeChecked)
+	if got == nil || got.Status != metav1.ConditionTrue || m.Status.State != v1.StateAvailable {
+		t.Fatalf("explicit empty steps: Checked=%v, state=%v", got, m.Status.State)
+	}
+}
+
 // TestActionBaselineCheck_StepWithEmptyName verifies that Check sets the condition
 // to False when a step has an empty name.
 func TestActionBaselineCheck_StepWithEmptyName(t *testing.T) {

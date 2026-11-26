@@ -144,19 +144,7 @@ func CompareDeployment(ctx context.Context, cli client.Client, deployment *appsv
 		return fmt.Errorf("compare deployment error: %w", err)
 	}
 	if !isSame {
-		oldDeployment.Name = m.Name
-		oldDeployment.Namespace = m.Namespace
-		oldDeployment.Labels = m.Labels
-		scheme, schemeErr := ctxkeys.SchemeFrom(ctx)
-		if schemeErr != nil {
-			return fmt.Errorf("get scheme from context: %w", schemeErr)
-		}
-		err = ctrl.SetControllerReference(m, oldDeployment, scheme)
-		if err != nil {
-			return fmt.Errorf("set controller reference error: %w", err)
-		}
-		// If not equal, update and restore the Deployment to its published state
-		err = k8s.UpdateDeployment(ctx, cli, oldDeployment)
+		err = k8s.RestoreDeploymentSpec(ctx, cli, deployment, oldDeployment)
 		if err != nil {
 			return fmt.Errorf("update deployment error: %w", err)
 		}

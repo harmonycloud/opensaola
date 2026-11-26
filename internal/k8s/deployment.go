@@ -20,6 +20,7 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/harmonycloud/opensaola/api/v1"
 	"github.com/harmonycloud/opensaola/pkg/tools"
@@ -162,14 +163,64 @@ func DeleteDeployment(ctx context.Context, cli client.Client, name, namespace st
 	return nil
 }
 
-// CompareDeploymentSpec compares two DeploymentSpecs.
-func CompareDeploymentSpec(ctx context.Context, new, old *appsv1.Deployment) (isSame bool, err error) {
-	if (old == nil && new != nil) || (old != nil && new == nil) {
-		return false, nil
-	} else if old == nil {
-		return true, nil
+// CompareDeploymentSpec compares live fields with the published template.
+func CompareDeploymentSpec(ctx context.Context, live, desired *appsv1.Deployment) (bool, error) {
+	if live == nil || desired == nil {
+		return live == desired, nil
 	}
-	return tools.CompareJson(ctx, new.Spec, old.Spec)
+	expected := deploymentDriftTarget(live, desired)
+	actualPod, expectedPod := live.Spec.Template.Spec, expected.Template.Spec
+	if len(actualPod.InitContainers) != len(expectedPod.InitContainers) {
+		return false, nil
+	}
+	for i, container := range expectedPod.InitContainers {
+		actual := actualPod.InitContainers[i]
+		if actual.Name != container.Name || !containerStartupMatches(actual, container) {
+			return false, nil
+		}
+	}
+	for _, container := range expectedPod.Containers {
+		i := slices.IndexFunc(actualPod.Containers, func(c corev1.Container) bool { return c.Name == container.Name })
+		if i < 0 || !containerStartupMatches(actualPod.Containers[i], container) {
+			return false, nil
+		}
+	}
+	return tools.CompareJson(ctx, live.Spec, expected)
+}
+
+func containerStartupMatches(actual, desired corev1.Container) bool {
+	return (desired.Command == nil || slices.Equal(actual.Command, desired.Command)) &&
+		(desired.Args == nil || slices.Equal(actual.Args, desired.Args))
+}
+
+// RestoreDeploymentSpec updates the version that was compared. On conflict the
+// controller reconciles again with a fresh Deployment and published template.
+func RestoreDeploymentSpec(ctx context.Context, cli client.Client, live, desired *appsv1.Deployment) error {
+	target := live.DeepCopy()
+	target.Spec = deploymentDriftTarget(live, desired)
+	return cli.Update(ctx, target)
+}
+
+// Put declared init containers in template order, keeping injected steps in
+// their live slots. Missing declared steps are appended in template order.
+func deploymentDriftTarget(live, desired *appsv1.Deployment) appsv1.DeploymentSpec {
+	target := desired.Spec
+	declared := desired.Spec.Template.Spec.InitContainers
+	names := make(map[string]bool, len(declared))
+	for _, container := range declared {
+		names[container.Name] = true
+	}
+	var merged []corev1.Container
+	next := 0
+	for _, container := range live.Spec.Template.Spec.InitContainers {
+		if names[container.Name] {
+			container = declared[next]
+			next++
+		}
+		merged = append(merged, container)
+	}
+	target.Template.Spec.InitContainers = append(merged, declared[next:]...)
+	return target
 }
 
 // DeriveDeploymentPhase derives OpenSaola's lifecycle phase from the complete

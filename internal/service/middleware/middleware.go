@@ -34,6 +34,7 @@ import (
 	"github.com/harmonycloud/opensaola/internal/k8s"
 	"github.com/harmonycloud/opensaola/internal/service/consts"
 	"github.com/harmonycloud/opensaola/internal/service/status"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -138,7 +139,7 @@ func missingNecessaryFieldPath(required, actual map[string]any, prefix string) (
 	return "", "", "", false
 }
 
-func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) error {
+func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) (retErr error) {
 	// If the upgrade annotation exists, start the upgrade flow
 	_, ok := m.GetAnnotations()[v1.LabelUpdate]
 	if ok {
@@ -153,23 +154,33 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 		}
 		conditionChecked := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeChecked)
 		conditionUpdating := status.GetCondition(ctx, &m.Status.Conditions, v1.CondTypeUpdating)
+		if conditionUpdating.Status == metav1.ConditionTrue {
+			meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+				Type: v1.CondTypeUpdating, Status: metav1.ConditionUnknown, Reason: v1.CondReasonIniting,
+				Message: "Checking target package", ObservedGeneration: m.Generation,
+			})
+		}
 		m.Status.State = v1.StateUpdating
 		err = k8s.UpdateMiddlewareStatus(ctx, cli, m)
 		if err != nil {
 			return err
 		}
 		defer func() {
-			if err != nil {
-				log.FromContext(ctx).Error(err, "failed to upgrade Middleware")
-				conditionUpdating.Failed(ctx, err.Error(), m.Generation)
-			} else {
-				log.FromContext(ctx).Info("Middleware upgrade succeeded")
-				conditionUpdating.Success(ctx, m.Generation)
+			switch {
+			case errors.Is(retErr, consts.ErrPackageNotReady):
+				meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+					Type: v1.CondTypeUpdating, Status: metav1.ConditionUnknown, Reason: "PackageNotReady",
+					Message:            fmt.Sprintf("Waiting for target package version %q to be ready", m.Annotations[v1.LabelUpdate]),
+					ObservedGeneration: m.Generation,
+				})
+			case retErr != nil:
+				log.FromContext(ctx).Error(retErr, "failed to upgrade Middleware")
+				conditionUpdating.Failed(ctx, retErr.Error(), m.Generation)
 			}
 			if updateErr := k8s.UpdateMiddlewareStatus(ctx, cli, m); updateErr != nil {
 				log.FromContext(ctx).Error(updateErr, "failed to update Middleware status during upgrade")
-				if err == nil {
-					err = updateErr
+				if retErr == nil {
+					retErr = updateErr
 				}
 			}
 		}()
@@ -263,6 +274,8 @@ func ReplacePackage(ctx context.Context, cli client.Client, m *v1.Middleware) er
 				rollback()
 				return err
 			}
+			conditionUpdating.Success(ctx, m.Generation)
+			log.FromContext(ctx).Info("Middleware package switched", "package", mp[0].Name)
 			// Refresh cache after successful upgrade
 			if _, err := k8s.GetMiddleware(ctx, cli, m.Name, m.Namespace); err != nil {
 				log.FromContext(ctx).Info("failed to refresh Middleware cache", "warning", true, "namespace", m.Namespace, "name", m.Name, "err", err)

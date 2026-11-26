@@ -53,6 +53,9 @@ func Execute(ctx context.Context, cli client.Client, m *v1.MiddlewareAction) err
 	}
 
 	baseline, err := middlewareactionbaseline.Get(ctx, cli, m.Spec.Baseline, m.Labels[v1.LabelPackageName])
+	if errors.Is(err, middlewareactionbaseline.ErrActionBaselineNotFound) {
+		return failAction(ctx, cli, m, nil, v1.CondTypeChecked, err)
+	}
 	if err != nil {
 		return fmt.Errorf("read action baseline %q: %w", m.Spec.Baseline, err)
 	}

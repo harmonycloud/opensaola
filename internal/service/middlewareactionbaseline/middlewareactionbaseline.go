@@ -61,6 +61,8 @@ func Check(ctx context.Context, cli client.Client, m *v1.MiddlewareActionBaselin
 	return nil
 }
 
+var ErrActionBaselineNotFound = errors.New("action baseline not found")
+
 var ActionBaselineCache = cache.New[string, v1.MiddlewareActionBaseline](0)
 
 func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.MiddlewareActionBaseline, error) {
@@ -113,7 +115,7 @@ func Get(ctx context.Context, cli client.Client, name, pkgName string) (v1.Middl
 		}
 	}
 
-	return v1.MiddlewareActionBaseline{}, fmt.Errorf("configuration %s not found", name)
+	return v1.MiddlewareActionBaseline{}, fmt.Errorf("%w: %q in package %q", ErrActionBaselineNotFound, name, pkgName)
 
 }
 

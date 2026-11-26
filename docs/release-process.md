@@ -120,6 +120,8 @@ HELM_IMAGE_TAG=sha-abcdef1 make helm-deploy
 
 ## Release Checklist
 
+Before tagging a candidate, run `make test-release` on the local validation machine with the original packages and images. Keep the resulting `summary.tsv` and package matrix report, and verify the required cases passed for the candidate being promoted. See the [testing guide](testing-guide.md) for inputs and reruns.
+
 1. Merge all intended changes into `master`.
 2. Ensure CI and Docker workflows are green on `master`.
 3. Create an immutable release tag:

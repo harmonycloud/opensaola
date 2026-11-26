@@ -59,21 +59,11 @@ make run              # run the controller locally against the cluster
 
 ### Run E2E Tests
 
-**Option A -- Smoke test (creates and tears down a temporary Kind cluster):**
+Each run creates a dedicated Kind cluster, builds and loads the controller image, and removes the cluster on exit.
 
 ```bash
-make docker-build IMG=controller:latest
-kind load docker-image controller:latest --name opensaola-e2e
-make test-e2e-smoke
-```
-
-**Option B -- Against an existing Kind cluster:**
-
-```bash
-make kind-create
-make docker-build IMG=controller:latest
-kind load docker-image controller:latest --name opensaola-e2e
-make test-e2e
+make test-e2e-smoke   # smoke suite
+make test-e2e         # same suite with CertManager installation
 ```
 
 ## Project Architecture
@@ -159,7 +149,7 @@ All CRD type definitions live here. Key files:
 | `make test-envtest` | Run envtest integration tests for controllers |
 | `make bench` | Run Go benchmarks |
 | `make benchstat` | Compare two benchmark outputs (requires `BENCH_OLD` and `BENCH_NEW`) |
-| `make test-e2e` | Run e2e tests against an existing Kind cluster |
+| `make test-e2e` | Run e2e tests on a dedicated temporary Kind cluster |
 | `make test-e2e-smoke` | Run e2e tests on a temporary Kind cluster (auto-creates and deletes) |
 | `make kind-create` | Create a Kind cluster (default name: `opensaola-e2e`) |
 | `make kind-delete` | Delete the Kind cluster |

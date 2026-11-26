@@ -228,13 +228,13 @@ make build
 # 运行测试
 make test                # 单元测试
 make test-envtest        # Controller 集成测试（envtest）
-make test-e2e-smoke      # 端到端测试（自动创建 Kind 集群）
+make test-e2e-smoke      # 端到端测试（自动创建并清理专属 Kind 集群）
 
 # 代码生成（修改 api/v1/ 类型后）
 make generate-all        # 生成代码 + CRD Manifests + 同步到 Helm Chart
 
 # 本地运行
-make kind-create         # 创建 Kind 集群
+make kind-create         # 创建手动开发使用的 Kind 集群
 make install             # 安装 CRD
 make run                 # 本地运行 Operator
 

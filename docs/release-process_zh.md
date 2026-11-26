@@ -120,6 +120,8 @@ HELM_IMAGE_TAG=sha-abcdef1 make helm-deploy
 
 ## 发布检查清单
 
+封板时，在能访问原包与镜像的本地测试机对候选源码运行 `make test-release`。保存本轮 `summary.tsv` 和原包矩阵报告，确认必测场景通过后，再对该候选提交执行下列发布步骤。测试输入、阻塞状态和复跑方法见[测试指南](testing-guide_zh.md)。
+
 1. 将计划发布的变更全部合入 `master`。
 2. 确认 `master` 上 CI 和 Docker workflow 均已通过。
 3. 创建不可变发布 tag：

@@ -14,7 +14,7 @@ def run(*args, stdin=None, timeout=120):
                           timeout=timeout, check=True).stdout
 
 
-def wait_for(description, read):
+def wait_for(description, read, diagnose=None):
     deadline = time.monotonic() + int(os.environ.get("KAFKA_READY_SECONDS", "900"))
     while time.monotonic() < deadline:
         result = read()
@@ -22,6 +22,8 @@ def wait_for(description, read):
             print(description, flush=True)
             return result
         time.sleep(3)
+    if diagnose:
+        diagnose()
     raise RuntimeError("Timed out waiting for " + description)
 
 
@@ -104,6 +106,14 @@ def update_parameters(ns, name, params):
         stdin=json.dumps(patch))
 
 
+def report_phase(name):
+    location = os.environ.get("MATRIX_PROGRESS")
+    if location:
+        path = Path(location)
+        entries = json.loads(path.read_text()) if path.exists() else []
+        path.write_text(json.dumps([*entries, name]))
+
+
 def main():
     ctx = run("kubectl", "config", "current-context").strip()
     if not ctx.startswith("kind-opensaola-intent-kafka-"):
@@ -116,6 +126,10 @@ def main():
         raise ValueError("The MO and MID fixtures must use the same test namespace")
     saola = os.environ.get("SAOLA_BIN", "saola")
     cli = [saola, "--kubeconfig", os.environ["KUBECONFIG"], "--context", ctx]
+    def check_broker_image():
+        from matrix_registry import check_pull_blocker
+        check_pull_blocker(ns, [get(ns, "pod", name + "-broker-0")])
+
     phase = sys.argv[1]
     checkpoint = Path(os.environ["KUBECONFIG"]).with_name("checkpoint.json")
     exec_cmd = ["kubectl", "-n", ns, "exec", "-i", name + "-broker-0", "-c", "broker", "--"]
@@ -127,6 +141,7 @@ def main():
         run("kubectl", "apply", "-n", ns, "-f", str(fixtures / "dependencies.yaml"))
         run(*cli, "validate", os.environ["KAFKA_PACKAGE_DIR"])
         run(*cli, "install", os.environ["KAFKA_PACKAGE_DIR"], "--pkg-namespace", package_ns, "--wait", "3m", timeout=210)
+        report_phase("install")
         run(*cli, "create", "-f", str(fixtures / "mo.json"))
         wait_for("Kafka operator available", lambda: available(get(ns, "mo", mo["metadata"]["name"])))
 
@@ -149,10 +164,13 @@ def main():
         mounted_file = Path(os.environ["KUBECONFIG"]).with_name("mounted-mid.json")
         mounted_file.write_text(json.dumps(mid))
         run(*cli, "create", "-f", str(mounted_file))
-        before = wait_for("Ready broker with declared volume", lambda: ready_broker(ns, name, True))
+        before = wait_for("Ready broker with declared volume", lambda: ready_broker(ns, name, True), check_broker_image)
+        report_phase("publish")
         verify_writable(exec_cmd)
+        report_phase("mount-write")
         topic = "field-test-" + uuid.uuid4().hex
         protocol(exec_cmd, before, name, topic, "produce")
+        report_phase("SCRAM-produce")
         cr = get(ns, "kafkacluster", name)
         history = cr["metadata"]["annotations"]["middleware.cn/resource-intent"]
         record = get(ns, "secret", history)
@@ -205,15 +223,16 @@ def main():
         print(f"Candidate writer confirmed ledger v1 history {meta['uid']} "
               f"at resourceVersion {meta['resourceVersion']}", flush=True)
     update_parameters(ns, name, original)
-    after = wait_for("Ready broker after mount withdrawal", lambda: ready_broker(ns, name, False))
+    after = wait_for("Ready broker after mount withdrawal", lambda: ready_broker(ns, name, False), check_broker_image)
     if saved["podUID"] == after["metadata"]["uid"]:
         raise RuntimeError("Expected the broker to roll after withdrawal")
     run(*exec_cmd, "sh", "-ec", """awk '$2 == "/root/logs" {bad=1} END {exit bad}' /proc/mounts""")
     protocol(exec_cmd, after, name, saved["topic"], "consume")
+    report_phase("withdraw-SCRAM-consume")
     mounted_file = Path(os.environ["KUBECONFIG"]).with_name("mounted-mid.json")
     update_parameters(ns, name, json.loads(mounted_file.read_text())["spec"]["parameters"])
     remounted = wait_for("Existing Ready Kafka accepted the MID volume and mount",
-                         lambda: ready_broker(ns, name, True))
+                         lambda: ready_broker(ns, name, True), check_broker_image)
     if remounted["metadata"]["uid"] == after["metadata"]["uid"]:
         raise RuntimeError("Expected the broker to roll after adding the mount")
     verify_writable(exec_cmd)
@@ -222,7 +241,16 @@ def main():
         raise RuntimeError("MID or primary Kafka CR was replaced")
     print(f"Same MID {saved['midUID']} and Kafka CR {saved['crUID']}; "
           f"Ready Pod UIDs {saved['podUID']} -> {after['metadata']['uid']} -> {remounted['metadata']['uid']}")
+    report_phase("remount")
     print("Kafka mount read/write, unmount and SASL produce/consume passed")
+    package = get(ns, "mid", name)["metadata"]["labels"]["middleware.cn/packagename"]
+    run(*cli, "delete", "middleware", name, "-n", ns, "--wait", "5m", timeout=330)
+    wait_for("Kafka CR and broker removed", lambda: not get(ns, "kafkacluster", name)
+             and not get(ns, "pod", name + "-broker-0"))
+    run(*cli, "delete", "operator", mo["metadata"]["name"], "-n", ns, "--wait", "5m", timeout=330)
+    run(*cli, "uninstall", package, "--wait", "5m", timeout=330)
+    wait_for("Kafka package removed", lambda: not get(ns, "middlewarepackage", package))
+    report_phase("delete-uninstall")
 
 
 if __name__ == "__main__":

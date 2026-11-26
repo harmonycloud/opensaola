@@ -59,21 +59,11 @@ make run              # 本地运行 controller
 
 ### 运行 E2E 测试
 
-**方式 A — 冒烟测试（自动创建和销毁临时 Kind 集群）：**
+每次运行都会创建专属 Kind 集群，构建并加载本次控制器镜像，结束后清理集群。
 
 ```bash
-make docker-build IMG=controller:latest
-kind load docker-image controller:latest --name opensaola-e2e
-make test-e2e-smoke
-```
-
-**方式 B — 在已有的 Kind 集群上运行：**
-
-```bash
-make kind-create
-make docker-build IMG=controller:latest
-kind load docker-image controller:latest --name opensaola-e2e
-make test-e2e
+make test-e2e-smoke   # 冒烟套件
+make test-e2e         # 同一套件，并安装 CertManager
 ```
 
 ## 项目架构
@@ -160,7 +150,7 @@ OpenSaola 是一个 Kubernetes Operator，用于管理中间件生命周期。�
 | `make test-envtest` | 运行 controller envtest 集成测试 |
 | `make coverage` | 运行测试并在浏览器中打开覆盖率报告 |
 | `make bench` | 运行 Go 基准测试 |
-| `make test-e2e` | 在已有 Kind 集群上运行 e2e 测试 |
+| `make test-e2e` | 在专属临时 Kind 集群上运行 E2E 测试 |
 | `make test-e2e-smoke` | 在临时 Kind 集群上运行 e2e 冒烟测试 |
 | `make kind-create` | 创建 Kind 集群 |
 | `make kind-delete` | 删除 Kind 集群 |

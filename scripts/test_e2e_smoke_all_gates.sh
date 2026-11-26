@@ -4,8 +4,6 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-KIND_CLUSTER="${KIND_CLUSTER:-opensaola-e2e}"
-
 if ! command -v kind >/dev/null 2>&1; then
   echo "kind is required for e2e smoke. Please install kind first."
   exit 1
@@ -40,5 +38,5 @@ echo "Enabled gates for local tests:"
 printf ' - %s\n' "${GATES[@]}"
 
 echo
-echo "== make test-e2e-smoke (KIND_CLUSTER=${KIND_CLUSTER}) =="
-make test-e2e-smoke KIND_CLUSTER="${KIND_CLUSTER}"
+echo "== make test-e2e-smoke =="
+make test-e2e-smoke

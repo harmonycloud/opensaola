@@ -4,11 +4,30 @@
 
 This guide covers how to run every level of tests in the OpenSaola project, from fast unit tests to full end-to-end validation on a Kind cluster.
 
+## Choose a validation profile
+
+| Profile | Command | Coverage |
+|---|---|---|
+| PR | `bash scripts/test_all_gates.sh pr` | Units, race, lint, envtest, build, Helm, controller smoke, Redis fields and catalog retention |
+| Release | `make test-release` | PR checks with race-enabled envtest, an in-place Helm upgrade, six original-package cases and active fuzzing |
+| Performance | `make test-performance` | Go benchmarks and alternating baseline/candidate field writes against fresh API servers |
+| Full | `make test-full` | Release and performance, sequentially |
+
+Run from the repository root with Go, Python 3, Docker, Kind, kubectl and Helm. Point `MIDDLEWARE_FIXTURES` to the [original-package fixtures](middleware-matrix.md) for release runs. Every attempt writes a fresh directory under `TEST_REPORT_DIR` (default: system temp) containing a per-gate log and `summary.tsv`. Direct script exit codes are 0 for all passed, 1 if any gate failed and 77 if blocked with no other failures. Make reports its own nonzero exit code; consult the summary for individual results.
+
+Helm upgrades use the latest stable local tag and the default CRD hook. Set `HELM_PREVIOUS_VERSION=1.5.1` to cross the Configuration checkpoint schema change, `HELM_PREVIOUS_CHART` for an offline chart and `HELM_CANDIDATE_IMAGE` for a manager built from working-tree changes. The test checks the data, PVC, CRDs, controller restart and cleanup of a partially published Configuration batch.
+
+Performance inputs are `PERF_BASE_REF`, `PERF_PAIRS` and `KUBEBUILDER_ASSETS`. The same probe runs on both revisions, alternating order. Compare throughput and P95 for 1 KiB at 8 workers and 64 KiB at 32 workers on an idle host. Incorrect data, failed withdrawal and any write on unchanged input fail the test.
+
+`make test-envtest` also requires PASS events for named historical behavior checks, including both accepted API defaults on a 5Gi claim and rejected rewrites to 1Gi. Update the [behavior mapping](../hack/check-regression-events.py) alongside intentional changes to those tests.
+
+For topology-specific checks (MinIO node loss and dual storage classes, ZooKeeper election and restart, and Kafka ACLs), use the [periodic runtime checklist](periodic-runtime-checks_zh.md) when those dependencies change and record their outcomes separately.
+
 ## Test Tiers Overview
 
 | Tier | Command | Scope | Dependencies |
 |------|---------|-------|--------------|
-| Unit | `make test` | All packages except controller + e2e | None |
+| Unit | `make test` | Default tests, including controller units, excluding cluster E2E | None |
 | Race | `make test-race` | Same as unit, with race detector | None |
 | Envtest | `make test-envtest` | Controller integration tests | envtest binaries |
 | E2E | `make test-e2e-smoke` | Manager deployment on Kind | Kind cluster + Docker |
@@ -20,7 +39,7 @@ This guide covers how to run every level of tests in the OpenSaola project, from
 make test
 ```
 
-This runs all packages except `internal/controller` (which requires envtest) and `test/e2e` (which requires a cluster). A `cover.out` file is generated automatically.
+This runs packages with default-tagged tests and writes `cover.out`. Run `make test-envtest` for API server integration cases.
 
 To run a specific package:
 
@@ -62,41 +81,9 @@ make undeploy
 make uninstall
 ```
 
-## E2E Tests
+## Isolated Kind clusters
 
-### Automated (creates and destroys a Kind cluster)
-
-```bash
-make test-e2e-smoke
-```
-
-This target creates a temporary Kind cluster named `opensaola-e2e`, runs the e2e suite, and deletes the cluster afterward.
-
-### Against an existing cluster
-
-```bash
-# Create a Kind cluster (if you don't have one)
-make kind-create
-
-# Run e2e tests
-make test-e2e
-
-# Clean up
-make kind-delete
-```
-
-### Full E2E script
-
-A convenience script that builds, deploys, and validates the operator end-to-end:
-
-```bash
-./scripts/e2e-full-test.sh
-
-# Override the image tag:
-IMG=opensaola:dev ./scripts/e2e-full-test.sh
-```
-
-> **Note:** The E2E script (`scripts/e2e-full-test.sh`) automatically rebuilds the operator image and redeploys it as the first step, ensuring tests run against the latest code.
+`make test-e2e-smoke`, `make test-e2e`, and `scripts/e2e-full-test.sh` run the controller smoke suite in a new local Kind cluster with a private kubeconfig. The runner cleans up its cluster on exit.
 
 ## Code Coverage
 
@@ -156,7 +143,7 @@ These manual test scenarios verify the operator's behavior across the full resou
 
 ### Upgrade Lifecycle
 1. Create Middleware with version 24.8
-2. Annotate to trigger upgrade: `kubectl annotate mid <name> -n <ns> middleware.cn/update=true`
+2. Annotate to trigger upgrade: `kubectl annotate mid <name> -n <ns> middleware.cn/update=<target-version> middleware.cn/baseline=<target-baseline>`
 3. Verify state transitions: Available → Updating → Available
 4. Verify pods updated with new configuration
 
@@ -179,43 +166,3 @@ make lint                                      # golangci-lint
 make test                                      # unit tests
 make manifests generate && git diff --exit-code # CRD drift check
 ```
-
-## Package Coverage Matrix
-
-Packages **with** tests:
-
-| Package | Test Files |
-|---------|-----------|
-| `internal/controller` | 12 |
-| `pkg/tools` | 6 |
-| `internal/k8s` | 5 |
-| `internal/service/middlewareoperator` | 4 |
-| `internal/service/packages` | 3 |
-| `internal/service/middleware` | 2 |
-| `internal/service/synchronizer` | 2 |
-| `test/e2e` | 2 |
-| `api/v1` | 1 |
-| `internal/cache` | 1 |
-| `internal/concurrency` | 1 |
-| `internal/k8s/kubeclient` | 1 |
-| `internal/resource` | 1 |
-| `internal/resource/logger` | 1 |
-| `internal/service/consts` | 1 |
-| `internal/service/customresource` | 1 |
-| `internal/service/middlewareaction` | 1 |
-| `internal/service/middlewareactionbaseline` | 1 |
-| `internal/service/middlewarebaseline` | 1 |
-| `internal/service/middlewareconfiguration` | 1 |
-| `internal/service/middlewareoperatorbaseline` | 1 |
-| `internal/service/middlewarepackage` | 1 |
-| `internal/service/status` | 1 |
-| `internal/service/watcher` | 1 |
-| `pkg/config` | 1 |
-| `pkg/tools/ctxkeys` | 1 |
-
-Packages **without** tests:
-
-| Package | Notes |
-|---------|-------|
-| `cmd` | Main entrypoint; tested via e2e |
-| `test/utils` | Test utilities (not a testable package) |

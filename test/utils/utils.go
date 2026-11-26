@@ -167,62 +167,9 @@ func IsCertManagerCRDsInstalled() bool {
 
 // LoadImageToKindClusterWithName loads a local docker image to the kind cluster
 func LoadImageToKindClusterWithName(name string) error {
-	cluster := "kind"
-	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
-		cluster = v
-	}
-	kindOptions := []string{"load", "docker-image", name, "--name", cluster}
-	cmd := exec.Command("kind", kindOptions...)
+	cmd := exec.Command("bash", "hack/load-test-kind-image.sh", os.Getenv("KIND_CLUSTER"), name)
 	_, err := Run(cmd)
 	return err
-}
-
-// KindKubeconfig returns the absolute path to the kubeconfig for the current kind cluster.
-func KindKubeconfig() (string, error) {
-	cluster := "kind"
-	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
-		cluster = v
-	}
-	cmd := exec.Command("kind", "get", "kubeconfig-path", "--name", cluster)
-	out, err := Run(cmd)
-	if err == nil {
-		p := strings.TrimSpace(out)
-		if p == "" {
-			return "", fmt.Errorf("kind kubeconfig path is empty for cluster %q", cluster)
-		}
-		return p, nil
-	}
-
-	// Fallback for newer kind versions where kubeconfig-path is removed.
-	cmd = exec.Command("kind", "get", "kubeconfig", "--name", cluster)
-	out, err = Run(cmd)
-	if err != nil {
-		return "", err
-	}
-	kubeconfigYAML := strings.TrimSpace(out)
-	if kubeconfigYAML == "" {
-		return "", fmt.Errorf("kind kubeconfig is empty for cluster %q", cluster)
-	}
-
-	f, err := os.CreateTemp("", fmt.Sprintf("kind-kubeconfig-%s-*.yaml", cluster))
-	if err != nil {
-		return "", err
-	}
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", err
-	}
-	if _, err := f.WriteString(kubeconfigYAML); err != nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(f.Name())
-		return "", err
-	}
-	return f.Name(), nil
 }
 
 // GetNonEmptyLines converts given command output string into individual objects

@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: upgrade-app
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: middleware.cn/v1
+kind: MiddlewareBaseline
+metadata:
+  name: upgrade-redis
+  labels:
+    middleware.cn/packagename: upgrade
+spec:
+  gvk: {group: apps, version: v1, kind: Deployment}
+  parameters:
+    replicas: 1
+    strategy: {type: Recreate}
+    selector: {matchLabels: {app: upgrade-redis}}
+    template:
+      metadata: {labels: {app: upgrade-redis}}
+      spec:
+        containers:
+        - name: redis
+          image: redis:7.2.7-alpine
+          imagePullPolicy: IfNotPresent
+          readinessProbe:
+            exec: {command: [redis-cli, PING]}
+            periodSeconds: 2
+          volumeMounts: [{name: data, mountPath: /data}]
+        volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: redis-data}
+---
+apiVersion: middleware.cn/v1
+kind: Middleware
+metadata:
+  name: upgrade-redis
+  namespace: upgrade-app
+  labels:
+    middleware.cn/packagename: upgrade
+spec:
+  baseline: upgrade-redis
+  necessary: {}
+  parameters: {}

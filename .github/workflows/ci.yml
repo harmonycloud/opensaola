@@ -40,16 +40,7 @@ jobs:
           name: coverage
           path: cover.out
       - name: Check coverage threshold
-        env:
-          MIN_COVERAGE: "10"
-        run: |
-          COVERAGE=$(go tool cover -func=cover.out 2>/dev/null | grep total: | awk '{print substr($3, 1, length($3)-1)}')
-          echo "Total coverage: ${COVERAGE}%"
-          echo "Minimum coverage: ${MIN_COVERAGE}%"
-          if [ -n "$COVERAGE" ] && [ "$(echo "$COVERAGE < $MIN_COVERAGE" | bc -l 2>/dev/null || echo 0)" -eq 1 ]; then
-            echo "FAIL: Coverage ${COVERAGE}% is below ${MIN_COVERAGE}% threshold"
-            exit 1
-          fi
+        run: make check-coverage
 
   test-race:
     name: Race Detector
@@ -87,11 +78,21 @@ jobs:
         run: make build
 
   helm-chart:
-    name: Helm Chart
+    name: ${{ matrix.check }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - helm: v4.3.2
+            check: Helm Chart
+          - helm: v3.18.3
+            check: Helm Chart (v3)
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
+        with:
+          version: ${{ matrix.helm }}
       - name: Check Helm chart
         run: make helm-check
 

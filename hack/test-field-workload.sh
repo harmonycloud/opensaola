@@ -59,10 +59,7 @@ kubectl wait --for=condition=Established --timeout=90s -f config/crd/bases
 if [[ "$mode" == redis ]]; then
     img=redis:7.2.7-alpine
     docker image inspect "$img" >/dev/null 2>&1 || docker pull "$img"
-    if ! "$kind_bin" load docker-image --name "$cluster" "$img"; then
-        platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$img")
-        docker save --platform "$platform" "$img" | docker exec -i "$cluster-control-plane" ctr -n k8s.io images import --local --platform "$platform" -
-    fi
+    bash hack/load-test-kind-image.sh "$cluster" "$img"
     OPENSAOLA_LOCAL_INTENT_KUBECONFIG="$KUBECONFIG" go test -tags integration ./internal/k8s -run '^TestLocalIntentReconcile$' -v -count=1 -timeout 20m
 else
     # Optional preloaded OCI/docker archives, one platform per tar. Otherwise

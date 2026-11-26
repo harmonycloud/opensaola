@@ -228,13 +228,13 @@ make build
 # Run tests
 make test                # unit tests
 make test-envtest        # controller integration tests (envtest)
-make test-e2e-smoke      # e2e tests (auto-creates Kind cluster)
+make test-e2e-smoke      # e2e tests (creates and removes a dedicated Kind cluster)
 
 # Code generation (after modifying api/v1/ types)
 make generate-all        # generate code + manifests + sync CRDs to Helm chart
 
 # Run locally
-make kind-create         # create Kind cluster
+make kind-create         # create a Kind cluster for manual development
 make install             # install CRDs
 make run                 # run operator locally
 

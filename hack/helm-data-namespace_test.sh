@@ -2,31 +2,8 @@
 # Exercise real Helm pruning and Kubernetes namespace garbage collection.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
-tmp=$(mktemp -d)
-cluster="opensaola-catalog-$(basename "$tmp" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
-kind_bin=${KIND_BIN:-kind}
-export KUBECONFIG="$tmp/kubeconfig"
-cleanup() {
-  status=$?
-  trap - EXIT
-  if [[ -f "$KUBECONFIG" ]]; then
-    "$kind_bin" delete cluster --name "$cluster" || status=1
-  fi
-  rm -rf "$tmp"
-  exit "$status"
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+source "$repo/hack/with-test-kind.sh"
 
-helm pull oci://ghcr.io/harmonycloud/charts/opensaola --version 1.5.0 --untar --untardir "$tmp"
-"$kind_bin" create cluster --name "$cluster" --image "${KIND_NODE_IMAGE:-kindest/node:v1.34.3}" --kubeconfig "$KUBECONFIG" --wait 180s
-[[ $(kubectl config current-context) == "kind-$cluster" ]]
-ns=operator
-release=catalog-test
-chart="$repo/chart/opensaola"
-old="$tmp/opensaola"
-kubectl create namespace "$ns"
 install() {
   helm install "$release" "$1" -n "$ns" --set kubectl.installCRDs=false --set-string fullnameOverride="$ns-controller" \
     --set-string config.dataNamespace="$2" --set config.createDataNamespace="$3" >/dev/null
@@ -57,66 +34,78 @@ assert_protected() {
     END {exit !found}'
 }
 
-install "$old" catalog-old true
-seed catalog-old
-before=$(snapshot catalog-old)
-for target in 'catalog-old false' 'catalog-new true'; do
-  read -r name create <<< "$target"
-  if upgrade "$name" "$create" >"$tmp/rejected" 2>&1; then
-    echo "Unsafe upgrade to $target succeeded" >&2; exit 1
-  fi
-  grep -F 'data namespace "catalog-old" has no Helm keep policy' "$tmp/rejected"
+verify_catalog() {
+  local tmp ns release chart old
+  tmp=$(dirname "$KUBECONFIG")
+  ns=operator
+  release=catalog-test
+  chart="$repo/chart/opensaola"
+  old="$tmp/opensaola"
+  helm pull oci://ghcr.io/harmonycloud/charts/opensaola --version 1.5.0 --untar --untardir "$tmp"
+  kubectl create namespace "$ns"
+  install "$old" catalog-old true
+  seed catalog-old
+  before=$(snapshot catalog-old)
+  for target in 'catalog-old false' 'catalog-new true'; do
+    read -r name create <<< "$target"
+    if upgrade "$name" "$create" >"$tmp/rejected" 2>&1; then
+      echo "Unsafe upgrade to $target succeeded" >&2; exit 1
+    fi
+    grep -F 'data namespace "catalog-old" has no Helm keep policy' "$tmp/rejected"
+    [[ $(snapshot catalog-old) == "$before" ]]
+    [[ $(helm history "$release" -n "$ns" --max 1 | awk 'END{print $1}') == 1 ]]
+  done
+  observed=$(kubectl get ns catalog-new --ignore-not-found -o name)
+  [[ -z "$observed" ]]
+  echo 'PASS: unprotected toggle and rename rejected before a new revision'
+
+  # A second release with the same name in another namespace must not see this
+  # old, still-unprotected catalog as its own.
+  ns=other-operator
+  kubectl create namespace "$ns"
+  kubectl create namespace external
+  seed external
+  external_before=$(snapshot external)
+  install "$old" external false
+  upgrade external false >/dev/null
+  uninstall
+  [[ $(snapshot external) == "$external_before" ]]
+  assert_external external
+  echo 'PASS: external namespace remains external; other release does not block upgrade'
+  ns=operator
+
+  upgrade catalog-old true >/dev/null
+  assert_protected catalog-old
   [[ $(snapshot catalog-old) == "$before" ]]
-  [[ $(helm history "$release" -n "$ns" --max 1 | awk 'END{print $1}') == 1 ]]
-done
-observed=$(kubectl get ns catalog-new --ignore-not-found -o name)
-[[ -z "$observed" ]]
-echo 'PASS: unprotected toggle and rename rejected before a new revision'
+  upgrade catalog-old false >/dev/null
+  [[ $(snapshot catalog-old) == "$before" ]]
+  uninstall
+  [[ $(snapshot catalog-old) == "$before" ]]
+  echo 'PASS: legacy upgrade records keep; toggle and uninstall retain original data'
 
-# A second release with the same name in another namespace must not see this
-# old, still-unprotected catalog as its own.
-ns=other-operator
-kubectl create namespace "$ns"
-kubectl create namespace external
-seed external
-external_before=$(snapshot external)
-install "$old" external false
-upgrade external false >/dev/null
-uninstall
-[[ $(snapshot external) == "$external_before" ]]
-assert_external external
-echo 'PASS: external namespace remains external; other release does not block upgrade'
-ns=operator
+  install "$chart" catalog-a true
+  assert_protected catalog-a
+  seed catalog-a
+  a=$(snapshot catalog-a)
+  upgrade catalog-b true >/dev/null
+  assert_protected catalog-b
+  [[ $(snapshot catalog-a) == "$a" ]]
+  observed=$(kubectl -n catalog-b get secret sample --ignore-not-found -o name)
+  [[ -z "$observed" ]]
+  seed catalog-b
+  b=$(snapshot catalog-b)
+  uninstall
+  [[ $(snapshot catalog-a) == "$a" && $(snapshot catalog-b) == "$b" ]]
+  echo 'PASS: rename preserves the old catalog; uninstall preserves the currently managed catalog'
 
-upgrade catalog-old true >/dev/null
-assert_protected catalog-old
-[[ $(snapshot catalog-old) == "$before" ]]
-upgrade catalog-old false >/dev/null
-[[ $(snapshot catalog-old) == "$before" ]]
-uninstall
-[[ $(snapshot catalog-old) == "$before" ]]
-echo 'PASS: legacy upgrade records keep; toggle and uninstall retain original data'
+  install "$chart" "$ns" true
+  seed "$ns"
+  same=$(snapshot "$ns")
+  upgrade "$ns" false >/dev/null
+  uninstall
+  [[ $(snapshot "$ns") == "$same" ]]
+  assert_external "$ns"
+  echo 'PASS: release namespace remains externally managed'
+}
 
-install "$chart" catalog-a true
-assert_protected catalog-a
-seed catalog-a
-a=$(snapshot catalog-a)
-upgrade catalog-b true >/dev/null
-assert_protected catalog-b
-[[ $(snapshot catalog-a) == "$a" ]]
-observed=$(kubectl -n catalog-b get secret sample --ignore-not-found -o name)
-[[ -z "$observed" ]]
-seed catalog-b
-b=$(snapshot catalog-b)
-uninstall
-[[ $(snapshot catalog-a) == "$a" && $(snapshot catalog-b) == "$b" ]]
-echo 'PASS: rename preserves the old catalog; uninstall preserves the currently managed catalog'
-
-install "$chart" "$ns" true
-seed "$ns"
-same=$(snapshot "$ns")
-upgrade "$ns" false >/dev/null
-uninstall
-[[ $(snapshot "$ns") == "$same" ]]
-assert_external "$ns"
-echo 'PASS: release namespace remains externally managed'
+with_test_kind verify_catalog

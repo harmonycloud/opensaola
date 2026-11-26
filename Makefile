@@ -193,7 +193,7 @@ vet: ## Run go vet against code.
 #   make test          -- Unit tests (includes controller unit tests)
 #   make test-race     -- Unit tests with Go race detector
 #   make test-envtest  -- API server integration tests (requires setup-envtest)
-#   make test-e2e      -- E2E tests on existing Kind cluster
+#   make test-e2e      -- E2E tests on a fresh Kind cluster
 #   make test-e2e-smoke-- E2E tests (auto-creates/destroys Kind cluster)
 #   make bench         -- Performance benchmarks
 #   make coverage      -- Unit tests with HTML coverage report
@@ -201,7 +201,20 @@ vet: ## Run go vet against code.
 
 .PHONY: test-makefile
 test-makefile: ## Test Makefile targets that must not require the Go toolchain.
+	bash hack/test-gates_test.sh
+	python3 hack/matrix_registry_test.py
+	bash hack/with-test-kind_test.sh
 	bash hack/make-helm-deploy_test.sh
+
+.PHONY: test-full test-release test-performance
+test-full: ## Run all checks, original packages, upgrade and performance comparisons.
+	bash scripts/test_all_gates.sh full
+
+test-release: ## Run the candidate release checks and original package matrix.
+	bash scripts/test_all_gates.sh release
+
+test-performance: ## Run benchmarks and paired field-writer measurements.
+	bash scripts/test_all_gates.sh performance
 
 .PHONY: test-release-automation
 test-release-automation:
@@ -216,6 +229,13 @@ test-release-automation:
 test: test-makefile test-release-automation manifests generate fmt vet ## Run tests.
 	go test $$(go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v '^$$' | grep -v /e2e) -coverprofile cover.out
 
+MIN_COVERAGE ?= 10
+.PHONY: check-coverage
+check-coverage: ## Require a valid coverage total meeting the CI minimum.
+	go tool cover -func=cover.out | awk -v min='$(MIN_COVERAGE)' ' \
+	    $$1 == "total:" && $$NF ~ /^[0-9]+([.][0-9]+)?%$$/ {print "Total coverage:", $$NF; passed = ($$NF + 0 >= min)} \
+	    END {if (!passed) {print "Missing coverage total or below " min "%" > "/dev/stderr"; exit 1}}'
+
 .PHONY: coverage
 coverage: test ## Open test coverage report in browser.
 	go tool cover -html=cover.out
@@ -226,7 +246,7 @@ test-race: manifests generate fmt vet ## Run tests with race detector.
 
 .PHONY: test-envtest
 test-envtest: manifests generate setup-envtest ## Run all internal tests with envtest enabled.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test -tags envtest ./internal/... -v -count=1
+	USE_EXISTING_CLUSTER=false KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $(ENVTEST_FLAGS) -tags envtest ./internal/... -json -count=1 | python3 hack/check-regression-events.py
 
 # Field management release checks use dedicated disposable Kind clusters.
 .PHONY: test-fields-redis test-fields-kafka
@@ -246,21 +266,11 @@ benchstat: benchstat-bin ## Compare two benchmark outputs (BENCH_OLD, BENCH_NEW)
 	@test -n "$(BENCH_NEW)" || { echo "BENCH_NEW is required"; exit 1; }
 	$(BENCHSTAT) $(BENCH_OLD) $(BENCH_NEW)
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
-.PHONY: test-e2e
-test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	@command -v kind >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
-		exit 1; \
-	}
-	@kind get clusters | grep -qx '$(KIND_CLUSTER)' || { \
-		echo "No Kind cluster named '$(KIND_CLUSTER)' is running. Create one via: kind create cluster --name $(KIND_CLUSTER)"; \
-		exit 1; \
-	}
-	KIND_CLUSTER='$(KIND_CLUSTER)' CERT_MANAGER_INSTALL_SKIP='$(CERT_MANAGER_INSTALL_SKIP)' $(E2E_TEST)
+# Smoke skips the optional CertManager installation.
+.PHONY: test-e2e test-e2e-smoke
+test-e2e-smoke: CERT_MANAGER_INSTALL_SKIP=true
+test-e2e test-e2e-smoke: manifests generate fmt vet ## Run the E2E suite on a dedicated, disposable Kind cluster.
+	CERT_MANAGER_INSTALL_SKIP='$(CERT_MANAGER_INSTALL_SKIP)' bash hack/with-test-kind.sh $(E2E_TEST)
 
 .PHONY: kind-create
 kind-create: ## Create a Kind cluster for e2e (KIND_CLUSTER, default: opensaola-e2e).
@@ -278,24 +288,6 @@ kind-create: ## Create a Kind cluster for e2e (KIND_CLUSTER, default: opensaola-
 kind-delete: ## Delete the Kind cluster for e2e (KIND_CLUSTER, default: opensaola-e2e).
 	@command -v kind >/dev/null 2>&1 || exit 0
 	kind delete cluster --name '$(KIND_CLUSTER)' || true
-
-.PHONY: test-e2e-smoke
-test-e2e-smoke: manifests generate fmt vet ## Run e2e on a temporary Kind cluster (creates + deletes).
-	@created=0; \
-	if kind get clusters 2>/dev/null | grep -qx '$(KIND_CLUSTER)'; then \
-		echo "Reusing Kind cluster '$(KIND_CLUSTER)'"; \
-	else \
-		created=1; \
-		$(MAKE) kind-create KIND_CLUSTER='$(KIND_CLUSTER)'; \
-	fi; \
-	set +e; \
-	KIND_CLUSTER='$(KIND_CLUSTER)' CERT_MANAGER_INSTALL_SKIP=true $(E2E_TEST); \
-	status=$$?; \
-	set -e; \
-	if [ $$created -eq 1 ]; then \
-		$(MAKE) kind-delete KIND_CLUSTER='$(KIND_CLUSTER)' || true; \
-	fi; \
-	exit $$status
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

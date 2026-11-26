@@ -1,0 +1,25 @@
+apiVersion: middleware.cn/v1
+kind: MiddlewareConfiguration
+metadata:
+  name: upgrade-a
+  labels:
+    middleware.cn/packagename: upgrade
+spec:
+  template: |
+    apiVersion: v1
+    kind: ConfigMap
+    metadata: {name: upgrade-a}
+    data: {value: first}
+---
+apiVersion: middleware.cn/v1
+kind: MiddlewareConfiguration
+metadata:
+  name: upgrade-b
+  labels:
+    middleware.cn/packagename: upgrade
+spec:
+  template: |
+    apiVersion: v1
+    kind: ConfigMap
+    metadata: {name: upgrade-b, namespace: upgrade-repair}
+    data: {value: second}

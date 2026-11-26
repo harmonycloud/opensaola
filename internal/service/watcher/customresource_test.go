@@ -19,6 +19,8 @@ package watcher
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,6 +59,38 @@ func TestCustomResourceWatcher_MembersRemainIsolated(t *testing.T) {
 	case <-cw.StopChan:
 	default:
 		t.Fatal("watcher did not stop after final member release")
+	}
+}
+
+func TestCustomResourceWatcher_ConcurrentMembership(t *testing.T) {
+	w := NewCRWatcher(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}, "test")
+	if !w.addMember("anchor") {
+		t.Fatal("anchor rejected")
+	}
+	run := func(op func(string)) {
+		var group sync.WaitGroup
+		for i := range 100 {
+			group.Go(func() { op(fmt.Sprintf("member-%d", i)) })
+		}
+		group.Wait()
+	}
+	run(func(name string) {
+		if !w.addMember(name) {
+			t.Errorf("add rejected for %s", name)
+		}
+	})
+	run(func(name string) {
+		if removed, empty := w.removeMember(name); !removed || empty {
+			t.Errorf("remove %s returned removed=%v, empty=%v", name, removed, empty)
+		}
+	})
+	if removed, empty := w.removeMember("anchor"); !removed || !empty {
+		t.Fatal("anchor was not the last member")
+	}
+	select {
+	case <-w.StopChan:
+	default:
+		t.Fatal("watcher still running after the last removal")
 	}
 }
 

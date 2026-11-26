@@ -4,11 +4,30 @@
 
 本指南介绍如何运行 OpenSaola 项目中各层级的测试，从快速单元测试到在 Kind 集群上的完整端到端验证。
 
+## 选择测试范围
+
+| 场景 | 命令 | 实际执行 |
+|---|---|---|
+| 日常开发 | `bash scripts/test_all_gates.sh pr` | 默认 Go 测试与竞态、lint、envtest、构建、Helm、本地 Kind 控制器冒烟、Redis 字段与数据、目录命名空间保留 |
+| 候选封板 | `make test-release` | 上述检查，envtest 同时开启竞态，再执行真实 Helm 存量升级、六组原包样例和两个主动 fuzz 目标 |
+| 性能对照 | `make test-performance` | Go 基准及上一正式版与当前工作树在本机交替执行的 API 写入对照 |
+| 全量 | `make test-full` | 封板与性能两组，顺序执行 |
+
+从仓库根目录执行。准备 Go、Python 3、Docker、Kind、kubectl 与 Helm。发布前设置 `MIDDLEWARE_FIXTURES` 为[原包样例目录](middleware-matrix.md)，并准备各包的镜像、依赖和 CLI。每轮都会在 `TEST_REPORT_DIR`（默认系统临时目录）下新建报告目录，每项保留日志和 `summary.tsv` 记录。直接运行脚本时，退出码 0 表示全部通过，1 表示有失败，77 表示存在阻塞且其余项目通过。使用 make 时，查看原始阶段退出码请读汇总表。重跑会生成另一份报告。
+
+Helm 升级默认读取本地最新正式版标签，在独立集群用正式 Chart 创建 Redis 和 PVC，通过默认 hook 升级到候选 Chart。用 `HELM_PREVIOUS_VERSION=1.5.1` 可重测引入 Configuration 写入进度字段的升级。离线包使用 `HELM_PREVIOUS_CHART`，工作树中的控制器变更需提供已构建的 `HELM_CANDIDATE_IMAGE`。
+
+性能比较可设 `PERF_BASE_REF`、`PERF_PAIRS`、`KUBEBUILDER_ASSETS`。每组在独立 envtest 中运行相同探针，交替新旧顺序，记录 1 KiB、8 并发及 64 KiB、32 并发的吞吐和 P95。数据错误、撤回未生效、幂等重放产生写入均失败。对比时间指标时保留原始窗口并避开其他高负载任务。
+
+`make test-envtest` 核对历史行为的实际 PASS 回执。例如 StatefulSet 同时验证“5Gi 遇到默认字段能发布”和“改成 1Gi 被拒绝”。用例更名时同步维护[行为与断言的对应关系](../hack/check-regression-events.py)；缺失或跳过的必测回执会导致失败。
+
+MinIO 降员与双存储类、ZooKeeper 选主和重启 Action、Kafka 严格 ACL 需要特定拓扑和权限。按[中间件专项复测](periodic-runtime-checks_zh.md)在相关改动时执行，单列现场结论。
+
 ## 测试层级概览
 
 | 层级 | 命令 | 范围 | 依赖 |
 |------|------|------|------|
-| 单元测试 | `make test` | 除 controller 和 e2e 外的所有包 | 无 |
+| 单元测试 | `make test` | 包含普通 controller 测试，排除集群 E2E | 无 |
 | 竞态检测 | `make test-race` | 同单元测试，启用 race detector | 无 |
 | Envtest | `make test-envtest` | Controller 集成测试 | envtest 二进制文件 |
 | E2E | `make test-e2e-smoke` | 在 Kind 上部署 Manager 并测试 | Kind 集群 + Docker |
@@ -20,7 +39,7 @@
 make test
 ```
 
-此命令会运行除 `internal/controller`（需要 envtest）和 `test/e2e`（需要集群）之外的所有包。会自动生成 `cover.out` 覆盖率文件。
+运行具备默认构建标签的测试并生成 `cover.out`。带 `envtest` 标签的 API 用例由 `make test-envtest` 单独运行。
 
 运行特定包的测试：
 
@@ -62,41 +81,9 @@ make undeploy
 make uninstall
 ```
 
-## E2E 测试
+## 专属 Kind 集群
 
-### 自动模式（自动创建和销毁 Kind 集群）
-
-```bash
-make test-e2e-smoke
-```
-
-此目标会创建一个名为 `opensaola-e2e` 的临时 Kind 集群，运行 e2e 测试套件，然后删除集群。
-
-### 使用已有集群
-
-```bash
-# 创建 Kind 集群（如果没有的话）
-make kind-create
-
-# 运行 e2e 测试
-make test-e2e
-
-# 清理
-make kind-delete
-```
-
-### 完整 E2E 脚本
-
-提供了一个便捷脚本，可以一键完成构建、部署和验证 operator 的端到端流程：
-
-```bash
-./scripts/e2e-full-test.sh
-
-# 覆盖镜像标签：
-IMG=opensaola:dev ./scripts/e2e-full-test.sh
-```
-
-> **注意：** E2E 脚本（`scripts/e2e-full-test.sh`）会自动重新构建 operator 镜像并重新部署，确保测试使用最新代码。
+`make test-e2e-smoke`、`make test-e2e` 和 `scripts/e2e-full-test.sh` 都在新建的本地 Kind 集群运行控制器冒烟测试。每轮使用独立 kubeconfig，结束后删除本轮集群。无需切换 kubectl 上下文或手动建群。
 
 ## 代码覆盖率
 
@@ -156,7 +143,7 @@ ClickHouse 的示例 YAML 文件位于 `saola-cli/docs/e2e-samples/`。
 
 ### 升级生命周期
 1. 创建版本为 24.8 的 Middleware
-2. 添加注解触发升级：`kubectl annotate mid <name> -n <ns> middleware.cn/update=true`
+2. 添加注解触发升级：`kubectl annotate mid <name> -n <ns> middleware.cn/update=<target-version> middleware.cn/baseline=<target-baseline>`
 3. 验证状态流转：Available → Updating → Available
 4. 验证 Pod 已使用新配置更新
 
@@ -179,43 +166,3 @@ make lint                                      # golangci-lint
 make test                                      # 单元测试
 make manifests generate && git diff --exit-code # CRD 漂移检查
 ```
-
-## 包覆盖率矩阵
-
-**已有测试** 的包：
-
-| 包 | 测试文件数 |
-|----|-----------|
-| `internal/controller` | 12 |
-| `pkg/tools` | 6 |
-| `internal/k8s` | 5 |
-| `internal/service/middlewareoperator` | 4 |
-| `internal/service/packages` | 3 |
-| `internal/service/middleware` | 2 |
-| `internal/service/synchronizer` | 2 |
-| `test/e2e` | 2 |
-| `api/v1` | 1 |
-| `internal/cache` | 1 |
-| `internal/concurrency` | 1 |
-| `internal/k8s/kubeclient` | 1 |
-| `internal/resource` | 1 |
-| `internal/resource/logger` | 1 |
-| `internal/service/consts` | 1 |
-| `internal/service/customresource` | 1 |
-| `internal/service/middlewareaction` | 1 |
-| `internal/service/middlewareactionbaseline` | 1 |
-| `internal/service/middlewarebaseline` | 1 |
-| `internal/service/middlewareconfiguration` | 1 |
-| `internal/service/middlewareoperatorbaseline` | 1 |
-| `internal/service/middlewarepackage` | 1 |
-| `internal/service/status` | 1 |
-| `internal/service/watcher` | 1 |
-| `pkg/config` | 1 |
-| `pkg/tools/ctxkeys` | 1 |
-
-**尚无测试** 的包：
-
-| 包 | 备注 |
-|----|------|
-| `cmd` | 主入口；通过 e2e 测试覆盖 |
-| `test/utils` | 测试工具包（非可测试包） |

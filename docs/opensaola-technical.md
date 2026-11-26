@@ -1211,9 +1211,9 @@ HandleResource(Publish)
 
 `SyncCustomResourceV2` 在启动时计算一次 `Middleware.status.customResources`。同一命名空间的 MID 共享七类资源的 informer 缓存。后续通知按 MID 合并，默认窗口为 200 毫秒。
 
-- Pod 新增或删除时，根据 Pod 标签、自身身份、owner 链（如 Pod → ReplicaSet → Deployment → 主 CR），以及 MID 灾备或数据同步注解里直接引用的 Pod，通知所有相关 MID。更新时同时检查新旧 Pod，因此更换归属后，原 MID 和新 MID 都能刷新状态。
-- 归属判断只读本地缓存。遇到归属不明、同名 owner 的 UID 已变、缓存或注册信息尚未就绪等情况，会通知该命名空间的全部活跃 MID。
-- StatefulSet、Deployment、DaemonSet、ReplicaSet、Service、PVC 发生变更，以及命名空间缓存首次就绪时，也会通知全部活跃 MID。收到通知的 MID 执行原有状态计算。
+- Pod、Deployment、ReplicaSet 发生变化时，只通知能确定与资源相关的 MID。资源本身可以是 MID 的主 CR，也可以由 MID 或主 CR 持有。Pod 和 Deployment 还会按实例标签匹配。ReplicaSet 通过 owner UID 找到所属 Deployment，Pod 也能沿这条链找到 MID。
+- 通过灾备或数据同步注解直接引用该资源的 MID 也会收到通知。更新时合并变更前后的接收者，删除时使用事件携带的旧对象。归属判断只读本地缓存。归属不明、同名对象 UID 冲突、缓存或注册信息尚未就绪时，会通知该命名空间的全部活跃 MID。
+- StatefulSet、DaemonSet、Service、PVC 发生变更，以及命名空间缓存首次就绪时，也会通知全部活跃 MID。收到通知的 MID 执行原有状态计算。
 
 **同步内容**：
 1. 获取 CR 的 status -> 反序列化到 CustomResources

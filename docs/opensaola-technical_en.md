@@ -1214,9 +1214,9 @@ Defines all constants:
 
 `SyncCustomResourceV2` computes `Middleware.status.customResources` on startup. Seven informers share a namespace cache. Each MID groups subsequent notifications into a debounce window (200 ms by default).
 
-- A Pod addition or deletion notifies the MIDs identified by its labels, its own identity, or its owner chain (for example, Pod → ReplicaSet → Deployment → primary CR). A MID can also name a Pod in a disaster or data sync annotation. An update considers both versions of the Pod so a change of ownership wakes the old and new MIDs.
-- Routing uses the local cache. If a Pod's ownership is unclear, an owner UID has changed, or a required cache or registration is unavailable, every active MID in the namespace receives the event.
-- StatefulSet, Deployment, DaemonSet, ReplicaSet, Service and PVC events also notify the entire namespace, as does the initial cache sync. Each notified MID runs its normal status calculation.
+- Pod, Deployment and ReplicaSet events notify the affected MIDs when their dependencies can be resolved. The resource may itself be a primary CR or may belong to a MID or its primary CR. Pod and Deployment labels can also identify MIDs. ReplicaSets are matched through the owner UID of their Deployment, and Pods can follow the same chain.
+- MIDs that name the resource in a disaster or data sync annotation are notified too. Updates notify the union of the old and new recipients. Deletes use the object carried by the event. Routing uses the local cache. Unresolved ownership, a conflicting UID, or an unavailable cache or registration causes a namespace-wide notification.
+- StatefulSet, DaemonSet, Service and PVC events also notify the entire namespace, as does the initial cache sync. Each notified MID runs its normal status calculation.
 
 **Sync Contents**:
 1. Get CR status -> deserialize into CustomResources

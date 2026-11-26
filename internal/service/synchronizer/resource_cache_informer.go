@@ -156,8 +156,8 @@ type nsEntry struct {
 
 	// midKeys tracks which SyncV2 registrations are active. Session lease keys
 	// make leader handover registrations distinct even for the same Middleware.
-	midKeys map[string]podSources
-	podView *podRouteView
+	midKeys map[string]routeSources
+	routing *routeView
 
 	// factory is the shared informer factory scoped to this namespace.
 	factory informers.SharedInformerFactory
@@ -175,8 +175,8 @@ func (e *nsEntry) addRegistration(midKey string) (added, active bool, refCount i
 	if _, exists := e.midKeys[midKey]; exists {
 		return false, true, e.refCount
 	}
-	e.midKeys[midKey] = podSources{}
-	e.podView = nil
+	e.midKeys[midKey] = routeSources{}
+	e.routing = nil
 	e.refCount++
 	return true, true, e.refCount
 }
@@ -188,7 +188,7 @@ func (e *nsEntry) removeRegistration(midKey string) (removed, shouldStop bool, r
 		return false, false, e.refCount
 	}
 	delete(e.midKeys, midKey)
-	e.podView = nil
+	e.routing = nil
 	e.refCount--
 	if e.refCount <= 0 {
 		e.refCount = 0
@@ -224,10 +224,10 @@ type NsInformerManager struct {
 	// entries maps namespace string to *nsEntry.
 	entries sync.Map
 
-	// podCallback can handle a Pod event when all its targets are known.
-	podCallback   func(string, sets.Set[string]) bool
-	eventCallback func(ns string)
-	callbackMu    sync.RWMutex
+	// targetCallback handles events whose affected sessions are all known.
+	targetCallback func(string, sets.Set[string]) bool
+	eventCallback  func(ns string)
+	callbackMu     sync.RWMutex
 
 	rootCtx    context.Context
 	rootCancel context.CancelFunc
@@ -239,20 +239,20 @@ func (m *NsInformerManager) SetEventCallback(fn func(ns string)) {
 	m.callbackMu.Lock()
 	defer m.callbackMu.Unlock()
 	m.eventCallback = fn
-	m.podCallback = nil
+	m.targetCallback = nil
 }
 
-// UseStatusDebouncers routes attributable Pod events to the affected sync sessions.
+// UseStatusDebouncers routes attributable workload events to the affected sync sessions.
 func (m *NsInformerManager) UseStatusDebouncers() {
 	m.callbackMu.Lock()
 	defer m.callbackMu.Unlock()
 	m.eventCallback = globalDebounceRegistry.NotifyNamespace
-	m.podCallback = globalDebounceRegistry.notifyRegisteredMIDs
+	m.targetCallback = globalDebounceRegistry.notifyRegisteredMIDs
 }
 
-func (m *NsInformerManager) notifyPodTargets(ns string, targets sets.Set[string]) bool {
+func (m *NsInformerManager) notifyTargets(ns string, targets sets.Set[string]) bool {
 	m.callbackMu.RLock()
-	fn := m.podCallback
+	fn := m.targetCallback
 	m.callbackMu.RUnlock()
 	return fn != nil && fn(ns, targets)
 }
@@ -304,7 +304,7 @@ func (m *NsInformerManager) Register(ctx context.Context, ns, midKey string) err
 			cancel:   nsCancel,
 			factory:  factory,
 			refCount: 1,
-			midKeys:  map[string]podSources{midKey: {}},
+			midKeys:  map[string]routeSources{midKey: {}},
 		}
 
 		actual, loaded := m.entries.LoadOrStore(ns, entry)
@@ -424,15 +424,15 @@ func (m *NsInformerManager) buildHandler(ns string) cache.ResourceEventHandlerFu
 func (m *NsInformerManager) registerHandlers(ns string, entry *nsEntry) {
 	factory := entry.factory
 	handler := m.buildHandler(ns)
-	pods := newPodEventHandler(ns, func() (podRouteView, bool) {
+	workloads := newWorkloadEventHandler(ns, func() (routeView, bool) {
 		m.callbackMu.RLock()
-		targeted := m.podCallback != nil
+		targeted := m.targetCallback != nil
 		m.callbackMu.RUnlock()
 		if !targeted {
-			return podRouteView{}, false
+			return routeView{}, false
 		}
-		return entry.podRouteSnapshot(ns)
-	}, m.notifyPodTargets, m.notifyNamespace)
+		return entry.routeSnapshot(ns)
+	}, m.notifyTargets, m.notifyNamespace)
 	mustAdd := func(informer cache.SharedIndexInformer, handler cache.ResourceEventHandlerFuncs) {
 		if _, err := informer.AddEventHandler(handler); err != nil {
 			// Non-fatal: log and continue; cache still works without callback.
@@ -441,10 +441,10 @@ func (m *NsInformerManager) registerHandlers(ns string, entry *nsEntry) {
 	}
 
 	mustAdd(factory.Apps().V1().StatefulSets().Informer(), handler)
-	mustAdd(factory.Apps().V1().Deployments().Informer(), handler)
+	mustAdd(factory.Apps().V1().Deployments().Informer(), workloads)
 	mustAdd(factory.Apps().V1().DaemonSets().Informer(), handler)
-	mustAdd(factory.Apps().V1().ReplicaSets().Informer(), handler)
-	mustAdd(factory.Core().V1().Pods().Informer(), pods)
+	mustAdd(factory.Apps().V1().ReplicaSets().Informer(), workloads)
+	mustAdd(factory.Core().V1().Pods().Informer(), workloads)
 	mustAdd(factory.Core().V1().Services().Informer(), handler)
 	mustAdd(factory.Core().V1().PersistentVolumeClaims().Informer(), handler)
 }

@@ -31,7 +31,7 @@ func TestNsInformerManager_FinalUnregisterRejectsStaleRegistration(t *testing.T)
 	canceled := make(chan struct{})
 	entry := &nsEntry{
 		cancel: func() { close(canceled) },
-		midKeys: map[string]podSources{
+		midKeys: map[string]routeSources{
 			"ns/mid#old": {},
 		},
 		refCount: 1,
@@ -51,7 +51,7 @@ func TestNsInformerManager_FinalUnregisterRejectsStaleRegistration(t *testing.T)
 
 	replacement := &nsEntry{
 		cancel:  func() {},
-		midKeys: make(map[string]podSources),
+		midKeys: make(map[string]routeSources),
 	}
 	manager.entries.Store("ns", replacement)
 	if added, active, _ := entry.addRegistration("ns/mid#new"); added || active {
@@ -75,7 +75,7 @@ func TestNsInformerManager_RegisterReplacesStoppedEntry(t *testing.T) {
 	stale := &nsEntry{
 		stopped:  true,
 		cancel:   func() {},
-		midKeys:  map[string]podSources{"ns/mid#old": {}},
+		midKeys:  map[string]routeSources{"ns/mid#old": {}},
 		refCount: 1,
 	}
 	manager.entries.Store("ns", stale)

@@ -368,9 +368,9 @@ func (r *MiddlewareReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			if !ok {
 				return true
 			}
-			// A referenced Pod may already belong to another MID. Refresh its
+			// A referenced workload may already belong to another MID. Refresh its
 			// observer even when this update also carries a status change.
-			synchronizer.NotifyPodReferenceChange(oldObj, newObj)
+			synchronizer.NotifyWorkloadReferenceChange(oldObj, newObj)
 
 			// Compare whether status has changed
 			if !equality.Semantic.DeepEqual(oldObj.Status, newObj.Status) {

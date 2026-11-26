@@ -371,15 +371,15 @@ func recomputeAndUpdateStatus(ctx context.Context, cli client.Client, cr *unstru
 		return
 	}
 
-	sources := podSources{
-		primary:     ownerCandidate{APIVersion: nowCr.GetAPIVersion(), Kind: nowCr.GetKind(), Name: nowCr.GetName(), UID: nowCr.GetUID()},
-		mid:         ownerCandidate{APIVersion: v1.GroupVersion.String(), Kind: "Middleware", Name: nowMid.Name, UID: nowMid.UID},
-		disasterPod: referencedPod(nowMid.Annotations[v1.AnnotationDisasterSyncer]),
-		dataPod:     referencedPod(nowMid.Annotations[v1.AnnotationDataSyncer]),
-		readStarted: readStarted,
+	sources := routeSources{
+		primary:        ownerCandidate{APIVersion: nowCr.GetAPIVersion(), Kind: nowCr.GetKind(), Name: nowCr.GetName(), UID: nowCr.GetUID()},
+		mid:            ownerCandidate{APIVersion: v1.GroupVersion.String(), Kind: "Middleware", Name: nowMid.Name, UID: nowMid.UID},
+		disasterSyncer: routedReference(nowMid.Annotations[v1.AnnotationDisasterSyncer]),
+		dataSyncer:     routedReference(nowMid.Annotations[v1.AnnotationDataSyncer]),
+		readStarted:    readStarted,
 	}
 	if mgr != nil {
-		mgr.recordPodSources(nowMid.Namespace, registrationKey, sources)
+		mgr.recordRouteSources(nowMid.Namespace, registrationKey, sources)
 	}
 
 	nowCrStatusBytes, err := json.Marshal(nowCr.Object["status"])
